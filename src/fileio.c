@@ -52,6 +52,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "buffer.h"
 #ifdef USE_PIECE_TABLE
 #include "piecetbl.h"
+#include "piece_table.h"
 #endif
 #include "coding.h"
 #include "window.h"
@@ -4942,9 +4943,47 @@ by calling `format-decode', which see.  */)
       emacs_fd_close (fd);
       clear_unwind_protect (fd_index);
 
-      /* Insert the data using insert_1_both which handles piece tables.
-	 Save/restore PT because insert_1_both moves point, but the
-	 post-processing code expects PT to remain at start of insertion.  */
+      /* Check for non-ASCII bytes - piece table only supports ASCII.
+	 If we find any byte >= 128, warn the user and fall back to
+	 gap buffer mode for safety.  */
+      bool has_non_ascii = false;
+      for (ptrdiff_t i = 0; i < file_size; i++)
+	{
+	  if ((unsigned char) file_data[i] >= 128)
+	    {
+	      has_non_ascii = true;
+	      break;
+	    }
+	}
+
+      if (has_non_ascii)
+	{
+	  /* File contains non-ASCII; disable piece table and insert
+	     using gap buffer instead.  We already have the data in
+	     memory, so we can insert it directly.  */
+	  message ("Warning: file contains non-ASCII; disabling piece table");
+	  /* Disable piece table for this buffer.  */
+	  if (current_buffer->text->piece_table)
+	    {
+	      pt_destroy (current_buffer->text->piece_table);
+	      current_buffer->text->piece_table = NULL;
+	    }
+	  current_buffer->text->using_piece_table = false;
+	  /* Insert using gap buffer.  Since piece table is now disabled,
+	     insert_1_both will use the gap buffer code path.  */
+	  if (file_size > 0)
+	    {
+	      ptrdiff_t saved_pt = PT;
+	      ptrdiff_t saved_pt_byte = PT_BYTE;
+	      insert_1_both (file_data, file_size, file_size, 0, 0, 0);
+	      TEMP_SET_PT_BOTH (saved_pt, saved_pt_byte);
+	    }
+	  xfree (file_data);
+	  inserted = file_size;
+	  goto handled;
+	}
+
+      /* ASCII-only file - use piece table.  */
       if (file_size > 0)
 	{
 	  ptrdiff_t saved_pt = PT;

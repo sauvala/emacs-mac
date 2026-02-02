@@ -480,7 +480,7 @@ The piece table integrates with Emacs through conditional compilation (`#ifdef U
 
 ### Current Limitations
 
-- **ASCII only**: Character position must equal byte position (no multibyte support yet)
+- **ASCII only**: Character position must equal byte position (no multibyte support yet). Files containing non-ASCII bytes (UTF-8, etc.) are automatically detected and loaded using the gap buffer instead, with a warning message.
 - **Undo not fully working**: Undo records may not capture all piece table operations
 - **Performance**: Regex search currently linearizes the entire visible region (temporary copy)
 - **Internal buffers excluded**: Buffers with names starting with a space (e.g., ` *temp*`, ` *Minibuf-0*`) never use piece table, even when `use-piece-table-by-default` is set. This is because the Lisp reader (`read`) doesn't work with piece table buffers yet.
