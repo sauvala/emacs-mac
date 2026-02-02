@@ -371,3 +371,138 @@ Key functions:
 - Gap movement is O(n) where n = distance to new position
 - Multibyte handling adds complexity to position calculations
 - Always maintains `gap_size` bytes of overhead
+
+## Piece Table Implementation (Experimental)
+
+An experimental piece table implementation is available as an alternative to the gap buffer. Piece tables offer O(log n) insertions and deletions at any position, making them potentially faster for random edits in large files.
+
+### Building with Piece Table Support
+
+```bash
+./configure --with-piece-table
+make
+```
+
+The `--with-piece-table` flag defines `USE_PIECE_TABLE` and compiles the piece table code.
+
+### Enabling Piece Table
+
+**Interactive Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `M-x piece-table-enable-default` | Enable piece table for all new buffers |
+| `M-x piece-table-disable-default` | Disable piece table for new buffers |
+| `M-x piece-table-toggle-default` | Toggle piece table for new buffers |
+| `M-x buffer-enable-piece-table` | Enable piece table on current buffer (must be empty) |
+
+**Lisp Functions:**
+
+| Function | Description |
+|----------|-------------|
+| `(buffer-using-piece-table-p)` | Returns `t` if current buffer uses piece table |
+| `(buffer-enable-piece-table)` | Enable piece table on current buffer (must be empty) |
+| `(piece-table-enable-default)` | Set `use-piece-table-by-default` to `t` |
+| `(piece-table-disable-default)` | Set `use-piece-table-by-default` to `nil` |
+| `(piece-table-toggle-default)` | Toggle `use-piece-table-by-default` |
+
+**Variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `use-piece-table-by-default` | When non-nil, new buffers use piece table storage |
+
+**Programmatic Usage:**
+```elisp
+;; Enable for all new buffers
+(setq use-piece-table-by-default t)
+
+;; Check if current buffer uses piece table
+(buffer-using-piece-table-p)
+
+;; Enable on specific empty buffer
+(with-current-buffer (get-buffer-create "*my-buffer*")
+  (buffer-enable-piece-table))
+```
+
+### Source Files
+
+| File | Purpose |
+|------|---------|
+| `src/piece_table.c` | Core piece table implementation (red-black tree) |
+| `src/piece_table.h` | Piece table data structures and API |
+| `src/piecetbl.c` | Emacs integration layer - wraps piece table for buffer operations |
+| `src/piecetbl.h` | Emacs piece table wrapper declarations |
+
+### Architecture
+
+The piece table uses a **red-black tree** for O(log n) lookups. Each node (piece) references either:
+- **Original buffer**: Initial file content (read-only)
+- **Add buffer**: All inserted text (append-only)
+
+```
+PieceTable
+    |
+    v
+Red-Black Tree of Pieces
+    |
+    +-- Piece 1: { source=ORIGINAL, start=0, length=100 }
+    +-- Piece 2: { source=ADD, start=0, length=15 }      <- inserted text
+    +-- Piece 3: { source=ORIGINAL, start=150, length=200 }
+```
+
+### Key Wrapper Functions (`src/piecetbl.c`)
+
+| Function | Purpose |
+|----------|---------|
+| `buffer_create_piece_table()` | Initialize piece table for a buffer |
+| `pt_insert_emacs()` | Insert text (handles Emacs 1-based positions) |
+| `pt_delete_emacs()` | Delete text range |
+| `pt_get_text_emacs()` | Extract text to a buffer |
+| `pt_char_at_emacs()` | Get single character at position |
+| `pt_get_contiguous_emacs()` | Get pointer to contiguous region |
+
+### Integration Points
+
+The piece table integrates with Emacs through conditional compilation (`#ifdef USE_PIECE_TABLE`):
+
+1. **Buffer creation** (`buffer.c`): Optionally creates piece table based on `use-piece-table-by-default`
+
+2. **Insert/delete** (`insdel.c`): `insert_1_both()` and `del_range_2()` route to piece table when enabled
+
+3. **Text access** (`buffer.h`): `FETCH_BYTE` and `BYTE_POS_ADDR` macros check `using_piece_table` flag
+
+4. **Regex search** (`search.c`): Linearizes buffer content before `re_search_2` (temporary copy for correctness)
+
+5. **Replace** (`insdel.c`): `replace_range()` has piece table code path for search-and-replace
+
+6. **File I/O** (`fileio.c`): `insert-file-contents` and `write-region` handle piece table buffers
+
+### Current Limitations
+
+- **ASCII only**: Character position must equal byte position (no multibyte support yet)
+- **Undo not fully working**: Undo records may not capture all piece table operations
+- **Performance**: Regex search currently linearizes the entire visible region (temporary copy)
+- **Internal buffers excluded**: Buffers with names starting with a space (e.g., ` *temp*`, ` *Minibuf-0*`) never use piece table, even when `use-piece-table-by-default` is set. This is because the Lisp reader (`read`) doesn't work with piece table buffers yet.
+- **Experimental**: Not recommended for production use
+
+### Data Structure in `buffer_text`
+
+```c
+struct buffer_text {
+    /* ... existing gap buffer fields ... */
+#ifdef USE_PIECE_TABLE
+    struct PieceTable *piece_table;  /* Piece table handle */
+    bool using_piece_table;          /* True if this buffer uses piece table */
+#endif
+};
+```
+
+### Design Rationale
+
+The implementation keeps the gap buffer code intact and adds piece table as an opt-in alternative:
+
+1. **Coexistence**: Both storage backends can exist in the same Emacs instance
+2. **Gradual migration**: Individual buffers can be converted
+3. **Fallback**: If piece table has issues, gap buffer remains available
+4. **Minimal changes**: Core Emacs code uses abstraction macros that check `using_piece_table`

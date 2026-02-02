@@ -644,6 +644,12 @@ even if it is dead.  The return value is never nil.  */)
 #ifdef USE_PIECE_TABLE
   b->text->using_piece_table = false;
   b->text->piece_table = NULL;
+  /* Enable piece table for non-internal buffers only.
+     Internal buffers (names starting with space) are used for parsing,
+     temporary storage, etc. and the Lisp reader doesn't work with
+     piece table buffers yet.  */
+  if (use_piece_table_by_default && SREF (buffer_or_name, 0) != ' ')
+    buffer_create_piece_table (b, NULL, 0);
 #endif
   b->text->redisplay = false;
 
@@ -3149,6 +3155,45 @@ If INSERT-TEST is non-nil, directly test pt_insert.  */)
     }
 
   return Qt;
+}
+
+DEFUN ("piece-table-enable-default", Fpiece_table_enable_default,
+       Spiece_table_enable_default, 0, 0, "",
+       doc: /* Enable piece table storage for all newly created buffers.
+This sets `use-piece-table-by-default' to t.  Existing buffers are
+not affected.  This is an experimental feature.  */)
+  (void)
+{
+  use_piece_table_by_default = true;
+  message ("Piece table enabled for new buffers");
+  return Qt;
+}
+
+DEFUN ("piece-table-disable-default", Fpiece_table_disable_default,
+       Spiece_table_disable_default, 0, 0, "",
+       doc: /* Disable piece table storage for newly created buffers.
+This sets `use-piece-table-by-default' to nil.  Existing buffers are
+not affected.  New buffers will use the traditional gap buffer.  */)
+  (void)
+{
+  use_piece_table_by_default = false;
+  message ("Piece table disabled for new buffers");
+  return Qnil;
+}
+
+DEFUN ("piece-table-toggle-default", Fpiece_table_toggle_default,
+       Spiece_table_toggle_default, 0, 0, "",
+       doc: /* Toggle piece table storage for newly created buffers.
+If `use-piece-table-by-default' is nil, enable it; otherwise disable it.
+Return t if piece table is now enabled, nil otherwise.  */)
+  (void)
+{
+  use_piece_table_by_default = !use_piece_table_by_default;
+  if (use_piece_table_by_default)
+    message ("Piece table enabled for new buffers");
+  else
+    message ("Piece table disabled for new buffers");
+  return use_piece_table_by_default ? Qt : Qnil;
 }
 #endif /* USE_PIECE_TABLE */
 
@@ -6076,6 +6121,17 @@ If `delete-auto-save-files' is nil, any autosave deletion is inhibited.  */);
 This is the default.  If nil, auto-save file deletion is inhibited.  */);
   delete_auto_save_files = 1;
 
+#ifdef USE_PIECE_TABLE
+  DEFVAR_BOOL ("use-piece-table-by-default", use_piece_table_by_default,
+	       doc: /* Non-nil means new buffers use piece table storage by default.
+When non-nil, newly created buffers will use the piece table data
+structure for text storage instead of the traditional gap buffer.
+This is an experimental feature for improved performance on random
+insertions and deletions in large files.  Currently only ASCII text
+is supported.  */);
+  use_piece_table_by_default = 0;
+#endif
+
   DEFVAR_LISP ("case-fold-search", Vcase_fold_search,
 	       doc: /* Non-nil if searches and matches should ignore case.  */);
   Vcase_fold_search = Qt;
@@ -6195,6 +6251,9 @@ There is no reason to change that value except for debugging purposes.  */);
   defsubr (&Sbuffer_using_piece_table_p);
   defsubr (&Sbuffer_enable_piece_table);
   defsubr (&Sbuffer_piece_table_debug);
+  defsubr (&Spiece_table_enable_default);
+  defsubr (&Spiece_table_disable_default);
+  defsubr (&Spiece_table_toggle_default);
 #endif
 
   defsubr (&Soverlayp);
