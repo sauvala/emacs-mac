@@ -1557,6 +1557,96 @@ replace_range (ptrdiff_t from, ptrdiff_t to, Lisp_Object new,
       insbeg = 0;
       inschars = SCHARS (new);
     }
+
+#ifdef USE_PIECE_TABLE
+  /* For piece table buffers, implement replace as delete + insert.
+     This handles the common case where NEW is a string.  */
+  if (current_buffer->text->using_piece_table && STRINGP (new))
+    {
+      ptrdiff_t nchars_del = to - from;
+      ptrdiff_t nbytes_del, from_byte, to_byte;
+      ptrdiff_t insbytes = SBYTES (new);
+      Lisp_Object deletion = Qnil;
+
+      check_markers ();
+
+      if (run_mod_hooks)
+	{
+	  prepare_to_modify_buffer (from, to, &from);
+	  to = from + nchars_del;
+	}
+
+      /* Make args be valid.  */
+      if (from < BEGV)
+	from = BEGV;
+      if (to > ZV)
+	to = ZV;
+
+      from_byte = CHAR_TO_BYTE (from);
+      to_byte = CHAR_TO_BYTE (to);
+      nchars_del = to - from;
+      nbytes_del = to_byte - from_byte;
+
+      if (nbytes_del <= 0 && inschars == 0)
+	return;
+
+      /* Save text for undo before deleting.  */
+      if (! EQ (BVAR (current_buffer, undo_list), Qt))
+	deletion = make_buffer_string_both (from, from_byte, to, to_byte, 1);
+
+      /* Delete the old text.  */
+      if (nbytes_del > 0)
+	{
+	  pt_delete_emacs (from_byte, nbytes_del);
+	  ZV -= nchars_del;
+	  Z -= nchars_del;
+	  ZV_BYTE -= nbytes_del;
+	  Z_BYTE -= nbytes_del;
+	  GPT = Z;
+	  GPT_BYTE = Z_BYTE;
+	}
+
+      /* Insert the new text.  */
+      if (inschars > 0)
+	{
+	  pt_insert_emacs (from_byte, (const char *) SDATA (new), insbytes);
+	  ZV += inschars;
+	  Z += inschars;
+	  ZV_BYTE += insbytes;
+	  Z_BYTE += insbytes;
+	  GPT = Z;
+	  GPT_BYTE = Z_BYTE;
+	}
+
+      /* Record for undo.  */
+      if (!NILP (deletion))
+	{
+	  record_insert (from + SCHARS (deletion), inschars);
+	  record_delete (from, deletion, false);
+	}
+
+      /* Adjust markers.  */
+      adjust_markers_for_replace (from, from_byte, nchars_del, nbytes_del,
+				  inschars, insbytes);
+
+      /* Handle intervals.  */
+      offset_intervals (current_buffer, from, inschars - nchars_del);
+      INTERVAL intervals = string_intervals (new);
+      graft_intervals_into_buffer (intervals, from, inschars,
+				   current_buffer, inherit);
+
+      /* Adjust match data if needed.  */
+      if (adjust_match_data)
+	update_search_regs (from, to, from + inschars);
+
+      signal_after_change (from, nchars_del, inschars);
+      update_compositions (from, from + inschars, CHECK_BORDER);
+
+      check_markers ();
+      return;
+    }
+#endif
+
   else if (BUFFERP (new))
     {
       insbuf = XBUFFER (new);

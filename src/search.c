@@ -27,6 +27,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "lisp.h"
 #include "character.h"
 #include "buffer.h"
+#ifdef USE_PIECE_TABLE
+#include "piecetbl.h"
+#endif
 #include "syntax.h"
 #include "charset.h"
 #include "region-cache.h"
@@ -1176,26 +1179,52 @@ search_buffer_re (Lisp_Object string, ptrdiff_t pos, ptrdiff_t pos_byte,
 
   maybe_quit ();		/* Do a pending quit right away,
 				   to avoid paradoxical behavior */
+
+  specpdl_ref count = SPECPDL_INDEX ();
+
   /* Get pointers and sizes of the two strings
      that make up the visible portion of the buffer. */
 
-  p1 = BEGV_ADDR;
-  s1 = GPT_BYTE - BEGV_BYTE;
-  p2 = GAP_END_ADDR;
-  s2 = ZV_BYTE - GPT_BYTE;
-  if (s1 < 0)
+#ifdef USE_PIECE_TABLE
+  /* For piece table buffers, linearize the visible portion into
+     contiguous memory since re_search_2 assumes at most 2 contiguous
+     regions (which is the gap buffer model).  */
+  if (current_buffer->text->using_piece_table)
     {
-      p2 = p1;
-      s2 = ZV_BYTE - BEGV_BYTE;
-      s1 = 0;
-    }
-  if (s2 < 0)
-    {
-      s1 = ZV_BYTE - BEGV_BYTE;
+      ptrdiff_t visible_bytes = ZV_BYTE - BEGV_BYTE;
+      if (visible_bytes > 0)
+	{
+	  unsigned char *pt_linearized = xmalloc (visible_bytes);
+	  record_unwind_protect_ptr (xfree, pt_linearized);
+	  pt_get_text_emacs (BEGV_BYTE, visible_bytes, (char *) pt_linearized);
+	  p1 = pt_linearized;
+	}
+      else
+	p1 = NULL;
+      s1 = visible_bytes;
+      p2 = NULL;
       s2 = 0;
     }
+  else
+#endif
+    {
+      p1 = BEGV_ADDR;
+      s1 = GPT_BYTE - BEGV_BYTE;
+      p2 = GAP_END_ADDR;
+      s2 = ZV_BYTE - GPT_BYTE;
+      if (s1 < 0)
+	{
+	  p2 = p1;
+	  s2 = ZV_BYTE - BEGV_BYTE;
+	  s1 = 0;
+	}
+      if (s2 < 0)
+	{
+	  s1 = ZV_BYTE - BEGV_BYTE;
+	  s2 = 0;
+	}
+    }
 
-  specpdl_ref count = SPECPDL_INDEX ();
   freeze_buffer_relocation ();
   freeze_pattern (cache_entry);
 
