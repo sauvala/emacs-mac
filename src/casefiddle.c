@@ -457,7 +457,9 @@ do_casify_unibyte_region (struct casing_context *ctx,
       if (first < 0)
 	first = pos;
 
-      FETCH_BYTE (pos) = make_char_unibyte (cased);
+      /* Note: FETCH_BYTE_LVALUE only works with gap buffers.
+	 Piece table buffers would require different handling.  */
+      FETCH_BYTE_LVALUE (pos) = make_char_unibyte (cased);
     }
 
   *startp = first;

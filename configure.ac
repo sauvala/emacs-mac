@@ -571,6 +571,11 @@ AC_ARG_WITH([mac],[AS_HELP_STRING([--with-mac],
 [use GUI on macOS.
 On by default on macOS.])],[],[with_mac=maybe])
 OPTION_DEFAULT_OFF([mac-metal],[use Metal framework in application-side double buffering (experimental)])
+OPTION_DEFAULT_OFF([piece-table],[use piece table instead of gap buffer for text storage (experimental)])
+if test "$with_piece_table" = yes; then
+  AC_DEFINE([USE_PIECE_TABLE], [1],
+    [Define to 1 to use piece table instead of gap buffer for text storage.])
+fi
 OPTION_DEFAULT_OFF([ns],[use Nextstep (macOS Cocoa or GNUstep) windowing system.])
 OPTION_DEFAULT_OFF([w32], [use native MS Windows GUI in a Cygwin build])
 OPTION_DEFAULT_OFF([pgtk], [use GTK to support window systems other than X])

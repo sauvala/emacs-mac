@@ -27,6 +27,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "lisp.h"
 #include "itree.h"
 
+#ifdef USE_PIECE_TABLE
+/* Forward declaration for piece table.  */
+struct PieceTable;
+#endif
+
 INLINE_HEADER_BEGIN
 
 /* Accessing the parameters of the current buffer.  */
@@ -214,9 +219,37 @@ enum { GAP_BYTES_MIN = 20 };
 extern ptrdiff_t advance_to_char_boundary (ptrdiff_t byte_pos);
 
 /* Return the byte at byte position N.
-   Do not check that the position is in range.  */
+   Do not check that the position is in range.
 
+   WARNING: This macro should NOT be used as an lvalue (for assignment)
+   when USE_PIECE_TABLE is defined, as piece tables don't support
+   in-place modification.  Use pt_insert_emacs/pt_delete_emacs instead.
+   Code that needs to modify single bytes should use a helper function.  */
+
+#ifdef USE_PIECE_TABLE
+/* When using piece table, we need a function call to access bytes.
+   For gap buffer, we can directly dereference.
+
+   Note: This macro returns an int when using piece table (so it can't
+   be an lvalue), but returns an lvalue-capable expression for gap buffer.
+   Code that assigns to FETCH_BYTE() only works with gap buffers.  */
+extern int pt_char_at_emacs (ptrdiff_t n);
+#define FETCH_BYTE(n)						\
+  (current_buffer->text->using_piece_table			\
+   ? (int) pt_char_at_emacs (n)					\
+   : (int) *BYTE_POS_ADDR_GAP (n))
+/* Gap-buffer version of BYTE_POS_ADDR for use in conditional.
+   Returns unsigned char * like the original BYTE_POS_ADDR.  */
+#define BYTE_POS_ADDR_GAP(n)					\
+  (((n) < GPT_BYTE ? 0 : GAP_SIZE) + (n) + BEG_ADDR - BEG_BYTE)
+
+/* Macro for gap-buffer-only code that needs FETCH_BYTE as lvalue.
+   This will fail if called on a piece table buffer.  */
+#define FETCH_BYTE_LVALUE(n) (*BYTE_POS_ADDR_GAP (n))
+#else
 #define FETCH_BYTE(n) (*BYTE_POS_ADDR (n))
+#define FETCH_BYTE_LVALUE(n) (*BYTE_POS_ADDR (n))
+#endif
 
 /* Define the actual buffer data structures.  */
 
@@ -301,6 +334,15 @@ struct buffer_text
 
     /* True if it needs to be redisplayed.  */
     bool_bf redisplay : 1;
+
+#ifdef USE_PIECE_TABLE
+    /* True if this buffer uses piece table instead of gap buffer.  */
+    bool_bf using_piece_table : 1;
+
+    /* Pointer to the piece table data structure.  Only valid when
+       using_piece_table is true.  */
+    struct PieceTable *piece_table;
+#endif
   };
 
 /* Most code should use this macro to access Lisp fields in struct buffer.  */
@@ -892,17 +934,41 @@ bset_text_conversion_style (struct buffer *b, Lisp_Object val)
 /* BUFFER_CEILING_OF (resp. BUFFER_FLOOR_OF), when applied to n, return
    the max (resp. min) p such that
 
-   BYTE_POS_ADDR (p) - BYTE_POS_ADDR (n) == p - n       */
+   BYTE_POS_ADDR (p) - BYTE_POS_ADDR (n) == p - n
+
+   For gap buffers, this is the position where we hit the gap.
+   For piece tables, this is the end of the current piece.  */
+
+#ifdef USE_PIECE_TABLE
+extern ptrdiff_t pt_contiguous_end_emacs (ptrdiff_t bytepos);
+extern ptrdiff_t pt_contiguous_start_emacs (ptrdiff_t bytepos);
+#endif
 
 INLINE ptrdiff_t
 BUFFER_CEILING_OF (ptrdiff_t bytepos)
 {
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
+    {
+      ptrdiff_t piece_end = pt_contiguous_end_emacs (bytepos);
+      /* Clamp to accessible region (ZV).  */
+      return piece_end < ZV_BYTE ? piece_end : ZV_BYTE - 1;
+    }
+#endif
   return (bytepos < GPT_BYTE && GPT < ZV ? GPT_BYTE : ZV_BYTE) - 1;
 }
 
 INLINE ptrdiff_t
 BUFFER_FLOOR_OF (ptrdiff_t bytepos)
 {
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
+    {
+      ptrdiff_t piece_start = pt_contiguous_start_emacs (bytepos);
+      /* Clamp to accessible region (BEGV).  */
+      return piece_start > BEGV_BYTE ? piece_start : BEGV_BYTE;
+    }
+#endif
   return BEGV <= GPT && GPT_BYTE <= bytepos ? GPT_BYTE : BEGV_BYTE;
 }
 
@@ -1069,11 +1135,26 @@ SET_BUF_PT_BOTH (struct buffer *buf, ptrdiff_t charpos, ptrdiff_t byte)
 /* See the important WARNING above about using the 'char *' pointers
    returned by these functions.  */
 
-/* Return the address of byte position N in current buffer.  */
+#ifdef USE_PIECE_TABLE
+/* Forward declare piece table access function.  */
+extern const unsigned char *pt_get_contiguous_emacs (ptrdiff_t n);
+#endif
+
+/* Return the address of byte position N in current buffer.
+
+   WARNING: When USE_PIECE_TABLE is defined and the buffer uses a piece
+   table, the returned pointer is only valid for reading contiguous data
+   up to BUFFER_CEILING_OF(n).  Code that needs to read beyond that must
+   be prepared to call this function again after crossing piece
+   boundaries.  */
 
 INLINE unsigned char *
 BYTE_POS_ADDR (ptrdiff_t n)
 {
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
+    return (unsigned char *) pt_get_contiguous_emacs (n);
+#endif
   return (n < GPT_BYTE ? 0 : GAP_SIZE) + n + BEG_ADDR - BEG_BYTE;
 }
 
@@ -1082,6 +1163,13 @@ BYTE_POS_ADDR (ptrdiff_t n)
 INLINE unsigned char *
 CHAR_POS_ADDR (ptrdiff_t n)
 {
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
+    {
+      ptrdiff_t bytepos = buf_charpos_to_bytepos (current_buffer, n);
+      return (unsigned char *) pt_get_contiguous_emacs (bytepos);
+    }
+#endif
   return ((n < GPT ? 0 : GAP_SIZE)
 	  + buf_charpos_to_bytepos (current_buffer, n)
 	  + BEG_ADDR - BEG_BYTE);

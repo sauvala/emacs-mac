@@ -52,6 +52,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "treesit.h"
 #endif
 
+#ifdef USE_PIECE_TABLE
+#include "piecetbl.h"
+#endif
+
 /* Work around GCC bug 109847
    https://gcc.gnu.org/bugzilla/show_bug.cgi?id=109847
    which causes GCC to mistakenly complain about
@@ -637,6 +641,10 @@ even if it is dead.  The return value is never nil.  */)
   BUF_BEG_UNCHANGED (b) = 0;
   *(BUF_GPT_ADDR (b)) = *(BUF_Z_ADDR (b)) = 0; /* Put an anchor '\0'.  */
   b->text->inhibit_shrinking = false;
+#ifdef USE_PIECE_TABLE
+  b->text->using_piece_table = false;
+  b->text->piece_table = NULL;
+#endif
   b->text->redisplay = false;
 
   b->newline_cache = 0;
@@ -3048,6 +3056,102 @@ the normal hook `change-major-mode-hook'.  */)
   return Qnil;
 }
 
+#ifdef USE_PIECE_TABLE
+DEFUN ("buffer-using-piece-table-p", Fbuffer_using_piece_table_p,
+       Sbuffer_using_piece_table_p, 0, 1, 0,
+       doc: /* Return t if BUFFER is using piece table storage.
+BUFFER defaults to the current buffer.  This is an experimental
+feature for testing the piece table text storage implementation.  */)
+  (Lisp_Object buffer)
+{
+  struct buffer *b;
+  if (NILP (buffer))
+    b = current_buffer;
+  else
+    {
+      CHECK_BUFFER (buffer);
+      b = XBUFFER (buffer);
+    }
+
+  return b->text->using_piece_table ? Qt : Qnil;
+}
+
+DEFUN ("buffer-enable-piece-table", Fbuffer_enable_piece_table,
+       Sbuffer_enable_piece_table, 0, 1, 0,
+       doc: /* Enable piece table storage for BUFFER.
+BUFFER defaults to the current buffer.  The buffer must be empty.
+This is an experimental feature for testing.
+Return t on success, nil if the buffer is not empty or already using
+piece table.  */)
+  (Lisp_Object buffer)
+{
+  struct buffer *b;
+  if (NILP (buffer))
+    b = current_buffer;
+  else
+    {
+      CHECK_BUFFER (buffer);
+      b = XBUFFER (buffer);
+    }
+
+  /* Don't convert if already using piece table.  */
+  if (b->text->using_piece_table)
+    return Qnil;
+
+  /* Buffer must be empty for now.  */
+  if (BUF_Z (b) > BUF_BEG (b))
+    error ("Cannot enable piece table on non-empty buffer");
+
+  /* Create an empty piece table.  */
+  buffer_create_piece_table (b, NULL, 0);
+
+  return b->text->using_piece_table ? Qt : Qnil;
+}
+
+DEFUN ("buffer-piece-table-debug", Fbuffer_piece_table_debug,
+       Sbuffer_piece_table_debug, 0, 1, 0,
+       doc: /* Print debug info about current buffer's piece table.
+If INSERT-TEST is non-nil, directly test pt_insert.  */)
+  (Lisp_Object insert_test)
+{
+  if (!current_buffer->text->using_piece_table)
+    {
+      message ("Not using piece table");
+      return Qnil;
+    }
+
+  struct PieceTable *pt = current_buffer->text->piece_table;
+  if (!pt)
+    {
+      message ("piece_table is NULL!");
+      return Qnil;
+    }
+
+  message ("piece_table: total_length=%zu, Z=%ld, Z_BYTE=%ld",
+	   pt_length_emacs (), (long)Z, (long)Z_BYTE);
+
+  if (!NILP (insert_test))
+    {
+      /* Direct test of pt_insert */
+      int result = pt_insert_emacs (BEG_BYTE, "TEST", 4);
+      message ("pt_insert_emacs returned %d, new total_length=%zu",
+	       result, pt_length_emacs ());
+    }
+
+  /* Test pt_get_text */
+  char buf[256];
+  memset (buf, 0, sizeof (buf));
+  ptrdiff_t len = pt_length_emacs ();
+  if (len > 0 && len < 200)
+    {
+      pt_get_text_emacs (BEG_BYTE, len, buf);
+      message ("Buffer content: \"%s\"", buf);
+    }
+
+  return Qt;
+}
+#endif /* USE_PIECE_TABLE */
+
 
 /* Find all the overlays in the current buffer that overlap the range
    [BEG, END).
@@ -4658,6 +4762,13 @@ free_buffer_text (struct buffer *b)
 {
   block_input ();
 
+#ifdef USE_PIECE_TABLE
+  if (b->text->using_piece_table)
+    {
+      buffer_destroy_piece_table (b);
+    }
+  else
+#endif
   if (!pdumper_object_p (b->text->beg))
     {
 #if defined USE_MMAP_FOR_BUFFERS
@@ -6079,6 +6190,12 @@ There is no reason to change that value except for debugging purposes.  */);
   defsubr (&Sbuffer_swap_text);
   defsubr (&Sset_buffer_multibyte);
   defsubr (&Skill_all_local_variables);
+
+#ifdef USE_PIECE_TABLE
+  defsubr (&Sbuffer_using_piece_table_p);
+  defsubr (&Sbuffer_enable_piece_table);
+  defsubr (&Sbuffer_piece_table_debug);
+#endif
 
   defsubr (&Soverlayp);
   defsubr (&Smake_overlay);

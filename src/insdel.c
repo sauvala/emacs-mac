@@ -35,6 +35,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "treesit.h"
 #endif
 
+#ifdef USE_PIECE_TABLE
+#include "piecetbl.h"
+#endif
+
 static void insert_from_string_1 (Lisp_Object, ptrdiff_t, ptrdiff_t, ptrdiff_t,
 				  ptrdiff_t, bool, bool);
 static void insert_from_buffer_1 (struct buffer *, ptrdiff_t, ptrdiff_t, bool);
@@ -910,34 +914,58 @@ insert_1_both (const char *string,
        or make it smaller.  */
     prepare_to_modify_buffer (PT, PT, NULL);
 
-  if (PT != GPT)
-    move_gap_both (PT, PT_BYTE);
-  if (GAP_SIZE < nbytes)
-    make_gap (nbytes - GAP_SIZE);
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
+    {
+      /* Record insertion for undo.  */
+      record_insert (PT, nchars);
+      modiff_incr (&MODIFF, nchars);
+      CHARS_MODIFF = MODIFF;
+
+      /* Insert into piece table.  */
+      pt_insert_emacs (PT_BYTE, string, nbytes);
+
+      /* Update buffer positions.  */
+      ZV += nchars;
+      Z += nchars;
+      ZV_BYTE += nbytes;
+      Z_BYTE += nbytes;
+      /* Keep GPT at Z (no gap in piece table mode).  */
+      GPT = Z;
+      GPT_BYTE = Z_BYTE;
+    }
+  else
+#endif
+    {
+      if (PT != GPT)
+	move_gap_both (PT, PT_BYTE);
+      if (GAP_SIZE < nbytes)
+	make_gap (nbytes - GAP_SIZE);
 
 #ifdef BYTE_COMBINING_DEBUG
-  if (count_combining_before (string, nbytes, PT, PT_BYTE)
-      || count_combining_after (string, nbytes, PT, PT_BYTE))
-    emacs_abort ();
+      if (count_combining_before (string, nbytes, PT, PT_BYTE)
+	  || count_combining_after (string, nbytes, PT, PT_BYTE))
+	emacs_abort ();
 #endif
 
-  /* Record deletion of the surrounding text that combines with
-     the insertion.  This, together with recording the insertion,
-     will add up to the right stuff in the undo list.  */
-  record_insert (PT, nchars);
-  modiff_incr (&MODIFF, nchars);
-  CHARS_MODIFF = MODIFF;
+      /* Record deletion of the surrounding text that combines with
+	 the insertion.  This, together with recording the insertion,
+	 will add up to the right stuff in the undo list.  */
+      record_insert (PT, nchars);
+      modiff_incr (&MODIFF, nchars);
+      CHARS_MODIFF = MODIFF;
 
-  memcpy (GPT_ADDR, string, nbytes);
+      memcpy (GPT_ADDR, string, nbytes);
 
-  GAP_SIZE -= nbytes;
-  GPT += nchars;
-  ZV += nchars;
-  Z += nchars;
-  GPT_BYTE += nbytes;
-  ZV_BYTE += nbytes;
-  Z_BYTE += nbytes;
-  if (GAP_SIZE > 0) *(GPT_ADDR) = 0; /* Put an anchor.  */
+      GAP_SIZE -= nbytes;
+      GPT += nchars;
+      ZV += nchars;
+      Z += nchars;
+      GPT_BYTE += nbytes;
+      ZV_BYTE += nbytes;
+      Z_BYTE += nbytes;
+      if (GAP_SIZE > 0) *(GPT_ADDR) = 0; /* Put an anchor.  */
+    }
 
   eassert (GPT <= GPT_BYTE);
 
@@ -1043,40 +1071,96 @@ insert_from_string_1 (Lisp_Object string, ptrdiff_t pos, ptrdiff_t pos_byte,
      or make it smaller.  */
   prepare_to_modify_buffer (PT, PT, NULL);
 
-  if (PT != GPT)
-    move_gap_both (PT, PT_BYTE);
-  if (GAP_SIZE < outgoing_nbytes)
-    make_gap (outgoing_nbytes - GAP_SIZE);
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
+    {
+      /* Piece table path: we need to handle multibyte conversion.
+	 For simplicity, convert to a temp buffer first if needed.  */
+      const char *insert_data;
+      ptrdiff_t insert_bytes;
+      char *temp_buffer = NULL;
 
-  /* Copy the string text into the buffer, perhaps converting
-     between single-byte and multibyte.  */
-  copy_text (SDATA (string) + pos_byte, GPT_ADDR, nbytes,
-	     STRING_MULTIBYTE (string),
-	     ! NILP (BVAR (current_buffer, enable_multibyte_characters)));
+      bool buf_multibyte = !NILP (BVAR (current_buffer, enable_multibyte_characters));
+      bool str_multibyte = STRING_MULTIBYTE (string);
+
+      if (buf_multibyte == str_multibyte)
+	{
+	  /* No conversion needed.  */
+	  insert_data = (const char *) SDATA (string) + pos_byte;
+	  insert_bytes = nbytes;
+	}
+      else if (buf_multibyte && !str_multibyte)
+	{
+	  /* Convert unibyte string to multibyte.  */
+	  temp_buffer = xmalloc (outgoing_nbytes);
+	  copy_text (SDATA (string) + pos_byte, (unsigned char *) temp_buffer,
+		     nbytes, 0, 1);
+	  insert_data = temp_buffer;
+	  insert_bytes = outgoing_nbytes;
+	}
+      else
+	{
+	  /* Multibyte string to unibyte buffer - use the byte count.  */
+	  insert_data = (const char *) SDATA (string) + pos_byte;
+	  insert_bytes = nchars;  /* In unibyte, chars == bytes.  */
+	}
+
+      record_insert (PT, nchars);
+      modiff_incr (&MODIFF, nchars);
+      CHARS_MODIFF = MODIFF;
+
+      /* Insert into piece table.  */
+      pt_insert_emacs (PT_BYTE, insert_data, insert_bytes);
+
+      if (temp_buffer)
+	xfree (temp_buffer);
+
+      /* Update buffer positions.  */
+      ZV += nchars;
+      Z += nchars;
+      ZV_BYTE += outgoing_nbytes;
+      Z_BYTE += outgoing_nbytes;
+      GPT = Z;
+      GPT_BYTE = Z_BYTE;
+    }
+  else
+#endif
+    {
+      if (PT != GPT)
+	move_gap_both (PT, PT_BYTE);
+      if (GAP_SIZE < outgoing_nbytes)
+	make_gap (outgoing_nbytes - GAP_SIZE);
+
+      /* Copy the string text into the buffer, perhaps converting
+	 between single-byte and multibyte.  */
+      copy_text (SDATA (string) + pos_byte, GPT_ADDR, nbytes,
+		 STRING_MULTIBYTE (string),
+		 ! NILP (BVAR (current_buffer, enable_multibyte_characters)));
 
 #ifdef BYTE_COMBINING_DEBUG
-  /* We have copied text into the gap, but we have not altered
-     PT or PT_BYTE yet.  So we can pass PT and PT_BYTE
-     to these functions and get the same results as we would
-     have got earlier on.  Meanwhile, PT_ADDR does point to
-     the text that has been stored by copy_text.  */
-  if (count_combining_before (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE)
-      || count_combining_after (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE))
-    emacs_abort ();
+      /* We have copied text into the gap, but we have not altered
+	 PT or PT_BYTE yet.  So we can pass PT and PT_BYTE
+	 to these functions and get the same results as we would
+	 have got earlier on.  Meanwhile, PT_ADDR does point to
+	 the text that has been stored by copy_text.  */
+      if (count_combining_before (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE)
+	  || count_combining_after (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE))
+	emacs_abort ();
 #endif
 
-  record_insert (PT, nchars);
-  modiff_incr (&MODIFF, nchars);
-  CHARS_MODIFF = MODIFF;
+      record_insert (PT, nchars);
+      modiff_incr (&MODIFF, nchars);
+      CHARS_MODIFF = MODIFF;
 
-  GAP_SIZE -= outgoing_nbytes;
-  GPT += nchars;
-  ZV += nchars;
-  Z += nchars;
-  GPT_BYTE += outgoing_nbytes;
-  ZV_BYTE += outgoing_nbytes;
-  Z_BYTE += outgoing_nbytes;
-  if (GAP_SIZE > 0) *(GPT_ADDR) = 0; /* Put an anchor.  */
+      GAP_SIZE -= outgoing_nbytes;
+      GPT += nchars;
+      ZV += nchars;
+      Z += nchars;
+      GPT_BYTE += outgoing_nbytes;
+      ZV_BYTE += outgoing_nbytes;
+      Z_BYTE += outgoing_nbytes;
+      if (GAP_SIZE > 0) *(GPT_ADDR) = 0; /* Put an anchor.  */
+    }
 
   eassert (GPT <= GPT_BYTE);
 
@@ -2008,52 +2092,93 @@ del_range_2 (ptrdiff_t from, ptrdiff_t from_byte,
 			     BUF_TS_LINECOL_POINT (current_buffer));
 #endif
 
-  /* Make sure the gap is somewhere in or next to what we are deleting.  */
-  if (from > GPT)
-    gap_right (from, from_byte);
-  if (to < GPT)
-    gap_left (to, to_byte, 0);
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
+    {
+      /* Get the deleted text for undo (if needed).  */
+      if (ret_string || ! EQ (BVAR (current_buffer, undo_list), Qt))
+	deletion = make_buffer_string_both (from, from_byte, to, to_byte, 1);
+      else
+	deletion = Qnil;
+
+      /* Record marker adjustments, and text deletion into undo history.  */
+      record_delete (from, deletion, true);
+
+      /* Relocate all markers.  */
+      adjust_markers_for_delete (from, from_byte, to, to_byte);
+
+      modiff_incr (&MODIFF, nchars_del);
+      CHARS_MODIFF = MODIFF;
+
+      /* Relocate point as if it were a marker.  */
+      if (from < PT)
+	adjust_point (from - min (PT, to),
+		      from_byte - min (PT_BYTE, to_byte));
+
+      offset_intervals (current_buffer, from, - nchars_del);
+
+      /* Delete from piece table.  */
+      pt_delete_emacs (from_byte, nbytes_del);
+
+      /* Update buffer positions.  */
+      ZV -= nchars_del;
+      Z -= nchars_del;
+      ZV_BYTE -= nbytes_del;
+      Z_BYTE -= nbytes_del;
+      /* Keep GPT at Z (no gap in piece table mode).  */
+      GPT = Z;
+      GPT_BYTE = Z_BYTE;
+    }
+  else
+#endif
+    {
+      /* Make sure the gap is somewhere in or next to what we are deleting.  */
+      if (from > GPT)
+	gap_right (from, from_byte);
+      if (to < GPT)
+	gap_left (to, to_byte, 0);
 
 #ifdef BYTE_COMBINING_DEBUG
-  if (count_combining_before (BUF_BYTE_ADDRESS (current_buffer, to_byte),
-			      Z_BYTE - to_byte, from, from_byte))
-    emacs_abort ();
+      if (count_combining_before (BUF_BYTE_ADDRESS (current_buffer, to_byte),
+				  Z_BYTE - to_byte, from, from_byte))
+	emacs_abort ();
 #endif
 
-  if (ret_string || ! EQ (BVAR (current_buffer, undo_list), Qt))
-    deletion = make_buffer_string_both (from, from_byte, to, to_byte, 1);
-  else
-    deletion = Qnil;
+      if (ret_string || ! EQ (BVAR (current_buffer, undo_list), Qt))
+	deletion = make_buffer_string_both (from, from_byte, to, to_byte, 1);
+      else
+	deletion = Qnil;
 
-  /* Record marker adjustments, and text deletion into undo
-     history.  */
-  record_delete (from, deletion, true);
+      /* Record marker adjustments, and text deletion into undo
+	 history.  */
+      record_delete (from, deletion, true);
 
-  /* Relocate all markers pointing into the new, larger gap to point
-     at the end of the text before the gap.  */
-  adjust_markers_for_delete (from, from_byte, to, to_byte);
+      /* Relocate all markers pointing into the new, larger gap to point
+	 at the end of the text before the gap.  */
+      adjust_markers_for_delete (from, from_byte, to, to_byte);
 
-  modiff_incr (&MODIFF, nchars_del);
-  CHARS_MODIFF = MODIFF;
+      modiff_incr (&MODIFF, nchars_del);
+      CHARS_MODIFF = MODIFF;
 
-  /* Relocate point as if it were a marker.  */
-  if (from < PT)
-    adjust_point (from - min (PT, to),
-		  from_byte - min (PT_BYTE, to_byte));
+      /* Relocate point as if it were a marker.  */
+      if (from < PT)
+	adjust_point (from - min (PT, to),
+		      from_byte - min (PT_BYTE, to_byte));
 
-  offset_intervals (current_buffer, from, - nchars_del);
+      offset_intervals (current_buffer, from, - nchars_del);
 
-  GAP_SIZE += nbytes_del;
-  ZV -= nchars_del;
-  Z -= nchars_del;
-  ZV_BYTE -= nbytes_del;
-  Z_BYTE -= nbytes_del;
-  GPT = from;
-  GPT_BYTE = from_byte;
-  if (GAP_SIZE > 0 && !current_buffer->text->inhibit_shrinking)
-    /* Put an anchor, unless called from decode_coding_object which
-       needs to access the previous gap contents.  */
-    *(GPT_ADDR) = 0;
+      GAP_SIZE += nbytes_del;
+      ZV -= nchars_del;
+      Z -= nchars_del;
+      ZV_BYTE -= nbytes_del;
+      Z_BYTE -= nbytes_del;
+      GPT = from;
+      GPT_BYTE = from_byte;
+      if (GAP_SIZE > 0 && !current_buffer->text->inhibit_shrinking)
+	/* Put an anchor, unless called from decode_coding_object which
+	   needs to access the previous gap contents.  */
+	*(GPT_ADDR) = 0;
+    }
 
   eassert (GPT <= GPT_BYTE);
 
