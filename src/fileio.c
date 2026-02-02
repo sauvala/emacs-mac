@@ -50,6 +50,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "composite.h"
 #include "character.h"
 #include "buffer.h"
+#ifdef USE_PIECE_TABLE
+#include "piecetbl.h"
+#endif
 #include "coding.h"
 #include "window.h"
 #include "blockinput.h"
@@ -4894,6 +4897,70 @@ by calling `format-decode', which see.  */)
   if (BASE_EQ (replace, Qunbound))
     del_range (BEGV, ZV);
 
+#ifdef USE_PIECE_TABLE
+  /* For piece table buffers, use a simplified code path that reads
+     the file into memory and inserts via insert_1_both which handles
+     piece tables correctly.  */
+  if (current_buffer->text->using_piece_table)
+    {
+      /* Determine actual file size to read.  st_size is set for regular
+	 files; for other files, we read in chunks until EOF.  */
+      ptrdiff_t alloc_size = (st_size >= 0 && st_size <= PTRDIFF_MAX
+			      ? (ptrdiff_t) st_size : 4096);
+      char *file_data = xmalloc (alloc_size);
+      ptrdiff_t file_size = 0;
+
+      /* Read file data, growing buffer as needed.  */
+      while (true)
+	{
+	  ptrdiff_t space = alloc_size - file_size;
+	  if (space == 0)
+	    {
+	      /* Grow buffer.  */
+	      if (alloc_size > PTRDIFF_MAX / 2)
+		{
+		  xfree (file_data);
+		  buffer_overflow ();
+		}
+	      alloc_size *= 2;
+	      file_data = xrealloc (file_data, alloc_size);
+	      space = alloc_size - file_size;
+	    }
+
+	  ptrdiff_t nread = emacs_fd_read (fd, file_data + file_size, space);
+	  if (nread < 0)
+	    {
+	      int err = errno;
+	      xfree (file_data);
+	      report_file_errno ("Read error", orig_filename, err);
+	    }
+	  if (nread == 0)
+	    break;  /* EOF */
+	  file_size += nread;
+	}
+
+      emacs_fd_close (fd);
+      clear_unwind_protect (fd_index);
+
+      /* Insert the data using insert_1_both which handles piece tables.
+	 Save/restore PT because insert_1_both moves point, but the
+	 post-processing code expects PT to remain at start of insertion.  */
+      if (file_size > 0)
+	{
+	  ptrdiff_t saved_pt = PT;
+	  ptrdiff_t saved_pt_byte = PT_BYTE;
+	  /* For ASCII-only piece tables, chars == bytes.  */
+	  insert_1_both (file_data, file_size, file_size, 0, 0, 0);
+	  /* Restore PT to start of inserted text.  */
+	  TEMP_SET_PT_BOTH (saved_pt, saved_pt_byte);
+	}
+      xfree (file_data);
+
+      inserted = file_size;
+      goto handled;
+    }
+#endif
+
   move_gap_both (PT, PT_BYTE);
 
   /* Ensure the gap is at least one byte larger than needed for the
@@ -5978,6 +6045,17 @@ a_write (int desc, Lisp_Object string, ptrdiff_t pos,
   ptrdiff_t nextpos;
   ptrdiff_t lastpos = pos + nchars;
 
+#ifdef USE_PIECE_TABLE
+  /* For piece table buffers, convert buffer content to a string first
+     since the encoding code in e_write expects contiguous memory.  */
+  if (NILP (string) && current_buffer->text->using_piece_table && nchars > 0)
+    {
+      string = make_buffer_string (pos, pos + nchars, 0);
+      pos = 0;
+      lastpos = nchars;
+    }
+#endif
+
   while (NILP (*annot) || CONSP (*annot))
     {
       tem = Fcar_safe (Fcar (*annot));
@@ -6077,17 +6155,32 @@ e_write (int desc, Lisp_Object string, ptrdiff_t start, ptrdiff_t end,
 	    }
 	  else
 	    {
-	      coding->dst_object = Qnil;
-	      coding->dst_pos_byte = start_byte;
-	      if (start >= GPT || end <= GPT)
+#ifdef USE_PIECE_TABLE
+	      /* For piece table buffers, extract text to a string since
+		 buffer content may not be contiguous in memory.  */
+	      if (current_buffer->text->using_piece_table)
 		{
+		  Lisp_Object region_string
+		    = make_buffer_string (start, end, 0);
+		  coding->dst_object = region_string;
 		  coding->consumed_char = end - start;
-		  coding->produced = end_byte - start_byte;
+		  coding->produced = SBYTES (region_string);
 		}
 	      else
+#endif
 		{
-		  coding->consumed_char = GPT - start;
-		  coding->produced = GPT_BYTE - start_byte;
+		  coding->dst_object = Qnil;
+		  coding->dst_pos_byte = start_byte;
+		  if (start >= GPT || end <= GPT)
+		    {
+		      coding->consumed_char = end - start;
+		      coding->produced = end_byte - start_byte;
+		    }
+		  else
+		    {
+		      coding->consumed_char = GPT - start;
+		      coding->produced = GPT_BYTE - start_byte;
+		    }
 		}
 	    }
 	}

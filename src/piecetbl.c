@@ -48,12 +48,22 @@ pt_char_at_emacs (ptrdiff_t n)
    modification to the piece table, and only for the contiguous region
    starting at N.  */
 
+/* Static dummy buffer for out-of-range accesses.  This prevents crashes
+   when code tries to read at the end of an empty buffer.  */
+static const unsigned char empty_buffer[4] = { 0, 0, 0, 0 };
+
 const unsigned char *
 pt_get_contiguous_emacs (ptrdiff_t n)
 {
   /* Emacs byte positions are 1-based; piece table is 0-based.  */
-  return pt_get_contiguous (current_buffer->text->piece_table,
-			    n - BEG_BYTE, NULL);
+  const unsigned char *result = pt_get_contiguous (current_buffer->text->piece_table,
+						   n - BEG_BYTE, NULL);
+  /* Return a valid pointer even for empty/end-of-buffer cases.
+     This prevents crashes in display code that expects BYTE_POS_ADDR
+     to always return a valid pointer.  */
+  if (!result)
+    return empty_buffer;
+  return result;
 }
 
 /* Return the byte position where the contiguous region containing
