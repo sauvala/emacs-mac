@@ -174,6 +174,25 @@ pt_insert_emacs (ptrdiff_t bytepos, const char *text,
 				 bytepos - BEG_BYTE, text, nbytes, nchars);
 }
 
+/* Insert NBYTES bytes (NCHARS characters) of TEXT at byte position
+   BYTEPOS, splitting into chunks for better position conversion
+   performance.  This should be used for loading large files.  */
+
+int
+pt_insert_chunked_emacs (ptrdiff_t bytepos, const char *text,
+			 ptrdiff_t nbytes, ptrdiff_t nchars)
+{
+  if (!current_buffer->text->using_piece_table
+      || !current_buffer->text->piece_table)
+    return -1;
+
+  /* Convert from 1-based Emacs position to 0-based piece table position.  */
+  size_t pt_pos = (size_t) (bytepos - BEG_BYTE);
+
+  return pt_insert_chunked (current_buffer->text->piece_table, pt_pos,
+			    text, (size_t) nbytes, (size_t) nchars, 0);
+}
+
 /* Delete NBYTES bytes starting at byte position BYTEPOS in current
    buffer's piece table.  BYTEPOS is Emacs's 1-based byte position.
    Return 0 on success, -1 on error.  */

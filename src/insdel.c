@@ -922,8 +922,11 @@ insert_1_both (const char *string,
       modiff_incr (&MODIFF, nchars);
       CHARS_MODIFF = MODIFF;
 
-      /* Insert into piece table with both byte and char counts.  */
-      pt_insert_emacs (PT_BYTE, string, nbytes, nchars);
+      /* Use chunked insert for better position conversion performance.
+	 This splits large inserts into ~64KB pieces so that char/byte
+	 position conversion is O(log n + chunk_size) instead of O(n)
+	 for a single large piece.  */
+      pt_insert_chunked_emacs (PT_BYTE, string, nbytes, nchars);
 
       /* Update buffer positions.  */
       ZV += nchars;
@@ -1109,8 +1112,8 @@ insert_from_string_1 (Lisp_Object string, ptrdiff_t pos, ptrdiff_t pos_byte,
       modiff_incr (&MODIFF, nchars);
       CHARS_MODIFF = MODIFF;
 
-      /* Insert into piece table with both byte and char counts.  */
-      pt_insert_emacs (PT_BYTE, insert_data, insert_bytes, nchars);
+      /* Use chunked insert for better position conversion performance.  */
+      pt_insert_chunked_emacs (PT_BYTE, insert_data, insert_bytes, nchars);
 
       if (temp_buffer)
 	xfree (temp_buffer);
@@ -1609,8 +1612,9 @@ replace_range (ptrdiff_t from, ptrdiff_t to, Lisp_Object new,
       /* Insert the new text.  */
       if (inschars > 0)
 	{
-	  pt_insert_emacs (from_byte, (const char *) SDATA (new),
-			   insbytes, inschars);
+	  /* Use chunked insert for better position conversion.  */
+	  pt_insert_chunked_emacs (from_byte, (const char *) SDATA (new),
+				   insbytes, inschars);
 	  ZV += inschars;
 	  Z += inschars;
 	  ZV_BYTE += insbytes;

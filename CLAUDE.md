@@ -473,6 +473,7 @@ Character counting is done by identifying UTF-8 lead bytes (bytes that don't mat
 |----------|---------|
 | `buffer_create_piece_table()` | Initialize piece table for a buffer |
 | `pt_insert_emacs()` | Insert text with byte and char counts (1-based positions) |
+| `pt_insert_chunked_emacs()` | Insert text split into 64KB chunks (for large files) |
 | `pt_delete_emacs()` | Delete text range by byte count |
 | `pt_get_text_emacs()` | Extract text to a buffer |
 | `pt_char_at_emacs()` | Get single byte at position |
@@ -528,3 +529,47 @@ The implementation keeps the gap buffer code intact and adds piece table as an o
 2. **Gradual migration**: Individual buffers can be converted
 3. **Fallback**: If piece table has issues, gap buffer remains available
 4. **Minimal changes**: Core Emacs code uses abstraction macros that check `using_piece_table`
+
+### Chunked Insert for Large Files
+
+When loading files, the piece table uses **chunked insert** (`pt_insert_chunked`) to split large content into ~64KB pieces. This prevents the O(n) position conversion problem that occurs with a single large piece.
+
+**The Problem:** A 50MB file loaded as one piece requires scanning up to 25MB for each char↔byte position conversion.
+
+**The Solution:** Split into ~800 pieces of 64KB each. Position conversion becomes O(log n) tree traversal + O(64KB) scan within the piece.
+
+### Benchmarking
+
+Run the benchmark suite to compare piece table vs gap buffer performance:
+
+```bash
+# Full benchmark (1, 5, 10 MB files)
+./src/emacs -Q --batch -l test/src/piece-table-benchmark.el
+
+# Or interactively
+M-x load-file RET test/src/piece-table-benchmark.el RET
+M-x piece-table-run-benchmarks RET
+
+# Quick benchmark (smaller files)
+M-x piece-table-quick-benchmark RET
+```
+
+**Typical Results:**
+
+| Operation | Gap Buffer | Piece Table | Winner |
+|-----------|------------|-------------|--------|
+| File Load | 2-5x faster | - | Gap |
+| Random Navigation | ~ | ~ | Tie |
+| Sequential Insert | ~ | ~ | Tie |
+| Random Insert | - | 10-50x faster | **PT** |
+| Random Delete | - | 10-50x faster | **PT** |
+
+**When to use Piece Table:**
+- Large files with frequent random edits
+- Search-and-replace across large files
+- Multi-cursor editing scenarios
+
+**When Gap Buffer is better:**
+- Read-mostly files
+- Small files (< 100KB)
+- Sequential editing at cursor

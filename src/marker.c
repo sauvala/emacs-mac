@@ -173,6 +173,13 @@ buf_charpos_to_bytepos (struct buffer *b, ptrdiff_t charpos)
 
   eassert (BUF_BEG (b) <= charpos && charpos <= BUF_Z (b));
 
+  /* Note: For piece table buffers, we use the standard scanning code
+     below rather than piece table position conversion.  The scanning
+     code works correctly with piece tables (via buf_next_char_len)
+     and has marker-based caching for good performance.  Piece table
+     position conversion would require O(n) scanning within large
+     pieces anyway.  */
+
   best_above = BUF_Z (b);
   best_above_byte = BUF_Z_BYTE (b);
 
@@ -325,6 +332,11 @@ buf_bytepos_to_charpos (struct buffer *b, ptrdiff_t bytepos)
   ptrdiff_t distance = BYTECHAR_DISTANCE_INITIAL;
 
   eassert (BUF_BEG_BYTE (b) <= bytepos && bytepos <= BUF_Z_BYTE (b));
+
+  /* Note: For piece table buffers, we use the standard scanning code
+     below rather than piece table position conversion.  The scanning
+     code works correctly with piece tables (via buf_prev_char_len)
+     and has marker-based caching for good performance.  */
 
   best_above = BUF_Z (b);
   best_above_byte = BUF_Z_BYTE (b);

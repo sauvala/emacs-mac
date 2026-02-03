@@ -618,51 +618,111 @@ find_piece_at_charpos (PieceTable *pt, size_t charpos,
 
 /* Convert a character offset within a piece to byte offset.  This
    scans the piece data to find the byte position of the Nth
-   character.  */
+   character.  Optimized to scan from the closer end.  */
 static size_t
 char_offset_to_byte_offset (const PieceTable *pt, const Piece *p,
 			    size_t char_offset)
 {
   if (char_offset == 0)
     return 0;
+  if (char_offset >= p->char_length)
+    return p->length;
 
   const unsigned char *buffer = (const unsigned char *)
     ((p->buffer_type == BUFFER_ORIGINAL)
      ? pt->original_buffer : pt->add_buffer);
   const unsigned char *start = buffer + p->start;
-  const unsigned char *pos = start;
   const unsigned char *end = start + p->length;
-  size_t chars_counted = 0;
 
-  while (pos < end && chars_counted < char_offset)
+  /* Scan from whichever end is closer.  */
+  if (char_offset <= p->char_length / 2)
     {
-      if ((*pos & 0xC0) != 0x80)
-	chars_counted++;
-      if (chars_counted < char_offset)
-	pos++;
-    }
+      /* Scan forward from start.  */
+      const unsigned char *pos = start;
+      size_t chars_counted = 0;
 
-  /* If we've counted enough characters, skip to start of next char.  */
-  if (chars_counted == char_offset)
+      while (pos < end && chars_counted < char_offset)
+	{
+	  if ((*pos & 0xC0) != 0x80)
+	    chars_counted++;
+	  if (chars_counted < char_offset)
+	    pos++;
+	}
+
+      /* Advance past remaining continuation bytes.  */
+      if (chars_counted == char_offset)
+	{
+	  pos++;
+	  while (pos < end && (*pos & 0xC0) == 0x80)
+	    pos++;
+	}
+
+      return pos - start;
+    }
+  else
     {
-      /* pos points to last byte counted; advance past remaining
-	 continuation bytes to start of next character.  */
-      pos++;
-      while (pos < end && (*pos & 0xC0) == 0x80)
-	pos++;
-    }
+      /* Scan backward from end.  Count characters from the end.  */
+      size_t chars_from_end = p->char_length - char_offset;
+      const unsigned char *pos = end;
+      size_t chars_counted = 0;
 
-  return pos - start;
+      while (pos > start && chars_counted < chars_from_end)
+	{
+	  pos--;
+	  if ((*pos & 0xC0) != 0x80)
+	    chars_counted++;
+	}
+
+      return pos - start;
+    }
 }
 
-/* Convert byte offset within a piece to character offset.  */
+/* Convert byte offset within a piece to character offset.  Optimized
+   to scan from the closer end.  */
 static size_t
 byte_offset_to_char_offset (const PieceTable *pt, const Piece *p,
 			    size_t byte_offset)
 {
-  const char *buffer = (p->buffer_type == BUFFER_ORIGINAL)
-    ? pt->original_buffer : pt->add_buffer;
-  return count_utf8_chars (buffer, p->start, byte_offset);
+  if (byte_offset == 0)
+    return 0;
+  if (byte_offset >= p->length)
+    return p->char_length;
+
+  const unsigned char *buffer = (const unsigned char *)
+    ((p->buffer_type == BUFFER_ORIGINAL)
+     ? pt->original_buffer : pt->add_buffer);
+  const unsigned char *start = buffer + p->start;
+
+  /* Scan from whichever end is closer.  */
+  if (byte_offset <= p->length / 2)
+    {
+      /* Scan forward from start.  */
+      size_t count = 0;
+      const unsigned char *pos = start;
+      const unsigned char *target = start + byte_offset;
+      while (pos < target)
+	{
+	  if ((*pos & 0xC0) != 0x80)
+	    count++;
+	  pos++;
+	}
+      return count;
+    }
+  else
+    {
+      /* Scan backward from end.  Count chars from byte_offset to end,
+	 then subtract from total.  */
+      const unsigned char *pos = start + byte_offset;
+      const unsigned char *end = start + p->length;
+      size_t chars_after = 0;
+      while (pos < end)
+	{
+	  if ((*pos & 0xC0) != 0x80)
+	    chars_after++;
+	  pos++;
+	}
+      return p->char_length - chars_after;
+    }
 }
 
 /* Insert new_piece immediately after 'after' in tree order.  */
@@ -1006,6 +1066,67 @@ pt_insert_with_charlen (PieceTable *pt, size_t position, const char *text,
 			size_t nbytes, size_t nchars)
 {
   return pt_insert_internal (pt, position, text, nbytes, nchars);
+}
+
+/* Default chunk size for pt_insert_chunked (64KB).  */
+#define PT_DEFAULT_CHUNK_SIZE (64 * 1024)
+
+int
+pt_insert_chunked (PieceTable *pt, size_t position, const char *text,
+		   size_t nbytes, size_t nchars, size_t chunk_size)
+{
+  if (!pt || !text)
+    return -1;
+
+  if (nbytes == 0)
+    return 0;
+
+  if (chunk_size == 0)
+    chunk_size = PT_DEFAULT_CHUNK_SIZE;
+
+  /* If the text fits in one chunk, use the regular insert.  */
+  if (nbytes <= chunk_size)
+    return pt_insert_with_charlen (pt, position, text, nbytes, nchars);
+
+  /* Split into chunks at UTF-8 character boundaries.  We insert
+     chunks in reverse order (from end to start) so that we don't need
+     to adjust the position for each subsequent insert.  */
+  const unsigned char *data = (const unsigned char *) text;
+  size_t offset = 0;
+  size_t insert_pos = position;
+
+  while (offset < nbytes)
+    {
+      size_t chunk_bytes = chunk_size;
+      if (offset + chunk_bytes > nbytes)
+	chunk_bytes = nbytes - offset;
+      else
+	{
+	  /* Adjust to UTF-8 boundary - back up if we're in the middle
+	     of a multibyte character.  A continuation byte has the
+	     form 10xxxxxx (0x80-0xBF).  */
+	  while (chunk_bytes > 0
+		 && (data[offset + chunk_bytes] & 0xC0) == 0x80)
+	    chunk_bytes--;
+
+	  /* If we backed up to 0, the chunk_size is too small for even
+	     one character.  This shouldn't happen with 64KB chunks.  */
+	  if (chunk_bytes == 0)
+	    chunk_bytes = chunk_size;
+	}
+
+      /* Count UTF-8 characters in this chunk.  */
+      size_t chunk_chars = count_utf8_chars (text, offset, chunk_bytes);
+
+      if (pt_insert_with_charlen (pt, insert_pos,
+				  text + offset, chunk_bytes, chunk_chars) != 0)
+	return -1;
+
+      offset += chunk_bytes;
+      insert_pos += chunk_bytes;
+    }
+
+  return 0;
 }
 
 int

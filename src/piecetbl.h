@@ -54,6 +54,12 @@ extern ptrdiff_t pt_contiguous_start_emacs (ptrdiff_t bytepos);
 extern int pt_insert_emacs (ptrdiff_t bytepos, const char *text,
 			    ptrdiff_t nbytes, ptrdiff_t nchars);
 
+/* Insert NBYTES bytes (NCHARS characters) of TEXT at Emacs byte
+   position BYTEPOS, splitting into chunks for better position
+   conversion performance on large files.  */
+extern int pt_insert_chunked_emacs (ptrdiff_t bytepos, const char *text,
+				    ptrdiff_t nbytes, ptrdiff_t nchars);
+
 /* Delete NBYTES bytes starting at Emacs byte position BYTEPOS.  */
 extern int pt_delete_emacs (ptrdiff_t bytepos, ptrdiff_t nbytes);
 

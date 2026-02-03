@@ -4955,7 +4955,10 @@ by calling `format-decode', which see.  */)
 	  nchars = multibyte_chars_in_text
 	    ((const unsigned char *) file_data, file_size);
 
-	  /* insert_1_both handles piece table insertion automatically.  */
+	  /* insert_1_both handles piece table insertion automatically.
+	     For large files, it uses chunked insert internally to
+	     enable fast position conversion (O(log n + chunk_size)
+	     instead of O(n) for a single large piece).  */
 	  insert_1_both (file_data, nchars, file_size, 0, 0, 0);
 
 	  /* Restore PT to start of inserted text.  */

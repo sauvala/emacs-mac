@@ -77,6 +77,16 @@ extern int pt_insert_with_charlen (PieceTable *pt, size_t position,
 				   const char *text, size_t nbytes,
 				   size_t nchars);
 
+/* Insert text as multiple chunks for better position conversion
+   performance.  Large pieces cause O(n) scans during char/byte
+   position conversion; splitting into smaller chunks (default 64KB)
+   makes position conversion O(log n + chunk_size).  CHUNK_SIZE is the
+   maximum size of each piece (0 = use default 64KB).  Return 0 on
+   success, -1 on error.  */
+extern int pt_insert_chunked (PieceTable *pt, size_t position,
+			      const char *text, size_t nbytes,
+			      size_t nchars, size_t chunk_size);
+
 /* Delete LENGTH bytes starting at POSITION.  Return 0 on success, -1
    on error.  */
 extern int pt_delete (PieceTable *pt, size_t position, size_t length);
