@@ -49,15 +49,25 @@ extern ptrdiff_t pt_contiguous_end_emacs (ptrdiff_t bytepos);
 /* Return start of contiguous region containing BYTEPOS (1-based).  */
 extern ptrdiff_t pt_contiguous_start_emacs (ptrdiff_t bytepos);
 
-/* Insert LENGTH bytes of TEXT at Emacs byte position BYTEPOS.  */
+/* Insert NBYTES bytes (NCHARS characters) of TEXT at Emacs byte
+   position BYTEPOS.  */
 extern int pt_insert_emacs (ptrdiff_t bytepos, const char *text,
-			    ptrdiff_t length);
+			    ptrdiff_t nbytes, ptrdiff_t nchars);
 
-/* Delete LENGTH bytes starting at Emacs byte position BYTEPOS.  */
-extern int pt_delete_emacs (ptrdiff_t bytepos, ptrdiff_t length);
+/* Delete NBYTES bytes starting at Emacs byte position BYTEPOS.  */
+extern int pt_delete_emacs (ptrdiff_t bytepos, ptrdiff_t nbytes);
 
 /* Return total length of current buffer's piece table in bytes.  */
 extern ptrdiff_t pt_length_emacs (void);
+
+/* Return total length of current buffer's piece table in characters.  */
+extern ptrdiff_t pt_charlen_emacs (void);
+
+/* Convert Emacs character position (1-based) to byte position (1-based).  */
+extern ptrdiff_t pt_emacs_charpos_to_bytepos (ptrdiff_t charpos);
+
+/* Convert Emacs byte position (1-based) to character position (1-based).  */
+extern ptrdiff_t pt_emacs_bytepos_to_charpos (ptrdiff_t bytepos);
 
 /* Copy LENGTH bytes from Emacs byte position START into BUFFER.  */
 extern ptrdiff_t pt_get_text_emacs (ptrdiff_t start, ptrdiff_t length,

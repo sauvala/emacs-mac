@@ -4943,59 +4943,28 @@ by calling `format-decode', which see.  */)
       emacs_fd_close (fd);
       clear_unwind_protect (fd_index);
 
-      /* Check for non-ASCII bytes - piece table only supports ASCII.
-	 If we find any byte >= 128, warn the user and fall back to
-	 gap buffer mode for safety.  */
-      bool has_non_ascii = false;
-      for (ptrdiff_t i = 0; i < file_size; i++)
-	{
-	  if ((unsigned char) file_data[i] >= 128)
-	    {
-	      has_non_ascii = true;
-	      break;
-	    }
-	}
-
-      if (has_non_ascii)
-	{
-	  /* File contains non-ASCII; disable piece table and insert
-	     using gap buffer instead.  We already have the data in
-	     memory, so we can insert it directly.  */
-	  message ("Warning: file contains non-ASCII; disabling piece table");
-	  /* Disable piece table for this buffer.  */
-	  if (current_buffer->text->piece_table)
-	    {
-	      pt_destroy (current_buffer->text->piece_table);
-	      current_buffer->text->piece_table = NULL;
-	    }
-	  current_buffer->text->using_piece_table = false;
-	  /* Insert using gap buffer.  Since piece table is now disabled,
-	     insert_1_both will use the gap buffer code path.  */
-	  if (file_size > 0)
-	    {
-	      ptrdiff_t saved_pt = PT;
-	      ptrdiff_t saved_pt_byte = PT_BYTE;
-	      insert_1_both (file_data, file_size, file_size, 0, 0, 0);
-	      TEMP_SET_PT_BOTH (saved_pt, saved_pt_byte);
-	    }
-	  xfree (file_data);
-	  inserted = file_size;
-	  goto handled;
-	}
-
-      /* ASCII-only file - use piece table.  */
+      /* Piece table now supports UTF-8 multibyte characters.  Count
+	 characters in the file data.  */
+      ptrdiff_t nchars = 0;
       if (file_size > 0)
 	{
 	  ptrdiff_t saved_pt = PT;
 	  ptrdiff_t saved_pt_byte = PT_BYTE;
-	  /* For ASCII-only piece tables, chars == bytes.  */
-	  insert_1_both (file_data, file_size, file_size, 0, 0, 0);
+
+	  /* Count UTF-8 characters in the file data.  */
+	  nchars = multibyte_chars_in_text
+	    ((const unsigned char *) file_data, file_size);
+
+	  /* insert_1_both handles piece table insertion automatically.  */
+	  insert_1_both (file_data, nchars, file_size, 0, 0, 0);
+
 	  /* Restore PT to start of inserted text.  */
 	  TEMP_SET_PT_BOTH (saved_pt, saved_pt_byte);
 	}
       xfree (file_data);
 
-      inserted = file_size;
+      /* inserted is character count, not byte count.  */
+      inserted = nchars;
       goto handled;
     }
 #endif

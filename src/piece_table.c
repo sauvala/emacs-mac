@@ -46,7 +46,9 @@ typedef struct Piece
 {
   BufferType buffer_type;
   size_t start;			/* Start offset in buffer.  */
-  size_t length;		/* Length of this piece.  */
+  size_t length;		/* Length of this piece in bytes.  */
+  size_t char_length;		/* Length of this piece in UTF-8
+				   characters.  */
 
   /* Red-black tree structure.  */
   struct Piece *left;
@@ -55,8 +57,10 @@ typedef struct Piece
   NodeColor color;
 
   /* Cached subtree metadata for O(log n) position lookup.  */
-  size_t left_subtree_length;	/* Total length of all pieces in left
-				   subtree.  */
+  size_t left_subtree_length;	/* Total byte length of all pieces in
+				   left subtree.  */
+  size_t left_subtree_charlen;	/* Total character length of all pieces
+				   in left subtree.  */
 
   /* Line count caching for O(log n) line operations.  */
   size_t line_count;		/* Number of '\n' characters in this
@@ -98,8 +102,11 @@ struct PieceTable
   /* Sentinel nil node (simplifies tree operations).  */
   Piece *nil;
 
-  /* Cached total length.  */
+  /* Cached total length in bytes.  */
   size_t total_length;
+
+  /* Cached total length in UTF-8 characters.  */
+  size_t total_charlen;
 
   /* Undo/redo stacks.  */
   Change *undo_stack;
@@ -135,6 +142,26 @@ count_newlines (const char *buffer, size_t start, size_t length)
   return count;
 }
 
+/* Count UTF-8 characters in a buffer range.  This counts the number
+   of UTF-8 code points by counting bytes that are not continuation
+   bytes (i.e., bytes that don't match 10xxxxxx pattern).  */
+static size_t
+count_utf8_chars (const char *buffer, size_t start, size_t length)
+{
+  size_t count = 0;
+  const unsigned char *p = (const unsigned char *) buffer + start;
+  const unsigned char *end = p + length;
+  while (p < end)
+    {
+      /* A byte is a character start if it's not a continuation byte.
+	 Continuation bytes have the form 10xxxxxx (0x80-0xBF).  */
+      if ((*p & 0xC0) != 0x80)
+	count++;
+      p++;
+    }
+  return count;
+}
+
 /* Update a piece's line_count based on its current start/length.  */
 static void
 piece_update_line_count (const PieceTable *pt, Piece *p)
@@ -144,8 +171,11 @@ piece_update_line_count (const PieceTable *pt, Piece *p)
   p->line_count = count_newlines (buffer, p->start, p->length);
 }
 
+/* Create a piece with pre-computed character length.  If CHARLEN is
+   SIZE_MAX, the character length is computed from the buffer.  */
 static Piece *
-piece_create (PieceTable *pt, BufferType type, size_t start, size_t length)
+piece_create_ex (PieceTable *pt, BufferType type, size_t start,
+		 size_t length, size_t charlen)
 {
   Piece *p = malloc (sizeof (Piece));
   if (!p)
@@ -158,6 +188,7 @@ piece_create (PieceTable *pt, BufferType type, size_t start, size_t length)
   p->parent = pt->nil;
   p->color = COLOR_RED;		/* New nodes are red.  */
   p->left_subtree_length = 0;
+  p->left_subtree_charlen = 0;
   p->left_subtree_lines = 0;
 
   /* Count newlines in this piece.  */
@@ -165,7 +196,19 @@ piece_create (PieceTable *pt, BufferType type, size_t start, size_t length)
     ? pt->original_buffer : pt->add_buffer;
   p->line_count = count_newlines (buffer, start, length);
 
+  /* Use provided character length or compute it.  */
+  if (charlen == SIZE_MAX)
+    p->char_length = count_utf8_chars (buffer, start, length);
+  else
+    p->char_length = charlen;
+
   return p;
+}
+
+static Piece *
+piece_create (PieceTable *pt, BufferType type, size_t start, size_t length)
+{
+  return piece_create_ex (pt, type, start, length, SIZE_MAX);
 }
 
 static void
@@ -185,7 +228,7 @@ tree_free (PieceTable *pt, Piece *node)
   piece_free (node);
 }
 
-/* Get total length of subtree rooted at node.  */
+/* Get total byte length of subtree rooted at node.  */
 static size_t
 subtree_length (const PieceTable *pt, const Piece *node)
 {
@@ -193,6 +236,16 @@ subtree_length (const PieceTable *pt, const Piece *node)
     return 0;
   return node->left_subtree_length + node->length
     + subtree_length (pt, node->right);
+}
+
+/* Get total character length of subtree rooted at node.  */
+static size_t
+subtree_charlen (const PieceTable *pt, const Piece *node)
+{
+  if (node == pt->nil)
+    return 0;
+  return node->left_subtree_charlen + node->char_length
+    + subtree_charlen (pt, node->right);
 }
 
 /* Get total line count of subtree rooted at node.  */
@@ -205,14 +258,15 @@ subtree_lines (const PieceTable *pt, const Piece *node)
     + subtree_lines (pt, node->right);
 }
 
-/* Update left_subtree_length and left_subtree_lines for a single
-   node.  */
+/* Update left_subtree_length, left_subtree_charlen, and
+   left_subtree_lines for a single node.  */
 static void
 update_subtree_metadata (PieceTable *pt, Piece *node)
 {
   if (node == pt->nil)
     return;
   node->left_subtree_length = subtree_length (pt, node->left);
+  node->left_subtree_charlen = subtree_charlen (pt, node->left);
   node->left_subtree_lines = subtree_lines (pt, node->left);
 }
 
@@ -521,6 +575,96 @@ find_piece_at (PieceTable *pt, size_t position, size_t *offset_in_piece)
   return NULL;
 }
 
+/* Find piece at character position and compute offset within piece
+   (in characters).  Also return cumulative byte position in
+   CUMULATIVE_BYTES if non-NULL.  O(log n).  */
+static Piece *
+find_piece_at_charpos (PieceTable *pt, size_t charpos,
+		       size_t *offset_chars, size_t *cumulative_bytes)
+{
+  Piece *node = pt->root;
+  size_t current_charpos = 0;
+  size_t current_bytepos = 0;
+
+  while (node != pt->nil)
+    {
+      size_t left_chars = node->left_subtree_charlen;
+      size_t left_bytes = node->left_subtree_length;
+
+      if (charpos < current_charpos + left_chars)
+	{
+	  /* Position is in left subtree.  */
+	  node = node->left;
+	}
+      else if (charpos < current_charpos + left_chars + node->char_length)
+	{
+	  /* Position is in this node.  */
+	  *offset_chars = charpos - current_charpos - left_chars;
+	  if (cumulative_bytes)
+	    *cumulative_bytes = current_bytepos + left_bytes;
+	  return node;
+	}
+      else
+	{
+	  /* Position is in right subtree.  */
+	  current_charpos += left_chars + node->char_length;
+	  current_bytepos += left_bytes + node->length;
+	  node = node->right;
+	}
+    }
+
+  return NULL;
+}
+
+/* Convert a character offset within a piece to byte offset.  This
+   scans the piece data to find the byte position of the Nth
+   character.  */
+static size_t
+char_offset_to_byte_offset (const PieceTable *pt, const Piece *p,
+			    size_t char_offset)
+{
+  if (char_offset == 0)
+    return 0;
+
+  const unsigned char *buffer = (const unsigned char *)
+    ((p->buffer_type == BUFFER_ORIGINAL)
+     ? pt->original_buffer : pt->add_buffer);
+  const unsigned char *start = buffer + p->start;
+  const unsigned char *pos = start;
+  const unsigned char *end = start + p->length;
+  size_t chars_counted = 0;
+
+  while (pos < end && chars_counted < char_offset)
+    {
+      if ((*pos & 0xC0) != 0x80)
+	chars_counted++;
+      if (chars_counted < char_offset)
+	pos++;
+    }
+
+  /* If we've counted enough characters, skip to start of next char.  */
+  if (chars_counted == char_offset)
+    {
+      /* pos points to last byte counted; advance past remaining
+	 continuation bytes to start of next character.  */
+      pos++;
+      while (pos < end && (*pos & 0xC0) == 0x80)
+	pos++;
+    }
+
+  return pos - start;
+}
+
+/* Convert byte offset within a piece to character offset.  */
+static size_t
+byte_offset_to_char_offset (const PieceTable *pt, const Piece *p,
+			    size_t byte_offset)
+{
+  const char *buffer = (p->buffer_type == BUFFER_ORIGINAL)
+    ? pt->original_buffer : pt->add_buffer;
+  return count_utf8_chars (buffer, p->start, byte_offset);
+}
+
 /* Insert new_piece immediately after 'after' in tree order.  */
 static void
 insert_piece_after (PieceTable *pt, Piece *after, Piece *new_piece)
@@ -687,6 +831,7 @@ pt_create_with_content_ex (const char *content, size_t length,
       p->color = COLOR_BLACK;	/* Root is black.  */
       pt->root = p;
       pt->total_length = length;
+      pt->total_charlen = p->char_length;
     }
 
   return pt;
@@ -717,17 +862,20 @@ pt_destroy (PieceTable *pt)
  * Core Operations
  * ============================================================================ */
 
-int
-pt_insert (PieceTable *pt, size_t position, const char *text, size_t length)
+/* Internal insert implementation.  If NCHARS is SIZE_MAX, the
+   character count is computed from TEXT.  */
+static int
+pt_insert_internal (PieceTable *pt, size_t position, const char *text,
+		    size_t nbytes, size_t nchars)
 {
-  if (!pt || !text || length == 0)
+  if (!pt || !text || nbytes == 0)
     return -1;
 
   if (position > pt->total_length)
     return -1;
 
   /* Ensure add buffer capacity.  */
-  if (ensure_add_capacity (pt, length) != 0)
+  if (ensure_add_capacity (pt, nbytes) != 0)
     return -1;
 
   /* Record for undo (if enabled).  */
@@ -739,23 +887,26 @@ pt_insert (PieceTable *pt, size_t position, const char *text, size_t length)
 	return -1;
       change->type = CHANGE_INSERT;
       change->position = position;
-      change->length = length;
+      change->length = nbytes;
       change->add_buffer_len = pt->add_length;
     }
 
   /* Append text to add buffer.  */
   size_t add_start = pt->add_length;
-  memcpy (pt->add_buffer + pt->add_length, text, length);
-  pt->add_length += length;
+  memcpy (pt->add_buffer + pt->add_length, text, nbytes);
+  pt->add_length += nbytes;
 
   /* Create new piece for inserted text.  */
-  Piece *new_piece = piece_create (pt, BUFFER_ADD, add_start, length);
+  Piece *new_piece = piece_create_ex (pt, BUFFER_ADD, add_start, nbytes, nchars);
   if (!new_piece)
     {
       if (change)
 	free (change);
       return -1;
     }
+
+  /* Remember the character count (needed for total_charlen update).  */
+  size_t inserted_chars = new_piece->char_length;
 
   if (pt->root == pt->nil)
     {
@@ -800,10 +951,14 @@ pt_insert (PieceTable *pt, size_t position, const char *text, size_t length)
 	}
       else
 	{
-	  /* Split the piece.  */
-	  Piece *second_half = piece_create (pt, p->buffer_type,
-					     p->start + offset,
-					     p->length - offset);
+	  /* Split the piece.  Need to compute character offset for
+	     the split point.  */
+	  size_t char_offset = byte_offset_to_char_offset (pt, p, offset);
+
+	  Piece *second_half = piece_create_ex (pt, p->buffer_type,
+						p->start + offset,
+						p->length - offset,
+						p->char_length - char_offset);
 	  if (!second_half)
 	    {
 	      piece_free (new_piece);
@@ -814,6 +969,7 @@ pt_insert (PieceTable *pt, size_t position, const char *text, size_t length)
 
 	  /* Shrink first piece.  */
 	  p->length = offset;
+	  p->char_length = char_offset;
 	  piece_update_line_count (pt, p);
 	  update_metadata_to_root (pt, p);
 
@@ -824,7 +980,8 @@ pt_insert (PieceTable *pt, size_t position, const char *text, size_t length)
 	}
     }
 
-  pt->total_length += length;
+  pt->total_length += nbytes;
+  pt->total_charlen += inserted_chars;
 
   /* Update undo stack (if enabled).  */
   if (!pt->undo_disabled)
@@ -836,6 +993,19 @@ pt_insert (PieceTable *pt, size_t position, const char *text, size_t length)
     }
 
   return 0;
+}
+
+int
+pt_insert (PieceTable *pt, size_t position, const char *text, size_t length)
+{
+  return pt_insert_internal (pt, position, text, length, SIZE_MAX);
+}
+
+int
+pt_insert_with_charlen (PieceTable *pt, size_t position, const char *text,
+			size_t nbytes, size_t nchars)
+{
+  return pt_insert_internal (pt, position, text, nbytes, nchars);
 }
 
 int
@@ -882,6 +1052,9 @@ pt_delete (PieceTable *pt, size_t position, size_t length)
       change->saved_piece->length = length;
     }
 
+  /* Track total deleted characters.  */
+  size_t deleted_chars = 0;
+
   /* Find and delete affected pieces.  */
   size_t remaining = length;
   size_t current_pos = position;
@@ -897,33 +1070,54 @@ pt_delete (PieceTable *pt, size_t position, size_t length)
       if (delete_in_piece > remaining)
 	delete_in_piece = remaining;
 
+      /* Compute character count for the deleted portion.  */
+      size_t char_offset = byte_offset_to_char_offset (pt, p, offset);
+      size_t delete_chars;
+
       if (offset == 0 && delete_in_piece == p->length)
 	{
 	  /* Delete entire piece.  */
+	  delete_chars = p->char_length;
+	  deleted_chars += delete_chars;
 	  tree_delete (pt, p);
 	  piece_free (p);
 	}
       else if (offset == 0)
 	{
-	  /* Delete from start of piece.  */
+	  /* Delete from start of piece.  Compute chars in deleted
+	     portion.  */
+	  delete_chars = byte_offset_to_char_offset (pt, p, delete_in_piece);
+	  deleted_chars += delete_chars;
 	  p->start += delete_in_piece;
 	  p->length -= delete_in_piece;
+	  p->char_length -= delete_chars;
 	  piece_update_line_count (pt, p);
 	  update_metadata_to_root (pt, p);
 	}
       else if (offset + delete_in_piece == p->length)
 	{
 	  /* Delete to end of piece.  */
+	  delete_chars = p->char_length - char_offset;
+	  deleted_chars += delete_chars;
 	  p->length = offset;
+	  p->char_length = char_offset;
 	  piece_update_line_count (pt, p);
 	  update_metadata_to_root (pt, p);
 	}
       else
 	{
-	  /* Delete from middle - split piece.  */
-	  Piece *second_half = piece_create (pt, p->buffer_type,
-					     p->start + offset + delete_in_piece,
-					     p->length - offset - delete_in_piece);
+	  /* Delete from middle - split piece.  Compute char counts
+	     for all three portions: before, deleted, and after.  */
+	  size_t after_offset = offset + delete_in_piece;
+	  size_t char_after_offset = byte_offset_to_char_offset (pt, p,
+								 after_offset);
+	  delete_chars = char_after_offset - char_offset;
+	  deleted_chars += delete_chars;
+
+	  Piece *second_half = piece_create_ex (pt, p->buffer_type,
+						p->start + after_offset,
+						p->length - after_offset,
+						p->char_length - char_after_offset);
 	  if (!second_half)
 	    {
 	      if (change)
@@ -931,6 +1125,7 @@ pt_delete (PieceTable *pt, size_t position, size_t length)
 	      return -1;
 	    }
 	  p->length = offset;
+	  p->char_length = char_offset;
 	  piece_update_line_count (pt, p);
 	  update_metadata_to_root (pt, p);
 	  insert_piece_after (pt, p, second_half);
@@ -940,6 +1135,7 @@ pt_delete (PieceTable *pt, size_t position, size_t length)
     }
 
   pt->total_length -= length;
+  pt->total_charlen -= deleted_chars;
 
   /* Update undo stack (if enabled).  */
   if (!pt->undo_disabled)
@@ -961,6 +1157,85 @@ size_t
 pt_length (const PieceTable *pt)
 {
   return pt ? pt->total_length : 0;
+}
+
+size_t
+pt_charlen (const PieceTable *pt)
+{
+  return pt ? pt->total_charlen : 0;
+}
+
+/* Convert character position to byte position.  O(log n) to find the
+   piece, plus O(k) to scan within the piece where k is the character
+   offset within the piece.  */
+size_t
+pt_charpos_to_bytepos (const PieceTable *pt, size_t charpos)
+{
+  if (!pt || charpos == 0)
+    return 0;
+  if (charpos >= pt->total_charlen)
+    return pt->total_length;
+
+  size_t offset_chars;
+  size_t cumulative_bytes;
+  Piece *p = find_piece_at_charpos ((PieceTable *) pt, charpos,
+				    &offset_chars, &cumulative_bytes);
+  if (!p)
+    return pt->total_length;
+
+  /* Convert character offset within piece to byte offset.  */
+  size_t byte_offset = char_offset_to_byte_offset (pt, p, offset_chars);
+  return cumulative_bytes + byte_offset;
+}
+
+/* Convert byte position to character position.  O(log n) to find the
+   piece, plus O(k) to count characters within the piece where k is
+   the byte offset within the piece.  */
+size_t
+pt_bytepos_to_charpos (const PieceTable *pt, size_t bytepos)
+{
+  if (!pt || bytepos == 0)
+    return 0;
+  if (bytepos >= pt->total_length)
+    return pt->total_charlen;
+
+  size_t offset_bytes;
+  Piece *p = find_piece_at ((PieceTable *) pt, bytepos, &offset_bytes);
+  if (!p)
+    return pt->total_charlen;
+
+  /* Compute cumulative character position up to this piece.  */
+  size_t cumulative_chars = 0;
+  size_t cumulative_bytes = 0;
+  Piece *node = ((PieceTable *) pt)->root;
+
+  while (node != ((PieceTable *) pt)->nil)
+    {
+      size_t left_bytes = node->left_subtree_length;
+      size_t left_chars = node->left_subtree_charlen;
+
+      if (bytepos < cumulative_bytes + left_bytes)
+	{
+	  node = node->left;
+	}
+      else if (bytepos < cumulative_bytes + left_bytes + node->length)
+	{
+	  /* Found the piece.  */
+	  cumulative_chars += left_chars;
+	  cumulative_bytes += left_bytes;
+	  break;
+	}
+      else
+	{
+	  cumulative_chars += left_chars + node->char_length;
+	  cumulative_bytes += left_bytes + node->length;
+	  node = node->right;
+	}
+    }
+
+  /* Count characters within the piece up to offset_bytes.  */
+  size_t char_offset = byte_offset_to_char_offset (pt, p, offset_bytes);
+  return cumulative_chars + char_offset;
 }
 
 int

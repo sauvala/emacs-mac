@@ -446,21 +446,40 @@ PieceTable
     v
 Red-Black Tree of Pieces
     |
-    +-- Piece 1: { source=ORIGINAL, start=0, length=100 }
-    +-- Piece 2: { source=ADD, start=0, length=15 }      <- inserted text
-    +-- Piece 3: { source=ORIGINAL, start=150, length=200 }
+    +-- Piece 1: { source=ORIGINAL, start=0, length=100, char_length=95 }
+    +-- Piece 2: { source=ADD, start=0, length=15, char_length=12 }
+    +-- Piece 3: { source=ORIGINAL, start=150, length=200, char_length=180 }
 ```
+
+### Multibyte (UTF-8) Support
+
+The piece table fully supports UTF-8 multibyte characters. Each piece maintains both byte length and character length, enabling O(log n) position lookups for both byte and character positions.
+
+**Data Structure Extensions:**
+- `char_length`: Number of UTF-8 characters in this piece
+- `left_subtree_charlen`: Total characters in left subtree (for O(log n) char position lookup)
+- `total_charlen`: Total character count in the piece table
+
+**Position Conversion Functions:**
+- `pt_charpos_to_bytepos()`: Convert character position to byte position
+- `pt_bytepos_to_charpos()`: Convert byte position to character position
+- `pt_charlen()`: Get total character count
+
+Character counting is done by identifying UTF-8 lead bytes (bytes that don't match the continuation pattern `10xxxxxx`).
 
 ### Key Wrapper Functions (`src/piecetbl.c`)
 
 | Function | Purpose |
 |----------|---------|
 | `buffer_create_piece_table()` | Initialize piece table for a buffer |
-| `pt_insert_emacs()` | Insert text (handles Emacs 1-based positions) |
-| `pt_delete_emacs()` | Delete text range |
+| `pt_insert_emacs()` | Insert text with byte and char counts (1-based positions) |
+| `pt_delete_emacs()` | Delete text range by byte count |
 | `pt_get_text_emacs()` | Extract text to a buffer |
-| `pt_char_at_emacs()` | Get single character at position |
+| `pt_char_at_emacs()` | Get single byte at position |
 | `pt_get_contiguous_emacs()` | Get pointer to contiguous region |
+| `pt_charlen_emacs()` | Get total character count |
+| `pt_emacs_charpos_to_bytepos()` | Convert char position to byte position |
+| `pt_emacs_bytepos_to_charpos()` | Convert byte position to char position |
 
 ### Integration Points
 
@@ -484,7 +503,6 @@ The piece table integrates with Emacs through conditional compilation (`#ifdef U
 
 ### Current Limitations
 
-- **ASCII only**: Character position must equal byte position (no multibyte support yet). Files containing non-ASCII bytes (UTF-8, etc.) are automatically detected and loaded using the gap buffer instead, with a warning message.
 - **Undo not fully working**: Undo records may not capture all piece table operations
 - **Performance**: Regex search currently linearizes the entire visible region (temporary copy)
 - **Internal buffers excluded**: Buffers with names starting with a space (e.g., ` *temp*`, ` *Minibuf-0*`) never use piece table, even when `use-piece-table-by-default` is set. This is because the Lisp reader (`read`) doesn't work with piece table buffers yet.

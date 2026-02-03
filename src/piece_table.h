@@ -69,6 +69,14 @@ extern void pt_destroy (PieceTable *pt);
 extern int pt_insert (PieceTable *pt, size_t position,
 		      const char *text, size_t length);
 
+/* Insert text at POSITION with known character count.  This is more
+   efficient than pt_insert when the character count is already known
+   (e.g., from Emacs).  NBYTES is the byte length, NCHARS is the
+   character count.  Return 0 on success, -1 on error.  */
+extern int pt_insert_with_charlen (PieceTable *pt, size_t position,
+				   const char *text, size_t nbytes,
+				   size_t nchars);
+
 /* Delete LENGTH bytes starting at POSITION.  Return 0 on success, -1
    on error.  */
 extern int pt_delete (PieceTable *pt, size_t position, size_t length);
@@ -80,7 +88,18 @@ extern int pt_delete (PieceTable *pt, size_t position, size_t length);
 /* Return the total length of the document in bytes.  */
 extern size_t pt_length (const PieceTable *pt);
 
-/* Return character at POSITION, or -1 if out of bounds.  */
+/* Return the total length of the document in UTF-8 characters.  */
+extern size_t pt_charlen (const PieceTable *pt);
+
+/* Convert character position to byte position.  CHARPOS is
+   zero-based.  Return zero-based byte position.  */
+extern size_t pt_charpos_to_bytepos (const PieceTable *pt, size_t charpos);
+
+/* Convert byte position to character position.  BYTEPOS is
+   zero-based.  Return zero-based character position.  */
+extern size_t pt_bytepos_to_charpos (const PieceTable *pt, size_t bytepos);
+
+/* Return byte at POSITION, or -1 if out of bounds.  */
 extern int pt_char_at (const PieceTable *pt, size_t position);
 
 /* Extract LENGTH bytes starting at START into BUFFER.  BUFFER must

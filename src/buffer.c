@@ -3138,8 +3138,8 @@ If INSERT-TEST is non-nil, directly test pt_insert.  */)
 
   if (!NILP (insert_test))
     {
-      /* Direct test of pt_insert */
-      int result = pt_insert_emacs (BEG_BYTE, "TEST", 4);
+      /* Direct test of pt_insert - "TEST" is ASCII so nchars == nbytes */
+      int result = pt_insert_emacs (BEG_BYTE, "TEST", 4, 4);
       message ("pt_insert_emacs returned %d, new total_length=%zu",
 	       result, pt_length_emacs ());
     }

@@ -159,32 +159,33 @@ buffer_destroy_piece_table (struct buffer *buf)
   buf->text->using_piece_table = false;
 }
 
-/* Insert LENGTH bytes of TEXT at byte position BYTEPOS in current
-   buffer's piece table.  BYTEPOS is Emacs's 1-based byte position.
-   Return 0 on success, -1 on error.  */
+/* Insert NBYTES bytes (NCHARS characters) of TEXT at byte position
+   BYTEPOS in current buffer's piece table.  BYTEPOS is Emacs's
+   1-based byte position.  Return 0 on success, -1 on error.  */
 
 int
-pt_insert_emacs (ptrdiff_t bytepos, const char *text, ptrdiff_t length)
+pt_insert_emacs (ptrdiff_t bytepos, const char *text,
+		 ptrdiff_t nbytes, ptrdiff_t nchars)
 {
   if (!current_buffer->text->using_piece_table)
     return -1;
   /* Emacs byte positions are 1-based; piece table is 0-based.  */
-  return pt_insert (current_buffer->text->piece_table,
-		    bytepos - BEG_BYTE, text, length);
+  return pt_insert_with_charlen (current_buffer->text->piece_table,
+				 bytepos - BEG_BYTE, text, nbytes, nchars);
 }
 
-/* Delete LENGTH bytes starting at byte position BYTEPOS in current
+/* Delete NBYTES bytes starting at byte position BYTEPOS in current
    buffer's piece table.  BYTEPOS is Emacs's 1-based byte position.
    Return 0 on success, -1 on error.  */
 
 int
-pt_delete_emacs (ptrdiff_t bytepos, ptrdiff_t length)
+pt_delete_emacs (ptrdiff_t bytepos, ptrdiff_t nbytes)
 {
   if (!current_buffer->text->using_piece_table)
     return -1;
   /* Emacs byte positions are 1-based; piece table is 0-based.  */
   return pt_delete (current_buffer->text->piece_table,
-		    bytepos - BEG_BYTE, length);
+		    bytepos - BEG_BYTE, nbytes);
 }
 
 /* Return the total length of current buffer's piece table in bytes.  */
@@ -195,6 +196,45 @@ pt_length_emacs (void)
   if (!current_buffer->text->using_piece_table)
     return 0;
   return pt_length (current_buffer->text->piece_table);
+}
+
+/* Return the total length of current buffer's piece table in
+   characters.  */
+
+ptrdiff_t
+pt_charlen_emacs (void)
+{
+  if (!current_buffer->text->using_piece_table)
+    return 0;
+  return pt_charlen (current_buffer->text->piece_table);
+}
+
+/* Convert Emacs character position (1-based) to byte position
+   (1-based).  */
+
+ptrdiff_t
+pt_emacs_charpos_to_bytepos (ptrdiff_t charpos)
+{
+  if (!current_buffer->text->using_piece_table)
+    return charpos;  /* Fallback: assume 1:1 mapping.  */
+  /* Convert to 0-based, call piece table, convert back to 1-based.  */
+  size_t bytepos = pt_charpos_to_bytepos (current_buffer->text->piece_table,
+					  charpos - BEG);
+  return bytepos + BEG_BYTE;
+}
+
+/* Convert Emacs byte position (1-based) to character position
+   (1-based).  */
+
+ptrdiff_t
+pt_emacs_bytepos_to_charpos (ptrdiff_t bytepos)
+{
+  if (!current_buffer->text->using_piece_table)
+    return bytepos;  /* Fallback: assume 1:1 mapping.  */
+  /* Convert to 0-based, call piece table, convert back to 1-based.  */
+  size_t charpos = pt_bytepos_to_charpos (current_buffer->text->piece_table,
+					  bytepos - BEG_BYTE);
+  return charpos + BEG;
 }
 
 /* Copy LENGTH bytes starting at byte position START from current

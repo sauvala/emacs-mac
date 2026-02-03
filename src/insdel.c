@@ -922,8 +922,8 @@ insert_1_both (const char *string,
       modiff_incr (&MODIFF, nchars);
       CHARS_MODIFF = MODIFF;
 
-      /* Insert into piece table.  */
-      pt_insert_emacs (PT_BYTE, string, nbytes);
+      /* Insert into piece table with both byte and char counts.  */
+      pt_insert_emacs (PT_BYTE, string, nbytes, nchars);
 
       /* Update buffer positions.  */
       ZV += nchars;
@@ -1109,8 +1109,8 @@ insert_from_string_1 (Lisp_Object string, ptrdiff_t pos, ptrdiff_t pos_byte,
       modiff_incr (&MODIFF, nchars);
       CHARS_MODIFF = MODIFF;
 
-      /* Insert into piece table.  */
-      pt_insert_emacs (PT_BYTE, insert_data, insert_bytes);
+      /* Insert into piece table with both byte and char counts.  */
+      pt_insert_emacs (PT_BYTE, insert_data, insert_bytes, nchars);
 
       if (temp_buffer)
 	xfree (temp_buffer);
@@ -1609,7 +1609,8 @@ replace_range (ptrdiff_t from, ptrdiff_t to, Lisp_Object new,
       /* Insert the new text.  */
       if (inschars > 0)
 	{
-	  pt_insert_emacs (from_byte, (const char *) SDATA (new), insbytes);
+	  pt_insert_emacs (from_byte, (const char *) SDATA (new),
+			   insbytes, inschars);
 	  ZV += inschars;
 	  Z += inschars;
 	  ZV_BYTE += insbytes;
