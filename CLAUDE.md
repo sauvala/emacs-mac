@@ -478,6 +478,10 @@ The piece table integrates with Emacs through conditional compilation (`#ifdef U
 
 6. **File I/O** (`fileio.c`): `insert-file-contents` and `write-region` handle piece table buffers
 
+7. **Newline search** (`search.c`): `find_newline` has piece table-specific code paths using `FETCH_BYTE` instead of pointer arithmetic
+
+8. **Buffer memory access** (`buffer.h`): `BUF_BYTE_ADDRESS`, `BUF_FETCH_MULTIBYTE_CHAR`, and `buf_prev_char_len` handle piece table buffers via `pt_get_contiguous_emacs`
+
 ### Current Limitations
 
 - **ASCII only**: Character position must equal byte position (no multibyte support yet). Files containing non-ASCII bytes (UTF-8, etc.) are automatically detected and loaded using the gap buffer instead, with a warning message.

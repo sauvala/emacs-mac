@@ -789,6 +789,47 @@ find_newline (ptrdiff_t start, ptrdiff_t start_byte, ptrdiff_t end,
 	tem = BUFFER_CEILING_OF (start_byte);
 	ceiling_byte = min (tem, ceiling_byte);
 
+#ifdef USE_PIECE_TABLE
+	/* For piece table buffers, use FETCH_BYTE instead of pointer
+	   arithmetic, since the buffer text isn't contiguous in memory.  */
+	if (current_buffer->text->using_piece_table)
+	  {
+	    ptrdiff_t scan_byte = start_byte;
+	    ptrdiff_t region_start_byte = start_byte;
+	    while (scan_byte <= ceiling_byte)
+	      {
+		if (FETCH_BYTE (scan_byte) == '\n')
+		  {
+		    /* Cache the newline-free region we just traversed.  */
+		    if (newline_cache && region_start_byte < scan_byte)
+		      know_region_cache (cache_buffer, newline_cache,
+					 BYTE_TO_CHAR (region_start_byte),
+					 BYTE_TO_CHAR (scan_byte));
+		    scan_byte++;
+		    region_start_byte = scan_byte;
+		    if (--count == 0)
+		      {
+			if (bytepos)
+			  *bytepos = scan_byte;
+			return BYTE_TO_CHAR (scan_byte);
+		      }
+		  }
+		else
+		  scan_byte++;
+
+		if (allow_quit && (scan_byte % 32768) == 0)
+		  maybe_quit ();
+	      }
+	    /* Cache any remaining newline-free region.  */
+	    if (newline_cache && region_start_byte < scan_byte)
+	      know_region_cache (cache_buffer, newline_cache,
+				 BYTE_TO_CHAR (region_start_byte),
+				 BYTE_TO_CHAR (scan_byte));
+	    start_byte = ceiling_byte + 1;
+	    start = BYTE_TO_CHAR (start_byte);
+	  }
+	else
+#endif
         {
           /* The termination address of the dumb loop.  */
 	  unsigned char *lim_addr = BYTE_POS_ADDR (ceiling_byte) + 1;
@@ -898,6 +939,44 @@ find_newline (ptrdiff_t start, ptrdiff_t start_byte, ptrdiff_t end,
 	tem = BUFFER_FLOOR_OF (start_byte - 1);
 	ceiling_byte = max (tem, ceiling_byte);
 
+#ifdef USE_PIECE_TABLE
+	/* For piece table buffers, use FETCH_BYTE instead of pointer
+	   arithmetic, since the buffer text isn't contiguous in memory.  */
+	if (current_buffer->text->using_piece_table)
+	  {
+	    ptrdiff_t scan_byte = start_byte - 1;
+	    ptrdiff_t region_end_byte = start_byte;
+	    while (scan_byte >= ceiling_byte)
+	      {
+		if (FETCH_BYTE (scan_byte) == '\n')
+		  {
+		    /* Cache the newline-free region we just traversed.  */
+		    if (newline_cache && scan_byte + 1 < region_end_byte)
+		      know_region_cache (cache_buffer, newline_cache,
+					 BYTE_TO_CHAR (scan_byte + 1),
+					 BYTE_TO_CHAR (region_end_byte));
+		    region_end_byte = scan_byte;
+		    if (++count >= 0)
+		      {
+			if (bytepos)
+			  *bytepos = scan_byte + 1;
+			return BYTE_TO_CHAR (scan_byte + 1);
+		      }
+		  }
+		scan_byte--;
+
+		if (allow_quit && (scan_byte % 32768) == 0)
+		  maybe_quit ();
+	      }
+	    /* Cache any remaining newline-free region.  */
+	    if (newline_cache && ceiling_byte < region_end_byte)
+	      know_region_cache (cache_buffer, newline_cache,
+				 BYTE_TO_CHAR (ceiling_byte),
+				 BYTE_TO_CHAR (region_end_byte));
+	    start_byte = ceiling_byte;
+	  }
+	else
+#endif
         {
           /* The termination address of the dumb loop.  */
 	  unsigned char *ceiling_addr = BYTE_POS_ADDR (ceiling_byte);

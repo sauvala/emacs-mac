@@ -942,6 +942,7 @@ bset_text_conversion_style (struct buffer *b, Lisp_Object val)
 #ifdef USE_PIECE_TABLE
 extern ptrdiff_t pt_contiguous_end_emacs (ptrdiff_t bytepos);
 extern ptrdiff_t pt_contiguous_start_emacs (ptrdiff_t bytepos);
+extern const unsigned char *pt_get_contiguous_emacs (ptrdiff_t n);
 #endif
 
 INLINE ptrdiff_t
@@ -1462,6 +1463,17 @@ FETCH_MULTIBYTE_CHAR (ptrdiff_t pos)
 INLINE int
 BUF_FETCH_MULTIBYTE_CHAR (struct buffer *buf, ptrdiff_t pos)
 {
+#ifdef USE_PIECE_TABLE
+  if (buf->text->using_piece_table)
+    {
+      /* For piece tables, get pointer via pt_get_contiguous_emacs.  */
+      struct buffer *old_buf = current_buffer;
+      current_buffer = buf;
+      unsigned char *p = (unsigned char *) pt_get_contiguous_emacs (pos);
+      current_buffer = old_buf;
+      return STRING_CHAR (p);
+    }
+#endif
   unsigned char *p
     = ((pos >= BUF_GPT_BYTE (buf) ? BUF_GAP_SIZE (buf) : 0)
        + pos + BUF_BEG_ADDR (buf) - BEG_BYTE);
@@ -1492,11 +1504,27 @@ FETCH_CHAR (ptrdiff_t pos)
 }
 
 /* Return the address of character at byte position POS in buffer BUF.
-   Note that both arguments can be computed more than once.  */
+   Note that both arguments can be computed more than once.
+
+   WARNING: For piece table buffers, the returned pointer is only valid
+   for the contiguous region containing POS.  Use BUF_FETCH_BYTE for
+   safe single-byte access.  */
 
 INLINE unsigned char *
 BUF_BYTE_ADDRESS (struct buffer *buf, ptrdiff_t pos)
 {
+#ifdef USE_PIECE_TABLE
+  if (buf->text->using_piece_table)
+    {
+      /* For piece tables, we need to go through pt_get_contiguous.
+	 This requires current_buffer to be set correctly.  */
+      struct buffer *old_buf = current_buffer;
+      current_buffer = buf;
+      unsigned char *result = (unsigned char *) pt_get_contiguous_emacs (pos);
+      current_buffer = old_buf;
+      return result;
+    }
+#endif
   return (buf->text->beg + pos - BEG_BYTE
 	  + (pos < buf->text->gpt_byte ? 0 : buf->text->gap_size));
 }
@@ -1867,6 +1895,28 @@ next_char_len (ptrdiff_t pos_byte)
 INLINE int
 buf_prev_char_len (struct buffer *buf, ptrdiff_t pos_byte)
 {
+#ifdef USE_PIECE_TABLE
+  /* For piece table buffers, we can't use pointer arithmetic because
+     the buffer text isn't contiguous.  Use FETCH_BYTE instead.  */
+  if (buf->text->using_piece_table)
+    {
+      /* Look backwards for the start of the character.  In UTF-8,
+	 continuation bytes have the form 10xxxxxx (0x80-0xBF).  */
+      int len = 1;
+      struct buffer *old_buf = current_buffer;
+      current_buffer = buf;
+      while (len < 4  /* MAX_MULTIBYTE_LENGTH */
+	     && pos_byte - len > BEG_BYTE)
+	{
+	  unsigned char c = FETCH_BYTE (pos_byte - len);
+	  if (CHAR_HEAD_P (c))
+	    break;
+	  len++;
+	}
+      current_buffer = old_buf;
+      return len;
+    }
+#endif
   unsigned char *chp
     = (BUF_BEG_ADDR (buf) + pos_byte - BEG_BYTE
        + (pos_byte <= BUF_GPT_BYTE (buf) ? 0 : BUF_GAP_SIZE (buf)));

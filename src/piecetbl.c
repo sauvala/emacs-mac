@@ -49,18 +49,28 @@ pt_char_at_emacs (ptrdiff_t n)
    starting at N.  */
 
 /* Static dummy buffer for out-of-range accesses.  This prevents crashes
-   when code tries to read at the end of an empty buffer.  */
-static const unsigned char empty_buffer[4] = { 0, 0, 0, 0 };
+   when code tries to read at the end of an empty buffer.  The buffer
+   must be large enough that pointer arithmetic in search loops doesn't
+   go out of bounds.  Fill with newlines to make newline searches terminate.  */
+static const unsigned char empty_buffer[4096] = { '\n', '\n', '\n', '\n' };
 
 const unsigned char *
 pt_get_contiguous_emacs (ptrdiff_t n)
 {
-  /* Emacs byte positions are 1-based; piece table is 0-based.  */
-  const unsigned char *result = pt_get_contiguous (current_buffer->text->piece_table,
-						   n - BEG_BYTE, NULL);
-  /* Return a valid pointer even for empty/end-of-buffer cases.
-     This prevents crashes in display code that expects BYTE_POS_ADDR
-     to always return a valid pointer.  */
+  struct PieceTable *pt = current_buffer->text->piece_table;
+
+  /* Handle NULL piece table or empty buffer.  */
+  if (!pt)
+    return empty_buffer;
+
+  /* Convert Emacs 1-based position to 0-based.  */
+  ptrdiff_t pt_pos = n - BEG_BYTE;
+
+  /* Bounds check: if position is at or beyond end, return dummy buffer.  */
+  if (pt_pos < 0 || (size_t) pt_pos >= pt_length (pt))
+    return empty_buffer;
+
+  const unsigned char *result = pt_get_contiguous (pt, pt_pos, NULL);
   if (!result)
     return empty_buffer;
   return result;
@@ -73,9 +83,22 @@ pt_get_contiguous_emacs (ptrdiff_t n)
 ptrdiff_t
 pt_contiguous_end_emacs (ptrdiff_t bytepos)
 {
-  /* Convert to 0-based, call piece table, convert back to 1-based.  */
-  size_t pt_pos = bytepos - BEG_BYTE;
-  size_t pt_end = pt_contiguous_end (current_buffer->text->piece_table, pt_pos);
+  struct PieceTable *pt = current_buffer->text->piece_table;
+
+  /* Handle NULL or empty piece table.  */
+  if (!pt || pt_length (pt) == 0)
+    return bytepos;
+
+  /* Convert to 0-based.  */
+  ptrdiff_t pt_pos = bytepos - BEG_BYTE;
+
+  /* Clamp to valid range.  */
+  if (pt_pos < 0)
+    pt_pos = 0;
+  if ((size_t) pt_pos >= pt_length (pt))
+    pt_pos = pt_length (pt) - 1;
+
+  size_t pt_end = pt_contiguous_end (pt, pt_pos);
   return pt_end + BEG_BYTE;
 }
 
@@ -86,10 +109,22 @@ pt_contiguous_end_emacs (ptrdiff_t bytepos)
 ptrdiff_t
 pt_contiguous_start_emacs (ptrdiff_t bytepos)
 {
-  /* Convert to 0-based, call piece table, convert back to 1-based.  */
-  size_t pt_pos = bytepos - BEG_BYTE;
-  size_t pt_start = pt_contiguous_start (current_buffer->text->piece_table,
-					 pt_pos);
+  struct PieceTable *pt = current_buffer->text->piece_table;
+
+  /* Handle NULL or empty piece table.  */
+  if (!pt || pt_length (pt) == 0)
+    return bytepos;
+
+  /* Convert to 0-based.  */
+  ptrdiff_t pt_pos = bytepos - BEG_BYTE;
+
+  /* Clamp to valid range.  */
+  if (pt_pos < 0)
+    pt_pos = 0;
+  if ((size_t) pt_pos >= pt_length (pt))
+    pt_pos = pt_length (pt) - 1;
+
+  size_t pt_start = pt_contiguous_start (pt, pt_pos);
   return pt_start + BEG_BYTE;
 }
 
