@@ -4899,15 +4899,15 @@ by calling `format-decode', which see.  */)
     del_range (BEGV, ZV);
 
 #ifdef USE_PIECE_TABLE
-  /* For piece table buffers, use a simplified code path that reads
-     the file into memory and inserts via insert_1_both which handles
-     piece tables correctly.  */
+  /* For piece table buffers, read the file into a malloc'd buffer,
+     detect the coding system, and decode via decode_coding_object
+     which handles piece table destinations correctly.  */
   if (current_buffer->text->using_piece_table)
     {
       /* Determine actual file size to read.  st_size is set for regular
 	 files; for other files, we read in chunks until EOF.  */
       ptrdiff_t alloc_size = (st_size >= 0 && st_size <= PTRDIFF_MAX
-			      ? (ptrdiff_t) st_size : 4096);
+			      ? (ptrdiff_t) st_size + 1 : 4096);
       char *file_data = xmalloc (alloc_size);
       ptrdiff_t file_size = 0;
 
@@ -4943,31 +4943,129 @@ by calling `format-decode', which see.  */)
       emacs_fd_close (fd);
       clear_unwind_protect (fd_index);
 
-      /* Piece table now supports UTF-8 multibyte characters.  Count
-	 characters in the file data.  */
-      ptrdiff_t nchars = 0;
-      if (file_size > 0)
+      if (file_size == 0)
 	{
-	  ptrdiff_t saved_pt = PT;
-	  ptrdiff_t saved_pt_byte = PT_BYTE;
-
-	  /* Count UTF-8 characters in the file data.  */
-	  nchars = multibyte_chars_in_text
-	    ((const unsigned char *) file_data, file_size);
-
-	  /* insert_1_both handles piece table insertion automatically.
-	     For large files, it uses chunked insert internally to
-	     enable fast position conversion (O(log n + chunk_size)
-	     instead of O(n) for a single large piece).  */
-	  insert_1_both (file_data, nchars, file_size, 0, 0, 0);
-
-	  /* Restore PT to start of inserted text.  */
-	  TEMP_SET_PT_BOTH (saved_pt, saved_pt_byte);
+	  xfree (file_data);
+	  inserted = 0;
+	  if (we_locked_file)
+	    Funlock_file (BVAR (current_buffer, file_truename));
+	  Vdeactivate_mark = old_Vdeactivate_mark;
 	}
-      xfree (file_data);
+      else
+	{
+	  Fset (Qdeactivate_mark, Qt);
 
-      /* inserted is character count, not byte count.  */
-      inserted = nchars;
+	  /* Detect coding system from the raw file data.  */
+	  if (NILP (coding_system))
+	    {
+	      if (!NILP (Vcoding_system_for_read))
+		coding_system = Vcoding_system_for_read;
+	      else
+		{
+		  /* Use detect_coding_system on the first chunk.  */
+		  ptrdiff_t detect_len = min (file_size, 4096);
+		  coding_system
+		    = detect_coding_system ((unsigned char *) file_data,
+					   detect_len, detect_len, 1, 0,
+					   coding_system);
+		  if (CONSP (coding_system))
+		    coding_system = XCAR (coding_system);
+		}
+
+	      if (NILP (coding_system))
+		{
+		  coding_system
+		    = CALLN (Ffind_operation_coding_system,
+			     Qinsert_file_contents, orig_filename,
+			     visit, beg, end, Qnil);
+		  if (CONSP (coding_system))
+		    coding_system = XCAR (coding_system);
+		}
+
+	      if (NILP (coding_system))
+		coding_system = Qundecided;
+	      else
+		CHECK_CODING_SYSTEM (coding_system);
+
+	      if (NILP (BVAR (current_buffer,
+			      enable_multibyte_characters)))
+		coding_system = raw_text_coding_system (coding_system);
+	    }
+
+	  setup_coding_system (coding_system, &coding);
+	  set_coding_system = true;
+
+	  /* Check if we should make the buffer unibyte for visiting
+	     with raw-text.  */
+	  if (!NILP (visit)
+	      && CODING_FOR_UNIBYTE (&coding)
+	      && NILP (replace))
+	    {
+	      if (file_size > 0)
+		bset_enable_multibyte_characters (current_buffer, Qnil);
+	      else
+		Fset_buffer_multibyte (Qnil);
+	    }
+
+	  coding.dst_multibyte
+	    = !NILP (BVAR (current_buffer,
+			   enable_multibyte_characters));
+
+	  if (CODING_MAY_REQUIRE_DECODING (&coding))
+	    {
+	      /* Wrap raw file data in a unibyte Lisp string for
+		 decode_coding_object.  */
+	      Lisp_Object raw_string
+		= make_unibyte_string (file_data, file_size);
+	      xfree (file_data);
+	      file_data = NULL;
+
+	      ptrdiff_t saved_pt = PT;
+	      ptrdiff_t saved_pt_byte = PT_BYTE;
+
+	      /* Decode from string into piece table buffer.  */
+	      coding.mode |= CODING_MODE_LAST_BLOCK;
+	      decode_coding_object (&coding, raw_string,
+				    0, 0, file_size, file_size,
+				    Fcurrent_buffer ());
+	      inserted = coding.produced_char;
+	      coding_system = CODING_ID_NAME (coding.id);
+
+	      /* Restore PT to start of inserted text.  */
+	      TEMP_SET_PT_BOTH (saved_pt, saved_pt_byte);
+	    }
+	  else
+	    {
+	      /* No decoding needed.  Insert raw bytes directly.  */
+	      ptrdiff_t nchars
+		= multibyte_chars_in_text
+		    ((const unsigned char *) file_data, file_size);
+
+	      ptrdiff_t saved_pt = PT;
+	      ptrdiff_t saved_pt_byte = PT_BYTE;
+
+	      insert_1_both (file_data, nchars, file_size, 0, 0, 0);
+	      xfree (file_data);
+	      file_data = NULL;
+
+	      inserted = nchars;
+
+	      /* Restore PT to start of inserted text.  */
+	      TEMP_SET_PT_BOTH (saved_pt, saved_pt_byte);
+	    }
+
+	  if (file_data)
+	    xfree (file_data);
+	}
+
+      /* Call after-change hooks.  */
+      if (inserted > 0 && total > 0
+	  && (NILP (visit) || !NILP (replace)))
+	{
+	  signal_after_change (PT, 0, inserted);
+	  update_compositions (PT, PT, CHECK_BORDER);
+	}
+
       goto handled;
     }
 #endif

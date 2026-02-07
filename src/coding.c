@@ -298,6 +298,9 @@ encode_coding_XXX (struct coding_system *coding)
 #include "coding.h"
 #include "termhooks.h"
 #include "pdumper.h"
+#ifdef USE_PIECE_TABLE
+#include "piecetbl.h"
+#endif
 
 Lisp_Object Vcoding_system_hash_table;
 
@@ -8089,6 +8092,10 @@ decode_coding_object (struct coding_system *coding,
   coding->src_bytes = bytes;
   coding->src_multibyte = chars < bytes;
 
+#ifdef USE_PIECE_TABLE
+  bool pt_decode_redirect = false;
+#endif
+
   if (STRINGP (src_object))
     {
       coding->src_pos = from;
@@ -8097,8 +8104,6 @@ decode_coding_object (struct coding_system *coding,
   else if (BUFFERP (src_object))
     {
       set_buffer_internal (XBUFFER (src_object));
-      if (from != GPT)
-	move_gap_both (from, from_byte);
       if (BASE_EQ (src_object, dst_object))
 	{
 	  struct Lisp_Marker *tail;
@@ -8111,14 +8116,41 @@ decode_coding_object (struct coding_system *coding,
 	    }
 	  saved_pt = PT, saved_pt_byte = PT_BYTE;
 	  TEMP_SET_PT_BOTH (from, from_byte);
-	  current_buffer->text->inhibit_shrinking = true;
-	  prepare_to_modify_buffer (from, to, NULL);
-	  del_range_2 (from, from_byte, to, to_byte, false);
-	  coding->src_pos = -chars;
-	  coding->src_pos_byte = -bytes;
+#ifdef USE_PIECE_TABLE
+	  if (current_buffer->text->using_piece_table)
+	    {
+	      /* For piece table buffers, extract source as a string and
+		 delete from buffer.  We can't use negative src_pos trick
+		 since there is no gap.  */
+	      Lisp_Object src_string
+		= make_buffer_string_both (from, from_byte,
+					   to, to_byte, 0);
+	      prepare_to_modify_buffer (from, to, NULL);
+	      del_range_2 (from, from_byte, to, to_byte, false);
+	      coding->src_object = src_string;
+	      coding->src_pos = 0;
+	      coding->src_pos_byte = 0;
+	      pt_decode_redirect = true;
+	    }
+	  else
+#endif
+	    {
+	      if (from != GPT)
+		move_gap_both (from, from_byte);
+	      current_buffer->text->inhibit_shrinking = true;
+	      prepare_to_modify_buffer (from, to, NULL);
+	      del_range_2 (from, from_byte, to, to_byte, false);
+	      coding->src_pos = -chars;
+	      coding->src_pos_byte = -bytes;
+	    }
 	}
       else
 	{
+#ifdef USE_PIECE_TABLE
+	  if (!current_buffer->text->using_piece_table)
+#endif
+	    if (from != GPT)
+	      move_gap_both (from, from_byte);
 	  coding->src_pos = from;
 	  coding->src_pos_byte = from_byte;
 	}
@@ -8137,6 +8169,21 @@ decode_coding_object (struct coding_system *coding,
       coding->dst_pos = BEG;
       coding->dst_pos_byte = BEG_BYTE;
     }
+#ifdef USE_PIECE_TABLE
+  else if (BUFFERP (dst_object)
+	   && (pt_decode_redirect
+	       || XBUFFER (dst_object)->text->using_piece_table))
+    {
+      /* Redirect decode output to a gap-based work buffer, then
+	 copy results back to the piece table buffer afterward.  */
+      coding->dst_multibyte
+	= !NILP (BVAR (XBUFFER (dst_object), enable_multibyte_characters));
+      coding->dst_object = code_conversion_save (1, coding->dst_multibyte);
+      coding->dst_pos = BEG;
+      coding->dst_pos_byte = BEG_BYTE;
+      pt_decode_redirect = true;
+    }
+#endif
   else if (BUFFERP (dst_object))
     {
       if (!BASE_EQ (src_object, dst_object))
@@ -8194,6 +8241,34 @@ decode_coding_object (struct coding_system *coding,
       unbind_to (count1, Qnil);
     }
 
+#ifdef USE_PIECE_TABLE
+  if (pt_decode_redirect && BUFFERP (dst_object))
+    {
+      /* Work buffer (coding->dst_object) has the decoded content with
+	 all annotations from post-read hooks.  Copy to the target
+	 piece table buffer via insert_from_buffer, which copies text
+	 AND text properties (intervals).  */
+      struct buffer *work_buf = XBUFFER (coding->dst_object);
+      ptrdiff_t decoded_chars = BUF_Z (work_buf) - BUF_BEG (work_buf);
+      ptrdiff_t decoded_bytes
+	= BUF_Z_BYTE (work_buf) - BUF_BEG_BYTE (work_buf);
+
+      set_buffer_internal (XBUFFER (dst_object));
+      if (saved_pt >= 0)
+	TEMP_SET_PT_BOTH (from, from_byte);
+
+      if (decoded_chars > 0)
+	insert_from_buffer (work_buf, BUF_BEG (work_buf),
+			    decoded_chars, 0);
+
+      coding->produced = decoded_bytes;
+      coding->produced_char = decoded_chars;
+      coding->dst_object = dst_object;
+      coding->dst_pos = from;
+      coding->dst_pos_byte = from_byte;
+    }
+  else
+#endif
   if (EQ (dst_object, Qt))
     {
       coding->dst_object = Fbuffer_string ();
@@ -8219,7 +8294,10 @@ decode_coding_object (struct coding_system *coding,
 	 As we have moved PT while replacing the original buffer
 	 contents, we must recover it now.  */
       set_buffer_internal (XBUFFER (src_object));
-      current_buffer->text->inhibit_shrinking = 0;
+#ifdef USE_PIECE_TABLE
+      if (!current_buffer->text->using_piece_table)
+#endif
+	current_buffer->text->inhibit_shrinking = 0;
       if (saved_pt < from)
 	TEMP_SET_PT_BOTH (saved_pt, saved_pt_byte);
       else if (saved_pt < from + chars)
@@ -8357,8 +8435,11 @@ encode_coding_object (struct coding_system *coding,
       if (XBUFFER (coding->src_object) != current_buffer)
 	kill_src_buffer = 1;
       coding->src_object = Fcurrent_buffer ();
-      if (BEG != GPT)
-	move_gap_both (BEG, BEG_BYTE);
+#ifdef USE_PIECE_TABLE
+      if (!current_buffer->text->using_piece_table)
+#endif
+	if (BEG != GPT)
+	  move_gap_both (BEG, BEG_BYTE);
       coding->src_chars = Z - BEG;
       coding->src_bytes = Z_BYTE - BEG_BYTE;
       coding->src_pos = BEG;
@@ -8389,8 +8470,11 @@ encode_coding_object (struct coding_system *coding,
 	}
       else
 	{
-	  if (from < GPT && to >= GPT)
-	    move_gap_both (from, from_byte);
+#ifdef USE_PIECE_TABLE
+	  if (!current_buffer->text->using_piece_table)
+#endif
+	    if (from < GPT && to >= GPT)
+	      move_gap_both (from, from_byte);
 	  coding->src_pos = from;
 	  coding->src_pos_byte = from_byte;
 	}
@@ -8402,6 +8486,24 @@ encode_coding_object (struct coding_system *coding,
       coding->src_pos_byte = from_byte;
     }
 
+#ifdef USE_PIECE_TABLE
+  bool pt_encode_redirect = false;
+  if (BUFFERP (dst_object)
+      && XBUFFER (dst_object)->text->using_piece_table)
+    {
+      /* Redirect encoded output to a malloc'd C buffer.  The encode
+	 machinery will write there (since dst_object is Qnil), and we
+	 insert the result into the piece table buffer afterward.  */
+      pt_encode_redirect = true;
+      ptrdiff_t dst_bytes = max (1, coding->src_chars);
+      coding->dst_object = Qnil;
+      coding->destination = xmalloc (dst_bytes);
+      coding->dst_bytes = dst_bytes;
+      coding->dst_multibyte
+	= !NILP (BVAR (XBUFFER (dst_object), enable_multibyte_characters));
+    }
+  else
+#endif
   if (BUFFERP (dst_object))
     {
       coding->dst_object = dst_object;
@@ -8440,6 +8542,34 @@ encode_coding_object (struct coding_system *coding,
 
   encode_coding (coding);
 
+#ifdef USE_PIECE_TABLE
+  if (pt_encode_redirect)
+    {
+      /* Insert encoded bytes from malloc'd buffer into the piece
+	 table buffer.  */
+      struct buffer *current = current_buffer;
+      set_buffer_internal (XBUFFER (dst_object));
+      ptrdiff_t insert_at = same_buffer ? from : PT;
+      ptrdiff_t insert_at_byte = same_buffer ? from_byte : PT_BYTE;
+      TEMP_SET_PT_BOTH (insert_at, insert_at_byte);
+
+      insert_1_both ((char *) coding->destination,
+		     coding->produced_char, coding->produced,
+		     0, 0, 0);
+      xfree (coding->destination);
+      coding->destination = NULL;
+      coding->dst_object = dst_object;
+      coding->dst_pos = insert_at;
+      coding->dst_pos_byte = insert_at_byte;
+
+      signal_after_change (insert_at, same_buffer ? to - from : 0,
+			   coding->produced_char);
+      update_compositions (insert_at,
+			   insert_at + coding->produced_char, CHECK_ALL);
+      set_buffer_internal (current);
+    }
+  else
+#endif
   if (EQ (dst_object, Qt))
     {
       if (BUFFERP (coding->dst_object))
@@ -9097,6 +9227,9 @@ DEFUN ("find-coding-systems-region-internal",
   const unsigned char *p, *pbeg, *pend;
   int c;
   Lisp_Object tail, elt, work_table;
+#ifdef USE_PIECE_TABLE
+  char *pt_buf3 = NULL;
+#endif
 
   if (STRINGP (start))
     {
@@ -9119,13 +9252,16 @@ DEFUN ("find-coding-systems-region-internal",
       if (e - s == end_byte - start_byte)
 	return Qt;
 
-      if (s < GPT && GPT < e)
-	{
-	  if (GPT - s < e - GPT)
-	    move_gap_both (s, start_byte);
-	  else
-	    move_gap_both (e, end_byte);
-	}
+#ifdef USE_PIECE_TABLE
+      if (!current_buffer->text->using_piece_table)
+#endif
+	if (s < GPT && GPT < e)
+	  {
+	    if (GPT - s < e - GPT)
+	      move_gap_both (s, start_byte);
+	    else
+	      move_gap_both (e, end_byte);
+	  }
     }
 
   coding_attrs_list = Qnil;
@@ -9147,7 +9283,19 @@ DEFUN ("find-coding-systems-region-internal",
   if (STRINGP (start))
     p = pbeg = SDATA (start);
   else
-    p = pbeg = BYTE_POS_ADDR (start_byte);
+    {
+#ifdef USE_PIECE_TABLE
+      if (current_buffer->text->using_piece_table)
+	{
+	  ptrdiff_t len = end_byte - start_byte;
+	  pt_buf3 = xmalloc (len);
+	  pt_get_text_emacs (start_byte, len, pt_buf3);
+	  p = pbeg = (const unsigned char *) pt_buf3;
+	}
+      else
+#endif
+	p = pbeg = BYTE_POS_ADDR (start_byte);
+    }
   pend = p + (end_byte - start_byte);
 
   while (p < pend && ASCII_CHAR_P (*p)) p++;
@@ -9190,7 +9338,11 @@ DEFUN ("find-coding-systems-region-internal",
 
 	      if (STRINGP (start))
 		pbeg = SDATA (start);
+#ifdef USE_PIECE_TABLE
+	      else if (!pt_buf3)
+#else
 	      else
+#endif
 		pbeg = BYTE_POS_ADDR (start_byte);
 	      p = pbeg + p_offset;
 	      pend = pbeg + pend_offset;
@@ -9204,6 +9356,9 @@ DEFUN ("find-coding-systems-region-internal",
     if (! NILP (XCAR (tail)))
       safe_codings = Fcons (CODING_ATTR_BASE_NAME (XCAR (tail)), safe_codings);
 
+#ifdef USE_PIECE_TABLE
+  xfree (pt_buf3);
+#endif
   return safe_codings;
 }
 
@@ -9231,6 +9386,9 @@ to the string and treated as in `substring'.  */)
   ptrdiff_t from, to;
   const unsigned char *p, *stop, *pend;
   bool ascii_compatible;
+#ifdef USE_PIECE_TABLE
+  char *pt_buf = NULL;
+#endif
 
   setup_coding_system (Fcheck_coding_system (coding_system), &coding);
   attrs = CODING_ID_ATTRS (coding.id);
@@ -9249,12 +9407,27 @@ to the string and treated as in `substring'.  */)
 	  || (ascii_compatible
 	      && (to - from) == (CHAR_TO_BYTE (to) - (CHAR_TO_BYTE (from)))))
 	return Qnil;
-      p = CHAR_POS_ADDR (from);
-      pend = CHAR_POS_ADDR (to);
-      if (from < GPT && to >= GPT)
-	stop = GPT_ADDR;
+#ifdef USE_PIECE_TABLE
+      if (current_buffer->text->using_piece_table)
+	{
+	  ptrdiff_t from_byte = CHAR_TO_BYTE (from);
+	  ptrdiff_t to_byte = CHAR_TO_BYTE (to);
+	  ptrdiff_t len = to_byte - from_byte;
+	  pt_buf = xmalloc (len);
+	  pt_get_text_emacs (from_byte, len, pt_buf);
+	  p = (const unsigned char *) pt_buf;
+	  stop = pend = p + len;
+	}
       else
-	stop = pend;
+#endif
+	{
+	  p = CHAR_POS_ADDR (from);
+	  pend = CHAR_POS_ADDR (to);
+	  if (from < GPT && to >= GPT)
+	    stop = GPT_ADDR;
+	  else
+	    stop = pend;
+	}
     }
   else
     {
@@ -9307,16 +9480,24 @@ to the string and treated as in `substring'.  */)
       from++;
       if (charset_map_loaded && NILP (string))
 	{
-	  p = CHAR_POS_ADDR (from);
-	  pend = CHAR_POS_ADDR (to);
-	  if (from < GPT && to >= GPT)
-	    stop = GPT_ADDR;
-	  else
-	    stop = pend;
+#ifdef USE_PIECE_TABLE
+	  if (!pt_buf)
+#endif
+	    {
+	      p = CHAR_POS_ADDR (from);
+	      pend = CHAR_POS_ADDR (to);
+	      if (from < GPT && to >= GPT)
+		stop = GPT_ADDR;
+	      else
+		stop = pend;
+	    }
 	  charset_map_loaded = 0;
 	}
     }
 
+#ifdef USE_PIECE_TABLE
+  xfree (pt_buf);
+#endif
   return (NILP (count) ? Fcar (positions) : Fnreverse (positions));
 }
 
@@ -9350,6 +9531,9 @@ is nil.  */)
   const unsigned char *p, *pbeg, *pend;
   int c;
   Lisp_Object tail, elt, attrs;
+#ifdef USE_PIECE_TABLE
+  char *pt_buf2 = NULL;
+#endif
 
   if (STRINGP (start))
     {
@@ -9373,13 +9557,16 @@ is nil.  */)
       if (e - s == end_byte - start_byte)
 	return Qnil;
 
-      if (s < GPT && GPT < e)
-	{
-	  if (GPT - s < e - GPT)
-	    move_gap_both (s, start_byte);
-	  else
-	    move_gap_both (e, end_byte);
-	}
+#ifdef USE_PIECE_TABLE
+      if (!current_buffer->text->using_piece_table)
+#endif
+	if (s < GPT && GPT < e)
+	  {
+	    if (GPT - s < e - GPT)
+	      move_gap_both (s, start_byte);
+	    else
+	      move_gap_both (e, end_byte);
+	  }
       pos = s;
     }
 
@@ -9399,7 +9586,19 @@ is nil.  */)
   if (STRINGP (start))
     p = pbeg = SDATA (start);
   else
-    p = pbeg = BYTE_POS_ADDR (start_byte);
+    {
+#ifdef USE_PIECE_TABLE
+      if (current_buffer->text->using_piece_table)
+	{
+	  ptrdiff_t len = end_byte - start_byte;
+	  pt_buf2 = xmalloc (len);
+	  pt_get_text_emacs (start_byte, len, pt_buf2);
+	  p = pbeg = (const unsigned char *) pt_buf2;
+	}
+      else
+#endif
+	p = pbeg = BYTE_POS_ADDR (start_byte);
+    }
   pend = p + (end_byte - start_byte);
 
   while (p < pend && ASCII_CHAR_P (*p)) p++, pos++;
@@ -9426,7 +9625,11 @@ is nil.  */)
 
 	      if (STRINGP (start))
 		pbeg = SDATA (start);
+#ifdef USE_PIECE_TABLE
+	      else if (!pt_buf2)
+#else
 	      else
+#endif
 		pbeg = BYTE_POS_ADDR (start_byte);
 	      p = pbeg + p_offset;
 	      pend = pbeg + pend_offset;
@@ -9445,6 +9648,9 @@ is nil.  */)
 		      list);
     }
 
+#ifdef USE_PIECE_TABLE
+  xfree (pt_buf2);
+#endif
   return list;
 }
 
