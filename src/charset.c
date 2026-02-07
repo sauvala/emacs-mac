@@ -38,6 +38,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "charset.h"
 #include "coding.h"
 #include "buffer.h"
+#ifdef USE_PIECE_TABLE
+#include "piecetbl.h"
+#endif
 #include "sysstdio.h"
 #include "pdumper.h"
 
@@ -1543,29 +1546,46 @@ only `ascii', `eight-bit-control', and `eight-bit-graphic'.  */)
   from = XFIXNAT (beg);
   stop = to = XFIXNAT (end);
 
-  if (from < GPT && GPT < to)
-    {
-      stop = GPT;
-      stop_byte = GPT_BYTE;
-    }
-  else
-    stop_byte = CHAR_TO_BYTE (stop);
-
   from_byte = CHAR_TO_BYTE (from);
 
   charsets = make_nil_vector (charset_table_used);
-  while (1)
+
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
     {
-      find_charsets_in_text (BYTE_POS_ADDR (from_byte), stop - from,
-			     stop_byte - from_byte, charsets, table,
-			     multibyte);
-      if (stop < to)
+      /* Linearize the region and pass to find_charsets_in_text.  */
+      ptrdiff_t to_byte = CHAR_TO_BYTE (to);
+      ptrdiff_t nbytes = to_byte - from_byte;
+      char *tmp = xmalloc (nbytes);
+      pt_get_text_emacs (from_byte, nbytes, tmp);
+      find_charsets_in_text ((unsigned char *) tmp, to - from,
+			     nbytes, charsets, table, multibyte);
+      xfree (tmp);
+    }
+  else
+#endif
+    {
+      if (from < GPT && GPT < to)
 	{
-	  from = stop, from_byte = stop_byte;
-	  stop = to, stop_byte = CHAR_TO_BYTE (stop);
+	  stop = GPT;
+	  stop_byte = GPT_BYTE;
 	}
       else
-	break;
+	stop_byte = CHAR_TO_BYTE (stop);
+
+      while (1)
+	{
+	  find_charsets_in_text (BYTE_POS_ADDR (from_byte), stop - from,
+				stop_byte - from_byte, charsets, table,
+				multibyte);
+	  if (stop < to)
+	    {
+	      from = stop, from_byte = stop_byte;
+	      stop = to, stop_byte = CHAR_TO_BYTE (stop);
+	    }
+	  else
+	    break;
+	}
     }
 
   val = Qnil;

@@ -34,6 +34,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "textconv.h"
 #include "buffer.h"
+#ifdef USE_PIECE_TABLE
+#include "piecetbl.h"
+#endif
 #include "syntax.h"
 #include "blockinput.h"
 #include "keyboard.h"
@@ -87,6 +90,14 @@ copy_buffer_text (ptrdiff_t beg, ptrdiff_t beg_byte,
 		  ptrdiff_t end, ptrdiff_t end_byte,
 		  char *buffer)
 {
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
+    {
+      pt_get_text_emacs (beg_byte, end_byte - beg_byte, buffer);
+      return;
+    }
+#endif
+
   ptrdiff_t beg0, end0, beg1, end1, size;
 
   if (beg_byte < GPT_BYTE && GPT_BYTE < end_byte)

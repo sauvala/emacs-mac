@@ -47,6 +47,9 @@ along with GNU Emacs Mac port.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "atimer.h"
 #include "font.h"
 #include "menu.h"
+#ifdef USE_PIECE_TABLE
+#include "piece_table.h"
+#endif
 
 
 
@@ -5308,6 +5311,44 @@ mac_ax_line_for_index (struct frame *f, EMACS_INT index)
 {
   struct buffer *b = XBUFFER (XWINDOW (f->selected_window)->contents);
   EMACS_INT line;
+
+#ifdef USE_PIECE_TABLE
+  if (b->text->using_piece_table)
+    {
+      ptrdiff_t limit_byte;
+      if (index >= 0)
+	limit_byte = buf_charpos_to_bytepos (b, BUF_BEGV (b) + index);
+      else
+	limit_byte = BUF_PT_BYTE (b);
+      ptrdiff_t begv_byte = BUF_BEGV_BYTE (b);
+
+      if (limit_byte < begv_byte || limit_byte > BUF_ZV_BYTE (b))
+	return -1;
+
+      line = 0;
+      ptrdiff_t offset = begv_byte - BEG_BYTE;
+      ptrdiff_t remain = limit_byte - begv_byte;
+      while (remain > 0)
+	{
+	  size_t avail;
+	  const unsigned char *p
+	    = pt_get_contiguous (b->text->piece_table, offset, &avail);
+	  if (avail > (size_t) remain)
+	    avail = remain;
+	  const unsigned char *start = p;
+	  const unsigned char *pend = p + avail;
+	  while ((start = memchr (start, '\n', pend - start)) != NULL)
+	    {
+	      line++;
+	      start++;
+	    }
+	  offset += avail;
+	  remain -= avail;
+	}
+      return line;
+    }
+#endif
+
   const unsigned char *limit, *begv, *zv, *gap_end, *p;
 
   if (index >= 0)
@@ -5334,6 +5375,43 @@ mac_ax_line_for_index (struct frame *f, EMACS_INT index)
 
   return line;
 }
+
+#ifdef USE_PIECE_TABLE
+/* Skip N newlines starting from byte position START_BYTE up to
+   END_BYTE in buffer BUF using piece table.  Return the byte position
+   after the Nth newline, or 0 if not found.  */
+static ptrdiff_t
+mac_ax_buffer_skip_lines_pt (struct buffer *buf, EMACS_INT n,
+			     ptrdiff_t start_byte, ptrdiff_t end_byte)
+{
+  ptrdiff_t offset = start_byte - BEG_BYTE;
+  ptrdiff_t remain = end_byte - start_byte;
+
+  while (n > 0 && remain > 0)
+    {
+      size_t avail;
+      const unsigned char *p
+	= pt_get_contiguous (buf->text->piece_table, offset, &avail);
+      if (avail > (size_t) remain)
+	avail = remain;
+      const unsigned char *found = memchr (p, '\n', avail);
+      if (found)
+	{
+	  ptrdiff_t consumed = found - p + 1;
+	  offset += consumed;
+	  remain -= consumed;
+	  n--;
+	}
+      else
+	{
+	  offset += avail;
+	  remain -= avail;
+	}
+    }
+
+  return n == 0 ? offset + BEG_BYTE : 0;
+}
+#endif
 
 static unsigned char *
 mac_ax_buffer_skip_lines (struct buffer *buf, EMACS_INT n,
@@ -5375,11 +5453,37 @@ int
 mac_ax_range_for_line (struct frame *f, EMACS_INT line, CFRange *range)
 {
   struct buffer *b = XBUFFER (XWINDOW (f->selected_window)->contents);
-  unsigned char *begv, *zv, *p;
   EMACS_INT start, end;
 
   if (line < 0)
     return 0;
+
+#ifdef USE_PIECE_TABLE
+  if (b->text->using_piece_table)
+    {
+      ptrdiff_t begv_byte = BUF_BEGV_BYTE (b);
+      ptrdiff_t zv_byte = BUF_ZV_BYTE (b);
+
+      ptrdiff_t p_byte = mac_ax_buffer_skip_lines_pt (b, line,
+						      begv_byte, zv_byte);
+      if (p_byte == 0)
+	return 0;
+
+      start = buf_bytepos_to_charpos (b, p_byte);
+      ptrdiff_t p2_byte = mac_ax_buffer_skip_lines_pt (b, 1,
+						       p_byte, zv_byte);
+      if (p2_byte)
+	end = buf_bytepos_to_charpos (b, p2_byte);
+      else
+	end = BUF_ZV (b);
+
+      range->location = start - BUF_BEGV (b);
+      range->length = end - start;
+      return 1;
+    }
+#endif
+
+  unsigned char *begv, *zv, *p;
 
   begv = BUF_BYTE_ADDRESS (b, BUF_BEGV_BYTE (b));
   zv = BUF_BYTE_ADDRESS (b, BUF_ZV_BYTE (b));

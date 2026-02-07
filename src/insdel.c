@@ -973,8 +973,11 @@ insert_1_both (const char *string,
   eassert (GPT <= GPT_BYTE);
 
   /* The insert may have been in the unchanged region, so check again.  */
-  if (Z - GPT < END_UNCHANGED)
-    END_UNCHANGED = Z - GPT;
+#ifdef USE_PIECE_TABLE
+  if (!current_buffer->text->using_piece_table)
+#endif
+    if (Z - GPT < END_UNCHANGED)
+      END_UNCHANGED = Z - GPT;
 
   adjust_markers_for_insert (PT, PT_BYTE,
 			     PT + nchars, PT_BYTE + nbytes,
@@ -1168,8 +1171,11 @@ insert_from_string_1 (Lisp_Object string, ptrdiff_t pos, ptrdiff_t pos_byte,
   eassert (GPT <= GPT_BYTE);
 
   /* The insert may have been in the unchanged region, so check again.  */
-  if (Z - GPT < END_UNCHANGED)
-    END_UNCHANGED = Z - GPT;
+#ifdef USE_PIECE_TABLE
+  if (!current_buffer->text->using_piece_table)
+#endif
+    if (Z - GPT < END_UNCHANGED)
+      END_UNCHANGED = Z - GPT;
 
   adjust_markers_for_insert (PT, PT_BYTE, PT + nchars,
 			     PT_BYTE + outgoing_nbytes,
@@ -1374,62 +1380,151 @@ insert_from_buffer_1 (struct buffer *buf,
      or make it smaller.  */
   prepare_to_modify_buffer (PT, PT, NULL);
 
-  if (PT != GPT)
-    move_gap_both (PT, PT_BYTE);
-  if (GAP_SIZE < outgoing_nbytes)
-    make_gap (outgoing_nbytes - GAP_SIZE);
-
-  if (from < BUF_GPT (buf))
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
     {
-      chunk = BUF_GPT_BYTE (buf) - from_byte;
-      if (chunk > incoming_nbytes)
-	chunk = incoming_nbytes;
-      /* Record number of output bytes, so we know where
-	 to put the output from the second copy_text.  */
-      chunk_expanded
-	= copy_text (BUF_BYTE_ADDRESS (buf, from_byte),
-		     GPT_ADDR, chunk,
-		     ! NILP (BVAR (buf, enable_multibyte_characters)),
-		     ! NILP (BVAR (current_buffer, enable_multibyte_characters)));
+      /* Extract source text into a temporary buffer, handling
+	 multibyte conversion if needed.  */
+      char *tmp = xmalloc (outgoing_nbytes);
+      bool src_multibyte = !NILP (BVAR (buf, enable_multibyte_characters));
+      bool dst_multibyte = !NILP (BVAR (current_buffer,
+					enable_multibyte_characters));
+
+      if (src_multibyte == dst_multibyte)
+	{
+	  /* No conversion needed.  Extract directly from source.  */
+	  struct buffer *old = current_buffer;
+	  current_buffer = buf;
+	  if (buf->text->using_piece_table)
+	    pt_get_text_emacs (from_byte, incoming_nbytes, tmp);
+	  else
+	    {
+	      /* Source uses gap buffer.  Copy around the gap.  */
+	      if (from_byte < BUF_GPT_BYTE (buf)
+		  && BUF_GPT_BYTE (buf) < from_byte + incoming_nbytes)
+		{
+		  ptrdiff_t before = BUF_GPT_BYTE (buf) - from_byte;
+		  memcpy (tmp, BUF_BYTE_ADDRESS (buf, from_byte), before);
+		  memcpy (tmp + before,
+			  BUF_BYTE_ADDRESS (buf, BUF_GPT_BYTE (buf)),
+			  incoming_nbytes - before);
+		}
+	      else
+		memcpy (tmp, BUF_BYTE_ADDRESS (buf, from_byte),
+			incoming_nbytes);
+	    }
+	  current_buffer = old;
+	}
+      else
+	{
+	  /* Need multibyte conversion.  Use copy_text with a temp
+	     extraction from source.  */
+	  char *src_tmp = xmalloc (incoming_nbytes);
+	  struct buffer *old = current_buffer;
+	  current_buffer = buf;
+	  if (buf->text->using_piece_table)
+	    pt_get_text_emacs (from_byte, incoming_nbytes, src_tmp);
+	  else
+	    {
+	      if (from_byte < BUF_GPT_BYTE (buf)
+		  && BUF_GPT_BYTE (buf) < from_byte + incoming_nbytes)
+		{
+		  ptrdiff_t before = BUF_GPT_BYTE (buf) - from_byte;
+		  memcpy (src_tmp, BUF_BYTE_ADDRESS (buf, from_byte),
+			  before);
+		  memcpy (src_tmp + before,
+			  BUF_BYTE_ADDRESS (buf, BUF_GPT_BYTE (buf)),
+			  incoming_nbytes - before);
+		}
+	      else
+		memcpy (src_tmp, BUF_BYTE_ADDRESS (buf, from_byte),
+			incoming_nbytes);
+	    }
+	  current_buffer = old;
+	  copy_text ((unsigned char *) src_tmp, (unsigned char *) tmp,
+		     incoming_nbytes, src_multibyte, dst_multibyte);
+	  xfree (src_tmp);
+	}
+
+      record_insert (PT, nchars);
+      modiff_incr (&MODIFF, nchars);
+      CHARS_MODIFF = MODIFF;
+
+      pt_insert_chunked_emacs (PT_BYTE, tmp, outgoing_nbytes, nchars);
+      xfree (tmp);
+
+      ZV += nchars;
+      Z += nchars;
+      ZV_BYTE += outgoing_nbytes;
+      Z_BYTE += outgoing_nbytes;
+      GPT = Z;
+      GPT_BYTE = Z_BYTE;
     }
   else
-    chunk_expanded = chunk = 0;
+#endif
+    {
+      if (PT != GPT)
+	move_gap_both (PT, PT_BYTE);
+      if (GAP_SIZE < outgoing_nbytes)
+	make_gap (outgoing_nbytes - GAP_SIZE);
 
-  if (chunk < incoming_nbytes)
-    copy_text (BUF_BYTE_ADDRESS (buf, from_byte + chunk),
-	       GPT_ADDR + chunk_expanded, incoming_nbytes - chunk,
-	       ! NILP (BVAR (buf, enable_multibyte_characters)),
-	       ! NILP (BVAR (current_buffer, enable_multibyte_characters)));
+      if (from < BUF_GPT (buf))
+	{
+	  chunk = BUF_GPT_BYTE (buf) - from_byte;
+	  if (chunk > incoming_nbytes)
+	    chunk = incoming_nbytes;
+	  /* Record number of output bytes, so we know where
+	     to put the output from the second copy_text.  */
+	  chunk_expanded
+	    = copy_text (BUF_BYTE_ADDRESS (buf, from_byte),
+			 GPT_ADDR, chunk,
+			 ! NILP (BVAR (buf, enable_multibyte_characters)),
+			 ! NILP (BVAR (current_buffer,
+				       enable_multibyte_characters)));
+	}
+      else
+	chunk_expanded = chunk = 0;
+
+      if (chunk < incoming_nbytes)
+	copy_text (BUF_BYTE_ADDRESS (buf, from_byte + chunk),
+		   GPT_ADDR + chunk_expanded, incoming_nbytes - chunk,
+		   ! NILP (BVAR (buf, enable_multibyte_characters)),
+		   ! NILP (BVAR (current_buffer,
+				 enable_multibyte_characters)));
 
 #ifdef BYTE_COMBINING_DEBUG
-  /* We have copied text into the gap, but we have not altered
-     PT or PT_BYTE yet.  So we can pass PT and PT_BYTE
-     to these functions and get the same results as we would
-     have got earlier on.  Meanwhile, GPT_ADDR does point to
-     the text that has been stored by copy_text.  */
-  if (count_combining_before (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE)
-      || count_combining_after (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE))
-    emacs_abort ();
+      /* We have copied text into the gap, but we have not altered
+	 PT or PT_BYTE yet.  So we can pass PT and PT_BYTE
+	 to these functions and get the same results as we would
+	 have got earlier on.  Meanwhile, GPT_ADDR does point to
+	 the text that has been stored by copy_text.  */
+      if (count_combining_before (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE)
+	  || count_combining_after (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE))
+	emacs_abort ();
 #endif
 
-  record_insert (PT, nchars);
-  modiff_incr (&MODIFF, nchars);
-  CHARS_MODIFF = MODIFF;
+      record_insert (PT, nchars);
+      modiff_incr (&MODIFF, nchars);
+      CHARS_MODIFF = MODIFF;
 
-  GAP_SIZE -= outgoing_nbytes;
-  GPT += nchars;
-  ZV += nchars;
-  Z += nchars;
-  GPT_BYTE += outgoing_nbytes;
-  ZV_BYTE += outgoing_nbytes;
-  Z_BYTE += outgoing_nbytes;
-  if (GAP_SIZE > 0) *(GPT_ADDR) = 0; /* Put an anchor.  */
+      GAP_SIZE -= outgoing_nbytes;
+      GPT += nchars;
+      ZV += nchars;
+      Z += nchars;
+      GPT_BYTE += outgoing_nbytes;
+      ZV_BYTE += outgoing_nbytes;
+      Z_BYTE += outgoing_nbytes;
+      if (GAP_SIZE > 0) *(GPT_ADDR) = 0; /* Put an anchor.  */
+    }
 
   eassert (GPT <= GPT_BYTE);
 
   /* The insert may have been in the unchanged region, so check again.  */
-  if (Z - GPT < END_UNCHANGED)
-    END_UNCHANGED = Z - GPT;
+#ifdef USE_PIECE_TABLE
+  if (!current_buffer->text->using_piece_table)
+#endif
+    if (Z - GPT < END_UNCHANGED)
+      END_UNCHANGED = Z - GPT;
 
   adjust_markers_for_insert (PT, PT_BYTE, PT + nchars,
 			     PT_BYTE + outgoing_nbytes,
@@ -1501,8 +1596,11 @@ adjust_after_replace (ptrdiff_t from, ptrdiff_t from_byte,
     adjust_point (len - nchars_del, len_byte - nbytes_del);
 
   /* As byte combining will decrease Z, we must check this again.  */
-  if (Z - GPT < END_UNCHANGED)
-    END_UNCHANGED = Z - GPT;
+#ifdef USE_PIECE_TABLE
+  if (!current_buffer->text->using_piece_table)
+#endif
+    if (Z - GPT < END_UNCHANGED)
+      END_UNCHANGED = Z - GPT;
 
   check_markers ();
 
@@ -1783,10 +1881,16 @@ replace_range (ptrdiff_t from, ptrdiff_t to, Lisp_Object new,
 
   eassert (GPT <= GPT_BYTE);
 
-  if (GPT - BEG < BEG_UNCHANGED)
-    BEG_UNCHANGED = GPT - BEG;
-  if (Z - GPT < END_UNCHANGED)
-    END_UNCHANGED = Z - GPT;
+#ifdef USE_PIECE_TABLE
+  if (!current_buffer->text->using_piece_table)
+#endif
+    if (GPT - BEG < BEG_UNCHANGED)
+      BEG_UNCHANGED = GPT - BEG;
+#ifdef USE_PIECE_TABLE
+  if (!current_buffer->text->using_piece_table)
+#endif
+    if (Z - GPT < END_UNCHANGED)
+      END_UNCHANGED = Z - GPT;
 
   if (GAP_SIZE < outgoing_insbytes)
     make_gap (outgoing_insbytes - GAP_SIZE);
@@ -1925,10 +2029,16 @@ replace_range_2 (ptrdiff_t from, ptrdiff_t from_byte,
 
   eassert (GPT <= GPT_BYTE);
 
-  if (GPT - BEG < BEG_UNCHANGED)
-    BEG_UNCHANGED = GPT - BEG;
-  if (Z - GPT < END_UNCHANGED)
-    END_UNCHANGED = Z - GPT;
+#ifdef USE_PIECE_TABLE
+  if (!current_buffer->text->using_piece_table)
+#endif
+    if (GPT - BEG < BEG_UNCHANGED)
+      BEG_UNCHANGED = GPT - BEG;
+#ifdef USE_PIECE_TABLE
+  if (!current_buffer->text->using_piece_table)
+#endif
+    if (Z - GPT < END_UNCHANGED)
+      END_UNCHANGED = Z - GPT;
 
   if (GAP_SIZE < insbytes)
     make_gap (insbytes - GAP_SIZE);
@@ -2277,10 +2387,16 @@ del_range_2 (ptrdiff_t from, ptrdiff_t from_byte,
 
   eassert (GPT <= GPT_BYTE);
 
-  if (GPT - BEG < BEG_UNCHANGED)
-    BEG_UNCHANGED = GPT - BEG;
-  if (Z - GPT < END_UNCHANGED)
-    END_UNCHANGED = Z - GPT;
+#ifdef USE_PIECE_TABLE
+  if (!current_buffer->text->using_piece_table)
+#endif
+    if (GPT - BEG < BEG_UNCHANGED)
+      BEG_UNCHANGED = GPT - BEG;
+#ifdef USE_PIECE_TABLE
+  if (!current_buffer->text->using_piece_table)
+#endif
+    if (Z - GPT < END_UNCHANGED)
+      END_UNCHANGED = Z - GPT;
 
   check_markers ();
 

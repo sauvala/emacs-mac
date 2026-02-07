@@ -31,6 +31,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "intervals.h"
 #include "dispextern.h"
 #include "region-cache.h"
+#ifdef USE_PIECE_TABLE
+#include "piecetbl.h"
+#endif
 
 #define CR 015
 
@@ -359,6 +362,94 @@ current_column (void)
   /* Scan backwards from point to the previous newline,
      counting width.  Tab characters are the only complicated case.  */
 
+  col = 0, tab_seen = 0, post_tab = 0;
+
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
+    {
+      ptrdiff_t scan_byte = PT_BYTE;
+      ptrdiff_t begv_byte = BEGV_BYTE;
+
+      while (scan_byte > begv_byte)
+	{
+	  ptrdiff_t floor = BUFFER_FLOOR_OF (scan_byte - 1);
+	  ptrdiff_t chunk_start = max (floor, begv_byte);
+	  unsigned char *base = BYTE_POS_ADDR (chunk_start);
+	  unsigned char *p = base + (scan_byte - chunk_start);
+	  bool found_line = false;
+
+	  while (p > base)
+	    {
+	      ptrdiff_t i, n;
+	      Lisp_Object charvec;
+
+	      c = *--p;
+
+	      if (dp && VECTORP (DISP_CHAR_VECTOR (dp, c)))
+		{
+		  charvec = DISP_CHAR_VECTOR (dp, c);
+		  n = ASIZE (charvec);
+		}
+	      else
+		{
+		  charvec = Qnil;
+		  n = 1;
+		}
+
+	      for (i = n - 1; i >= 0; --i)
+		{
+		  if (VECTORP (charvec))
+		    {
+		      Lisp_Object entry = AREF (charvec, i);
+		      if (GLYPH_CODE_P (entry))
+			c = GLYPH_CODE_CHAR (entry);
+		      else
+			c = ' ';
+		    }
+
+		  if (c >= 040 && c < 0177)
+		    col++;
+		  else if (c == '\n'
+			   || (c == '\r'
+			       && EQ (BVAR (current_buffer,
+					    selective_display), Qt)))
+		    {
+		      found_line = true;
+		      goto pt_start_of_line_found;
+		    }
+		  else if (c == '\t')
+		    {
+		      if (tab_seen)
+			col = ((col + tab_width) / tab_width) * tab_width;
+		      post_tab += col;
+		      col = 0;
+		      tab_seen = 1;
+		    }
+		  else if (VECTORP (charvec))
+		    ++col;
+		  else
+		    col += (ctl_arrow && c < 0200) ? 2 : 4;
+		}
+	    }
+	  scan_byte = chunk_start;
+	  if (found_line)
+	    break;
+	}
+
+    pt_start_of_line_found:
+      if (tab_seen)
+	{
+	  col = ((col + tab_width) / tab_width) * tab_width;
+	  col += post_tab;
+	}
+
+      last_known_column = col;
+      last_known_column_point = PT;
+      last_known_column_modified = MODIFF;
+      return col;
+    }
+#endif
+
   /* Make a pointer for decrementing through the chars before point.  */
   ptr = BYTE_POS_ADDR (PT_BYTE - 1) + 1;
   /* Make a pointer to where consecutive chars leave off,
@@ -369,8 +460,6 @@ current_column (void)
     stop = BEGV_ADDR;
   else
     stop = GAP_END_ADDR;
-
-  col = 0, tab_seen = 0, post_tab = 0;
 
   while (1)
     {

@@ -28,6 +28,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "lisp.h"
 #include "character.h"
 #include "buffer.h"
+#ifdef USE_PIECE_TABLE
+#include "piece_table.h"
+#endif
 #include "window.h"
 
 /* Record one cached position found recently by
@@ -55,6 +58,27 @@ byte_char_debug_check (struct buffer *b, ptrdiff_t charpos, ptrdiff_t bytepos)
   if (NILP (BVAR (b, enable_multibyte_characters)))
     return;
 
+#ifdef USE_PIECE_TABLE
+  if (b->text->using_piece_table)
+    {
+      /* Count chars by iterating through pieces.  */
+      nchars = 0;
+      ptrdiff_t offset = 0;
+      ptrdiff_t remain = bytepos - BUF_BEG_BYTE (b);
+      while (remain > 0)
+	{
+	  size_t avail;
+	  const unsigned char *p
+	    = pt_get_contiguous (b->text->piece_table, offset, &avail);
+	  if (avail > (size_t) remain)
+	    avail = remain;
+	  nchars += multibyte_chars_in_text (p, avail);
+	  offset += avail;
+	  remain -= avail;
+	}
+    }
+  else
+#endif
   if (bytepos > BUF_GPT_BYTE (b))
     nchars
       = multibyte_chars_in_text (BUF_BEG_ADDR (b),

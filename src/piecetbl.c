@@ -270,4 +270,70 @@ pt_get_text_emacs (ptrdiff_t start, ptrdiff_t length, char *buffer)
 		      start - BEG_BYTE, length, buffer);
 }
 
+/* Replace a single byte at byte position BYTEPOS in current buffer's
+   piece table.  BYTEPOS is Emacs's 1-based byte position.  BYTE is
+   the new byte value.  Implemented as delete(1) + insert(1).
+   Return 0 on success, -1 on error.  */
+
+int
+pt_set_byte_emacs (ptrdiff_t bytepos, unsigned char byte)
+{
+  if (!current_buffer->text->using_piece_table
+      || !current_buffer->text->piece_table)
+    return -1;
+  size_t pos = bytepos - BEG_BYTE;
+  if (pt_delete (current_buffer->text->piece_table, pos, 1) != 0)
+    return -1;
+  char c = (char) byte;
+  return pt_insert_with_charlen (current_buffer->text->piece_table,
+				 pos, &c, 1, 1);
+}
+
+/* Return pointer to contiguous data at BYTEPOS (1-based) and set
+   *OUT_LEN to the number of contiguous bytes available starting at
+   the returned pointer.  Returns NULL if out of bounds.  */
+
+const unsigned char *
+pt_get_contiguous_with_len_emacs (ptrdiff_t bytepos, ptrdiff_t *out_len)
+{
+  struct PieceTable *pt = current_buffer->text->piece_table;
+  if (!pt)
+    {
+      *out_len = 0;
+      return empty_buffer;
+    }
+
+  ptrdiff_t pt_pos = bytepos - BEG_BYTE;
+  if (pt_pos < 0 || (size_t) pt_pos >= pt_length (pt))
+    {
+      *out_len = 0;
+      return empty_buffer;
+    }
+
+  size_t avail;
+  const unsigned char *result = pt_get_contiguous (pt, pt_pos, &avail);
+  if (!result)
+    {
+      *out_len = 0;
+      return empty_buffer;
+    }
+  *out_len = (ptrdiff_t) avail;
+  return result;
+}
+
+/* Insert NBYTES bytes (NCHARS characters) of TEXT at byte position
+   BYTEPOS in buffer BUF's piece table.  BYTEPOS is Emacs's 1-based
+   byte position.  Return 0 on success, -1 on error.  */
+
+int
+pt_insert_for_buffer_emacs (struct buffer *buf, ptrdiff_t bytepos,
+			    const char *text, ptrdiff_t nbytes,
+			    ptrdiff_t nchars)
+{
+  if (!buf->text->using_piece_table || !buf->text->piece_table)
+    return -1;
+  return pt_insert_with_charlen (buf->text->piece_table,
+				 bytepos - BEG_BYTE, text, nbytes, nchars);
+}
+
 #endif /* USE_PIECE_TABLE */

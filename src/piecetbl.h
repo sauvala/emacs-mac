@@ -79,6 +79,22 @@ extern ptrdiff_t pt_emacs_bytepos_to_charpos (ptrdiff_t bytepos);
 extern ptrdiff_t pt_get_text_emacs (ptrdiff_t start, ptrdiff_t length,
 				    char *buffer);
 
+/* Replace a single byte at Emacs byte position BYTEPOS with BYTE.
+   This is used where gap buffer code does FETCH_BYTE(pos) = val.  */
+extern int pt_set_byte_emacs (ptrdiff_t bytepos, unsigned char byte);
+
+/* Return pointer to contiguous data at BYTEPOS (1-based) and set
+   *OUT_LEN to the number of contiguous bytes available.  This is
+   useful for scanning loops that need to know piece boundaries.  */
+extern const unsigned char *pt_get_contiguous_with_len_emacs (ptrdiff_t bytepos,
+							      ptrdiff_t *out_len);
+
+/* Insert NBYTES bytes for a specific BUFFER (not necessarily current).
+   BUF is the buffer, BYTEPOS is 1-based byte position.  */
+extern int pt_insert_for_buffer_emacs (struct buffer *buf,
+				       ptrdiff_t bytepos, const char *text,
+				       ptrdiff_t nbytes, ptrdiff_t nchars);
+
 #endif /* USE_PIECE_TABLE */
 
 #endif /* EMACS_PIECETBL_H */

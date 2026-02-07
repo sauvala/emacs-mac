@@ -107,6 +107,9 @@ static struct rlimit nofile_limit;
 #include "buffer.h"
 #include "coding.h"
 #include "process.h"
+#ifdef USE_PIECE_TABLE
+#include "piecetbl.h"
+#endif
 #include "frame.h"
 #include "termopts.h"
 #include "keyboard.h"
@@ -6998,6 +7001,22 @@ set up yet, this function will block until socket setup has completed.  */)
 
   start_byte = CHAR_TO_BYTE (XFIXNUM (start));
   end_byte = CHAR_TO_BYTE (XFIXNUM (end));
+
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
+    {
+      ptrdiff_t nbytes = end_byte - start_byte;
+      char *tmp = xmalloc (nbytes);
+      pt_get_text_emacs (start_byte, nbytes, tmp);
+
+      if (NETCONN_P (proc))
+	wait_while_connecting (proc);
+
+      send_process (proc, tmp, nbytes, Fcurrent_buffer ());
+      xfree (tmp);
+      return Qnil;
+    }
+#endif
 
   if (XFIXNUM (start) < GPT && XFIXNUM (end) > GPT)
     move_gap_both (XFIXNUM (start), start_byte);

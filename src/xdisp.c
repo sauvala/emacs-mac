@@ -483,6 +483,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "character.h"
 #include "category.h"
 #include "buffer.h"
+#ifdef USE_PIECE_TABLE
+#include "piecetbl.h"
+#endif
 #include "charset.h"
 #include "indent.h"
 #include "commands.h"
@@ -9863,7 +9866,33 @@ next_element_from_buffer (struct it *it)
       /* Get the next character, maybe multibyte.  */
       p = BYTE_POS_ADDR (IT_BYTEPOS (*it));
       if (it->multibyte_p && !ASCII_CHAR_P (*p))
-	it->c = string_char_and_length (p, &it->len);
+	{
+#ifdef USE_PIECE_TABLE
+	  /* For piece table buffers, the multibyte sequence might
+	     span two pieces.  Check available contiguous bytes and
+	     use a stack buffer if needed.  */
+	  if (current_buffer->text->using_piece_table)
+	    {
+	      ptrdiff_t avail
+		= BUFFER_CEILING_OF (IT_BYTEPOS (*it))
+		  - IT_BYTEPOS (*it) + 1;
+	      if (avail < MAX_MULTIBYTE_LENGTH)
+		{
+		  unsigned char buf[MAX_MULTIBYTE_LENGTH];
+		  ptrdiff_t remaining
+		    = min (MAX_MULTIBYTE_LENGTH,
+			   ZV_BYTE - IT_BYTEPOS (*it));
+		  for (ptrdiff_t i = 0; i < remaining; i++)
+		    buf[i] = FETCH_BYTE (IT_BYTEPOS (*it) + i);
+		  it->c = string_char_and_length (buf, &it->len);
+		}
+	      else
+		it->c = string_char_and_length (p, &it->len);
+	    }
+	  else
+#endif
+	    it->c = string_char_and_length (p, &it->len);
+	}
       else
 	it->c = *p, it->len = 1;
 
@@ -16830,8 +16859,14 @@ text_outside_line_unchanged_p (struct window *w,
   /* If text or overlays have changed, see where.  */
   if (window_outdated (w))
     {
-      /* Gap in the line?  */
+      /* Gap in the line?  For piece table buffers, GPT == Z (no gap),
+	 so this check always passes.  */
+#ifdef USE_PIECE_TABLE
+      if (!current_buffer->text->using_piece_table
+	  && (GPT < start || Z - GPT < end))
+#else
       if (GPT < start || Z - GPT < end)
+#endif
 	unchanged_p = false;
 
       /* Changes start in front of the line, or end after it?  */
@@ -16845,7 +16880,13 @@ text_outside_line_unchanged_p (struct window *w,
       if (unchanged_p
 	  && FIXNUMP (BVAR (current_buffer, selective_display))
 	  && XFIXNUM (BVAR (current_buffer, selective_display)) > 0
-	  && (BEG_UNCHANGED < start || GPT <= start))
+	  && (BEG_UNCHANGED < start
+#ifdef USE_PIECE_TABLE
+	      || (!current_buffer->text->using_piece_table && GPT <= start)
+#else
+	      || GPT <= start
+#endif
+	      ))
 	unchanged_p = false;
 
       /* If there are overlays at the start or end of the line, these
@@ -18144,8 +18185,20 @@ mark_window_display_accurate_1 (struct window *w, bool accurate_p)
 
       BUF_UNCHANGED_MODIFIED (b) = BUF_MODIFF (b);
       BUF_OVERLAY_UNCHANGED_MODIFIED (b) = BUF_OVERLAY_MODIFF (b);
-      BUF_BEG_UNCHANGED (b) = BUF_GPT (b) - BUF_BEG (b);
-      BUF_END_UNCHANGED (b) = BUF_Z (b) - BUF_GPT (b);
+#ifdef USE_PIECE_TABLE
+      /* For piece table buffers GPT == Z (no gap), so initialize
+	 unchanged regions to cover the entire buffer.  */
+      if (b->text->using_piece_table)
+	{
+	  BUF_BEG_UNCHANGED (b) = BUF_Z (b) - BUF_BEG (b);
+	  BUF_END_UNCHANGED (b) = BUF_Z (b) - BUF_BEG (b);
+	}
+      else
+#endif
+	{
+	  BUF_BEG_UNCHANGED (b) = BUF_GPT (b) - BUF_BEG (b);
+	  BUF_END_UNCHANGED (b) = BUF_Z (b) - BUF_GPT (b);
+	}
 
       w->current_matrix->buffer = b;
       w->current_matrix->begv = BUF_BEGV (b);
@@ -22561,10 +22614,17 @@ try_window_id (struct window *w)
       /* This seems to happen sometimes after saving a buffer.  */
       || BEG_UNCHANGED + END_UNCHANGED > Z_BYTE)
     {
-      if (GPT - BEG < BEG_UNCHANGED)
-	BEG_UNCHANGED = GPT - BEG;
-      if (Z - GPT < END_UNCHANGED)
-	END_UNCHANGED = Z - GPT;
+#ifdef USE_PIECE_TABLE
+      /* For piece table buffers, GPT == Z (no gap), so the gap-based
+	 clipping logic doesn't apply.  Skip it.  */
+      if (!current_buffer->text->using_piece_table)
+#endif
+	{
+	  if (GPT - BEG < BEG_UNCHANGED)
+	    BEG_UNCHANGED = GPT - BEG;
+	  if (Z - GPT < END_UNCHANGED)
+	    END_UNCHANGED = Z - GPT;
+	}
     }
 
   /* The position of the first and last character that has been changed.  */
@@ -29651,6 +29711,14 @@ display_count_lines (ptrdiff_t start_byte,
   return orig_count - count;
 
 }
+
+/* Note: display_count_lines already works with piece table buffers
+   because BUFFER_CEILING_OF and BUFFER_FLOOR_OF return piece
+   boundaries for piece table buffers, and BYTE_POS_ADDR returns
+   valid pointers into piece content.  The pointer arithmetic within
+   each do/while loop stays within a single contiguous piece, so
+   memchr/memrchr work correctly.  The outer while loop then advances
+   to the next piece via the updated start_byte.  */
 
 
 
