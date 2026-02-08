@@ -4955,31 +4955,66 @@ by calling `format-decode', which see.  */)
 	{
 	  Fset (Qdeactivate_mark, Qt);
 
-	  /* Detect coding system from the raw file data.  */
+	  /* Detect coding system.  Follow the same approach as the
+	     gap buffer path: try auto-coding (file-local variables,
+	     BOM, etc.), then file-coding-system-alist, then fall
+	     back to `undecided' and let decode_coding_object's
+	     internal detect_coding handle the real detection on the
+	     full data.  Do NOT call detect_coding_system here — it
+	     can misdetect UTF-8 with non-ASCII bytes as raw-text,
+	     and once raw-text is set, detect_coding inside
+	     decode_coding_object never re-detects.  */
 	  if (NILP (coding_system))
 	    {
 	      if (!NILP (Vcoding_system_for_read))
 		coding_system = Vcoding_system_for_read;
 	      else
 		{
-		  /* Use detect_coding_system on the first chunk.  */
-		  ptrdiff_t detect_len = min (file_size, 4096);
-		  coding_system
-		    = detect_coding_system ((unsigned char *) file_data,
-					   detect_len, detect_len, 1, 0,
-					   coding_system);
-		  if (CONSP (coding_system))
-		    coding_system = XCAR (coding_system);
-		}
+		  /* Try auto-coding (file-local variables, BOM,
+		     magic cookies like "-*- coding: xxx -*-").  */
+		  if (regular && !NILP (Vset_auto_coding_function))
+		    {
+		      /* Insert raw data into a work buffer and call
+			 set-auto-coding-function, mirroring the gap
+			 buffer path (lines 4380-4410).  */
+		      AUTO_STRING (name, " *code-converting-work*");
+		      struct buffer *prev = current_buffer;
+		      record_unwind_current_buffer ();
+		      Lisp_Object workbuf
+			= Fget_buffer_create (name, Qt);
+		      struct buffer *buf = XBUFFER (workbuf);
+		      delete_all_overlays (buf);
+		      bset_directory
+			(buf, BVAR (current_buffer, directory));
+		      bset_read_only (buf, Qnil);
+		      bset_filename (buf, Qnil);
+		      bset_undo_list (buf, Qt);
+		      set_buffer_internal (buf);
+		      Ferase_buffer ();
+		      bset_enable_multibyte_characters (buf, Qnil);
+		      ptrdiff_t detect_len
+			= min (file_size, 4 * 1024);
+		      insert_1_both (file_data, detect_len,
+				     detect_len, 0, 0, 0);
+		      TEMP_SET_PT_BOTH (BEG, BEG_BYTE);
+		      coding_system
+			= calln (Vset_auto_coding_function,
+				 filename,
+				 make_fixnum (detect_len));
+		      set_buffer_internal (prev);
+		      specpdl_ptr--;
+		    }
 
-	      if (NILP (coding_system))
-		{
-		  coding_system
-		    = CALLN (Ffind_operation_coding_system,
-			     Qinsert_file_contents, orig_filename,
-			     visit, beg, end, Qnil);
-		  if (CONSP (coding_system))
-		    coding_system = XCAR (coding_system);
+		  /* Try file-coding-system-alist.  */
+		  if (NILP (coding_system))
+		    {
+		      coding_system
+			= CALLN (Ffind_operation_coding_system,
+				 Qinsert_file_contents, orig_filename,
+				 visit, beg, end, Qnil);
+		      if (CONSP (coding_system))
+			coding_system = XCAR (coding_system);
+		    }
 		}
 
 	      if (NILP (coding_system))
@@ -5011,7 +5046,138 @@ by calling `format-decode', which see.  */)
 	    = !NILP (BVAR (current_buffer,
 			   enable_multibyte_characters));
 
-	  if (CODING_MAY_REQUIRE_DECODING (&coding))
+	  /* Fast path: for valid UTF-8 data with no CR bytes (thus no
+	     EOL conversion needed), the decoded output is byte-for-byte
+	     identical to the input.  Adopt the raw file data directly,
+	     avoiding decode_coding_object entirely.  This matches the
+	     ASCII optimization in decode_coding_gap.  */
+	  Lisp_Object attrs = CODING_ID_ATTRS (coding.id);
+	  Lisp_Object coding_type = CODING_ATTR_TYPE (attrs);
+	  Lisp_Object eol_type = CODING_ID_EOL_TYPE (coding.id);
+	  bool pt_fast_adopted = false;
+
+	  /* This fast path applies when:
+	     - Buffer is empty (initial file load)
+	     - Buffer is multibyte
+	     - Coding is utf-8 (or undecided, which resolves to utf-8)
+	     - No BOM to strip
+	     - No post-read hook or translation tables
+	     - EOL is unix or undecided (we verify no CR in the data)  */
+	  if (Z == BEG
+	      && coding.dst_multibyte
+	      && (EQ (coding_type, Qutf_8) || EQ (coding_type, Qundecided))
+	      && (EQ (coding_type, Qundecided)
+		  || coding.spec.utf_8_bom == utf_without_bom)
+	      && (EQ (eol_type, Qunix) || VECTORP (eol_type))
+	      && NILP (CODING_ATTR_POST_READ (attrs))
+	      && (NILP (Venable_character_translation)
+		  || (NILP (CODING_ATTR_DECODE_TBL (attrs))
+		      && NILP (Vstandard_translation_table_for_decode))))
+	    {
+	      /* Validate UTF-8 and count characters.  For valid UTF-8,
+		 Emacs's internal multibyte encoding is identical.  */
+	      const unsigned char *p = (const unsigned char *) file_data;
+	      const unsigned char *end = p + file_size;
+
+	      /* Reject data with BOM — would need stripping.  */
+	      if (file_size >= 3
+		  && p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF)
+		goto pt_fast_path_skip;
+	      ptrdiff_t nchars = 0;
+	      bool valid = true;
+
+	      while (p < end)
+		{
+		  unsigned char c = *p;
+		  if (c < 0x80)
+		    {
+		      /* Reject CR — means DOS/Mac line endings that
+			 need conversion.  */
+		      if (c == '\r')
+			{ valid = false; break; }
+		      p++;
+		    }
+		  else if (c < 0xC2)
+		    {
+		      /* Overlong or continuation byte.  */
+		      valid = false;
+		      break;
+		    }
+		  else if (c < 0xE0)
+		    {
+		      if (p + 1 >= end || (p[1] & 0xC0) != 0x80)
+			{ valid = false; break; }
+		      p += 2;
+		    }
+		  else if (c < 0xF0)
+		    {
+		      if (p + 2 >= end
+			  || (p[1] & 0xC0) != 0x80
+			  || (p[2] & 0xC0) != 0x80)
+			{ valid = false; break; }
+		      /* Check for overlong and surrogates.  */
+		      unsigned int cp = ((c & 0x0F) << 12)
+			| ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+		      if (cp < 0x800 || (cp >= 0xD800 && cp < 0xE000))
+			{ valid = false; break; }
+		      p += 3;
+		    }
+		  else if (c < 0xF5)
+		    {
+		      if (p + 3 >= end
+			  || (p[1] & 0xC0) != 0x80
+			  || (p[2] & 0xC0) != 0x80
+			  || (p[3] & 0xC0) != 0x80)
+			{ valid = false; break; }
+		      unsigned int cp = ((c & 0x07) << 18)
+			| ((p[1] & 0x3F) << 12)
+			| ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+		      if (cp < 0x10000 || cp > 0x10FFFF)
+			{ valid = false; break; }
+		      p += 4;
+		    }
+		  else
+		    {
+		      valid = false;
+		      break;
+		    }
+		  nchars++;
+		}
+
+	      if (valid
+		  && pt_adopt_original_emacs (file_data, file_size,
+					      nchars) == 0)
+		{
+		  /* Adopted — piece table owns file_data now.  */
+		  BUF_COMPUTE_UNCHANGED (current_buffer, PT, PT);
+		  record_insert (PT, nchars);
+		  modiff_incr (&MODIFF, nchars);
+		  CHARS_MODIFF = MODIFF;
+		  ZV += nchars;
+		  Z += nchars;
+		  ZV_BYTE += file_size;
+		  Z_BYTE += file_size;
+		  GPT = Z;
+		  GPT_BYTE = Z_BYTE;
+		  SET_BUF_PT_BOTH (current_buffer,
+				   PT + nchars, PT_BYTE + file_size);
+		  inserted = nchars;
+		  file_data = NULL;
+		  pt_fast_adopted = true;
+		  /* Resolve coding system: undecided → utf-8-unix.  */
+		  coding_system = Qutf_8_unix;
+
+		  /* Restore PT to start of inserted text.  */
+		  TEMP_SET_PT_BOTH (BEG, BEG_BYTE);
+		}
+	    }
+	pt_fast_path_skip:
+
+	  if (pt_fast_adopted)
+	    {
+	      /* Already adopted above — nothing more to do.  */
+	    }
+	  else if (CODING_MAY_REQUIRE_DECODING (&coding))
 	    {
 	      ptrdiff_t saved_pt = PT;
 	      ptrdiff_t saved_pt_byte = PT_BYTE;
