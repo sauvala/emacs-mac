@@ -1098,7 +1098,7 @@ pt_insert_chunked (PieceTable *pt, size_t position, const char *text,
   while (offset < nbytes)
     {
       size_t chunk_bytes = chunk_size;
-      if (offset + chunk_bytes > nbytes)
+      if (offset + chunk_bytes >= nbytes)
 	chunk_bytes = nbytes - offset;
       else
 	{
