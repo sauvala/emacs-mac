@@ -1974,6 +1974,34 @@ treesit_read_buffer (void *parser, uint32_t byte_index,
        given range in tree-sitter.  Move over, benchmark shows there's
        very little difference between passing a whole chunk vs passing a
        single char at once.  The only cost is funcall I guess.  */
+#ifdef USE_PIECE_TABLE
+  else if (buffer->text->using_piece_table)
+    {
+      /* For piece table buffers, get a pointer into the current piece.
+	 Piece boundaries should always align to UTF-8 character
+	 boundaries, but defensively check that the full multibyte
+	 character fits in the contiguous region.  */
+      static char treesit_mb_buf[MAX_MULTIBYTE_LENGTH];
+      struct buffer *old_buf = current_buffer;
+      current_buffer = buffer;
+      beg = (char *) pt_get_contiguous_emacs (byte_pos);
+      len = BYTES_BY_CHAR_HEAD ((int) (unsigned char) *beg);
+      if (len > 1)
+	{
+	  ptrdiff_t piece_end = pt_contiguous_end_emacs (byte_pos);
+	  ptrdiff_t avail = piece_end - byte_pos + 1;
+	  if (avail < len)
+	    {
+	      /* Character spans piece boundary (shouldn't normally
+		 happen).  Copy bytes to a static buffer.  */
+	      for (int i = 0; i < len; i++)
+		treesit_mb_buf[i] = (char) FETCH_BYTE (byte_pos + i);
+	      beg = treesit_mb_buf;
+	    }
+	}
+      current_buffer = old_buf;
+    }
+#endif
   else
     {
       beg = (char *) BUF_BYTE_ADDRESS (buffer, byte_pos);
