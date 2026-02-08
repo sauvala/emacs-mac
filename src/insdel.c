@@ -917,6 +917,9 @@ insert_1_both (const char *string,
 #ifdef USE_PIECE_TABLE
   if (current_buffer->text->using_piece_table)
     {
+      /* Tell display engine what changed (normally done by gap movement).  */
+      BUF_COMPUTE_UNCHANGED (current_buffer, PT, PT);
+
       /* Record insertion for undo.  */
       record_insert (PT, nchars);
       modiff_incr (&MODIFF, nchars);
@@ -1080,6 +1083,9 @@ insert_from_string_1 (Lisp_Object string, ptrdiff_t pos, ptrdiff_t pos_byte,
 #ifdef USE_PIECE_TABLE
   if (current_buffer->text->using_piece_table)
     {
+      /* Tell display engine what changed (normally done by gap movement).  */
+      BUF_COMPUTE_UNCHANGED (current_buffer, PT, PT);
+
       /* Piece table path: we need to handle multibyte conversion.
 	 For simplicity, convert to a temp buffer first if needed.  */
       const char *insert_data;
@@ -1383,6 +1389,9 @@ insert_from_buffer_1 (struct buffer *buf,
 #ifdef USE_PIECE_TABLE
   if (current_buffer->text->using_piece_table)
     {
+      /* Tell display engine what changed (normally done by gap movement).  */
+      BUF_COMPUTE_UNCHANGED (current_buffer, PT, PT);
+
       /* Extract source text into a temporary buffer, handling
 	 multibyte conversion if needed.  */
       char *tmp = xmalloc (outgoing_nbytes);
@@ -1676,6 +1685,9 @@ replace_range (ptrdiff_t from, ptrdiff_t to, Lisp_Object new,
 	  prepare_to_modify_buffer (from, to, &from);
 	  to = from + nchars_del;
 	}
+
+      /* Tell display engine what changed (normally done by gap movement).  */
+      BUF_COMPUTE_UNCHANGED (current_buffer, from, to);
 
       /* Make args be valid.  */
       if (from < BEGV)
@@ -2012,6 +2024,68 @@ replace_range_2 (ptrdiff_t from, ptrdiff_t from_byte,
   if (nbytes_del <= 0 && insbytes == 0)
     return;
 
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
+    {
+      /* Tell display engine what changed.  */
+      BUF_COMPUTE_UNCHANGED (current_buffer, from, to);
+
+      /* Delete old text.  */
+      if (nbytes_del > 0)
+	{
+	  pt_delete_emacs (from_byte, nbytes_del);
+	  ZV -= nchars_del;
+	  Z -= nchars_del;
+	  ZV_BYTE -= nbytes_del;
+	  Z_BYTE -= nbytes_del;
+	  GPT = Z;
+	  GPT_BYTE = Z_BYTE;
+	}
+
+      /* Insert new text.  */
+      if (insbytes > 0)
+	{
+	  pt_insert_chunked_emacs (from_byte, ins, insbytes, inschars);
+	  ZV += inschars;
+	  Z += inschars;
+	  ZV_BYTE += insbytes;
+	  Z_BYTE += insbytes;
+	  GPT = Z;
+	  GPT_BYTE = Z_BYTE;
+	}
+
+      eassert (GPT <= GPT_BYTE);
+
+      /* Adjust markers for the deletion and the insertion.  */
+      if (! (nchars_del == 1 && inschars == 1 && nbytes_del == insbytes))
+	{
+	  if (markers)
+	    adjust_markers_for_replace (from, from_byte, nchars_del,
+				       nbytes_del, inschars, insbytes);
+	  else
+	    adjust_markers_bytepos (from, from_byte, from + inschars,
+				    from_byte + insbytes, true);
+	}
+
+      offset_intervals (current_buffer, from, inschars - nchars_del);
+
+      /* Relocate point as if it were a marker.  */
+      if (from < PT && (nchars_del != inschars || nbytes_del != insbytes))
+	{
+	  if (PT < to)
+	    adjust_point (from - PT, from_byte - PT_BYTE);
+	  else
+	    adjust_point (inschars - nchars_del, insbytes - nbytes_del);
+	}
+
+      check_markers ();
+
+      modiff_incr (&MODIFF, nchars_del + inschars);
+      CHARS_MODIFF = MODIFF;
+      return;
+    }
+#endif
+
   /* Make sure the gap is somewhere in or next to what we are deleting.  */
   if (from > GPT)
     gap_right (from, from_byte);
@@ -2029,16 +2103,10 @@ replace_range_2 (ptrdiff_t from, ptrdiff_t from_byte,
 
   eassert (GPT <= GPT_BYTE);
 
-#ifdef USE_PIECE_TABLE
-  if (!current_buffer->text->using_piece_table)
-#endif
-    if (GPT - BEG < BEG_UNCHANGED)
-      BEG_UNCHANGED = GPT - BEG;
-#ifdef USE_PIECE_TABLE
-  if (!current_buffer->text->using_piece_table)
-#endif
-    if (Z - GPT < END_UNCHANGED)
-      END_UNCHANGED = Z - GPT;
+  if (GPT - BEG < BEG_UNCHANGED)
+    BEG_UNCHANGED = GPT - BEG;
+  if (Z - GPT < END_UNCHANGED)
+    END_UNCHANGED = Z - GPT;
 
   if (GAP_SIZE < insbytes)
     make_gap (insbytes - GAP_SIZE);
@@ -2300,6 +2368,9 @@ del_range_2 (ptrdiff_t from, ptrdiff_t from_byte,
 #ifdef USE_PIECE_TABLE
   if (current_buffer->text->using_piece_table)
     {
+      /* Tell display engine what changed (normally done by gap movement).  */
+      BUF_COMPUTE_UNCHANGED (current_buffer, from, to);
+
       /* Get the deleted text for undo (if needed).  */
       if (ret_string || ! EQ (BVAR (current_buffer, undo_list), Qt))
 	deletion = make_buffer_string_both (from, from_byte, to, to_byte, 1);

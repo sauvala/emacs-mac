@@ -18185,16 +18185,8 @@ mark_window_display_accurate_1 (struct window *w, bool accurate_p)
 
       BUF_UNCHANGED_MODIFIED (b) = BUF_MODIFF (b);
       BUF_OVERLAY_UNCHANGED_MODIFIED (b) = BUF_OVERLAY_MODIFF (b);
-#ifdef USE_PIECE_TABLE
-      /* For piece table buffers GPT == Z (no gap), so initialize
-	 unchanged regions to cover the entire buffer.  */
-      if (b->text->using_piece_table)
-	{
-	  BUF_BEG_UNCHANGED (b) = BUF_Z (b) - BUF_BEG (b);
-	  BUF_END_UNCHANGED (b) = BUF_Z (b) - BUF_BEG (b);
-	}
-      else
-#endif
+      /* For piece table buffers, GPT == Z (no gap), so this
+	 gives BEG_UNCHANGED = Z - BEG, END_UNCHANGED = 0.  */
 	{
 	  BUF_BEG_UNCHANGED (b) = BUF_GPT (b) - BUF_BEG (b);
 	  BUF_END_UNCHANGED (b) = BUF_Z (b) - BUF_GPT (b);
@@ -22614,17 +22606,12 @@ try_window_id (struct window *w)
       /* This seems to happen sometimes after saving a buffer.  */
       || BEG_UNCHANGED + END_UNCHANGED > Z_BYTE)
     {
-#ifdef USE_PIECE_TABLE
-      /* For piece table buffers, GPT == Z (no gap), so the gap-based
-	 clipping logic doesn't apply.  Skip it.  */
-      if (!current_buffer->text->using_piece_table)
-#endif
-	{
-	  if (GPT - BEG < BEG_UNCHANGED)
-	    BEG_UNCHANGED = GPT - BEG;
-	  if (Z - GPT < END_UNCHANGED)
-	    END_UNCHANGED = Z - GPT;
-	}
+      /* For piece table buffers, GPT == Z, so these clamp
+	 BEG_UNCHANGED to Z - BEG and END_UNCHANGED to 0.  */
+      if (GPT - BEG < BEG_UNCHANGED)
+	BEG_UNCHANGED = GPT - BEG;
+      if (Z - GPT < END_UNCHANGED)
+	END_UNCHANGED = Z - GPT;
     }
 
   /* The position of the first and last character that has been changed.  */
