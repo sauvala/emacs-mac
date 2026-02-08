@@ -25,6 +25,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "lisp.h"
 #include "character.h"
 #include "buffer.h"
+#ifdef USE_PIECE_TABLE
+#include "piecetbl.h"
+#endif
 #include "commands.h"
 #include "syntax.h"
 #include "composite.h"
@@ -446,6 +449,45 @@ do_casify_unibyte_region (struct casing_context *ctx,
   ptrdiff_t first = -1, last = -1;  /* Position of first and last changes.  */
   ptrdiff_t end = *endp;
 
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
+    {
+      /* Can't modify piece table memory in place.  Extract the
+	 region, apply case changes to the copy, and replace.  */
+      ptrdiff_t n = end - *startp;
+      ptrdiff_t start_byte = CHAR_TO_BYTE (*startp);
+      unsigned char *tmp = xmalloc (n);
+      pt_get_text_emacs (start_byte, n, (char *) tmp);
+
+      for (ptrdiff_t i = 0; i < n; i++)
+	{
+	  int ch = make_char_multibyte (tmp[i]);
+	  int cased = case_single_character (ctx, ch);
+	  if (cased != ch)
+	    {
+	      if (first < 0)
+		first = *startp + i;
+	      last = *startp + i + 1;
+	      tmp[i] = make_char_unibyte (cased);
+	    }
+	}
+
+      if (first >= 0)
+	{
+	  ptrdiff_t first_byte = CHAR_TO_BYTE (first);
+	  ptrdiff_t last_byte = CHAR_TO_BYTE (last);
+	  replace_range_2 (first, first_byte, last, last_byte,
+			   (const char *) (tmp + (first - *startp)),
+			   last - first, last_byte - first_byte, 0);
+	}
+
+      xfree (tmp);
+      *startp = first;
+      *endp = last;
+      return 0;
+    }
+#endif
+
   for (ptrdiff_t pos = *startp; pos < end; ++pos)
     {
       int ch = make_char_multibyte (FETCH_BYTE (pos));
@@ -457,8 +499,6 @@ do_casify_unibyte_region (struct casing_context *ctx,
       if (first < 0)
 	first = pos;
 
-      /* Note: FETCH_BYTE_LVALUE only works with gap buffers.
-	 Piece table buffers would require different handling.  */
       FETCH_BYTE_LVALUE (pos) = make_char_unibyte (cased);
     }
 
@@ -497,7 +537,12 @@ do_casify_multibyte_region (struct casing_context *ctx,
       if (first < 0)
 	first = pos;
 
-      if (buf.len_chars == 1 && buf.len_bytes == len)
+      if (buf.len_chars == 1 && buf.len_bytes == len
+#ifdef USE_PIECE_TABLE
+	  && !current_buffer->text->using_piece_table
+#endif
+	  )
+	/* Same byte length: replace in place (gap buffer only).  */
 	memcpy (BYTE_POS_ADDR (pos_byte), buf.data, len);
       else
 	{
