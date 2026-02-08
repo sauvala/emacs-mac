@@ -1104,8 +1104,18 @@ position_indentation (ptrdiff_t pos_byte)
   unsigned char *start;
   ptrdiff_t next_boundary_byte = pos_byte;
   ptrdiff_t ceiling = next_boundary_byte;
+#ifdef USE_PIECE_TABLE
+  /* Track the byte position corresponding to where p was last set,
+     so we can compute pos_byte from pointer arithmetic instead of
+     PTR_BYTE_POS (which uses gap buffer math).  */
+  ptrdiff_t region_byte_origin = pos_byte;
+  unsigned char *region_ptr_origin;
+#endif
 
   p = BYTE_POS_ADDR (pos_byte);
+#ifdef USE_PIECE_TABLE
+  region_ptr_origin = p;
+#endif
   /* STOP records the value of P at which we will need
      to think about the gap, or about invisible text,
      or about the end of the buffer.  */
@@ -1121,7 +1131,14 @@ position_indentation (ptrdiff_t pos_byte)
 	  /* If we have updated P, set POS_BYTE to match.
 	     The first time we enter the loop, POS_BYTE is already right.  */
 	  if (p != start)
-	    pos_byte = PTR_BYTE_POS (p);
+	    {
+#ifdef USE_PIECE_TABLE
+	      if (current_buffer->text->using_piece_table)
+		pos_byte = region_byte_origin + (p - region_ptr_origin);
+	      else
+#endif
+		pos_byte = PTR_BYTE_POS (p);
+	    }
 	  /* Consider the various reasons STOP might have been set here.  */
 	  if (pos_byte == ZV_BYTE)
 	    return column;
@@ -1144,6 +1161,10 @@ position_indentation (ptrdiff_t pos_byte)
 
 	  stop = BYTE_POS_ADDR (stop_pos_byte - 1) + 1;
 	  p = BYTE_POS_ADDR (pos_byte);
+#ifdef USE_PIECE_TABLE
+	  region_byte_origin = pos_byte;
+	  region_ptr_origin = p;
+#endif
 	}
       switch (*p++)
 	{
@@ -1163,13 +1184,22 @@ position_indentation (ptrdiff_t pos_byte)
 	    return column;
 	  {
 	    int c;
-	    pos_byte = PTR_BYTE_POS (p - 1);
+#ifdef USE_PIECE_TABLE
+	    if (current_buffer->text->using_piece_table)
+	      pos_byte = region_byte_origin + (p - 1 - region_ptr_origin);
+	    else
+#endif
+	      pos_byte = PTR_BYTE_POS (p - 1);
 	    c = FETCH_MULTIBYTE_CHAR (pos_byte);
 	    if (CHAR_HAS_CATEGORY (c, ' '))
 	      {
 		column++;
 		pos_byte += next_char_len (pos_byte);
 		p = BYTE_POS_ADDR (pos_byte);
+#ifdef USE_PIECE_TABLE
+		region_byte_origin = pos_byte;
+		region_ptr_origin = p;
+#endif
 	      }
 	    else
 	      return column;

@@ -7005,15 +7005,16 @@ set up yet, this function will block until socket setup has completed.  */)
 #ifdef USE_PIECE_TABLE
   if (current_buffer->text->using_piece_table)
     {
-      ptrdiff_t nbytes = end_byte - start_byte;
-      char *tmp = xmalloc (nbytes);
-      pt_get_text_emacs (start_byte, nbytes, tmp);
+      /* Extract region as a Lisp string so send_process uses the
+	 STRINGP path for encoding, avoiding PTR_BYTE_POS which
+	 cannot convert piece table pointers.  */
+      Lisp_Object str = make_buffer_string_both (XFIXNUM (start), start_byte,
+						 XFIXNUM (end), end_byte, 0);
 
       if (NETCONN_P (proc))
 	wait_while_connecting (proc);
 
-      send_process (proc, tmp, nbytes, Fcurrent_buffer ());
-      xfree (tmp);
+      send_process (proc, SSDATA (str), SBYTES (str), str);
       return Qnil;
     }
 #endif

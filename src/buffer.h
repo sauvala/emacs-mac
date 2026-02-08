@@ -1192,11 +1192,16 @@ BYTE_TO_CHAR (ptrdiff_t bytepos)
   return buf_bytepos_to_charpos (current_buffer, bytepos);
 }
 
-/* Convert PTR, the address of a byte in the buffer, into a byte position.  */
+/* Convert PTR, the address of a byte in the buffer, into a byte position.
+   This uses gap buffer arithmetic and must NOT be called on piece table
+   buffers.  Callers must use explicit byte position tracking instead.  */
 
 INLINE ptrdiff_t
 PTR_BYTE_POS (unsigned char const *ptr)
 {
+#ifdef USE_PIECE_TABLE
+  eassert (!current_buffer->text->using_piece_table);
+#endif
   ptrdiff_t byte = ptr - current_buffer->text->beg;
   return byte - (byte <= GPT_BYTE - BEG_BYTE ? 0 : GAP_SIZE) + BEG_BYTE;
 }
@@ -1545,6 +1550,9 @@ BUF_CHAR_ADDRESS (struct buffer *buf, ptrdiff_t pos)
 INLINE ptrdiff_t
 BUF_PTR_BYTE_POS (struct buffer *buf, unsigned char *ptr)
 {
+#ifdef USE_PIECE_TABLE
+  eassert (!buf->text->using_piece_table);
+#endif
   ptrdiff_t byte = ptr - buf->text->beg;
   return (byte - (byte <= BUF_GPT_BYTE (buf) - BEG_BYTE ? 0 : BUF_GAP_SIZE (buf))
 	  + BEG_BYTE);
