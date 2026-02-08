@@ -193,6 +193,22 @@ pt_insert_chunked_emacs (ptrdiff_t bytepos, const char *text,
 			    text, (size_t) nbytes, (size_t) nchars, 0);
 }
 
+/* Adopt DATA as the original buffer of the current buffer's piece
+   table.  The piece table must be empty.  Takes ownership of DATA
+   (allocated with xmalloc).  NBYTES is byte size, NCHARS is character
+   count.  Return 0 on success, -1 on error.  */
+
+int
+pt_adopt_original_emacs (char *data, ptrdiff_t nbytes, ptrdiff_t nchars)
+{
+  if (!current_buffer->text->using_piece_table
+      || !current_buffer->text->piece_table)
+    return -1;
+
+  return pt_adopt_original_buffer (current_buffer->text->piece_table,
+				   data, (size_t) nbytes, (size_t) nchars);
+}
+
 /* Delete NBYTES bytes starting at byte position BYTEPOS in current
    buffer's piece table.  BYTEPOS is Emacs's 1-based byte position.
    Return 0 on success, -1 on error.  */

@@ -56,6 +56,13 @@ extern PieceTable *pt_create_with_content_ex (const char *content,
 					      size_t length,
 					      bool disable_undo);
 
+/* Adopt DATA as the original buffer of an empty piece table.  Takes
+   ownership of DATA (which must have been allocated with malloc).
+   NBYTES is the data size; NCHARS is the character count.
+   Returns 0 on success, -1 on error.  */
+extern int pt_adopt_original_buffer (PieceTable *pt, char *data,
+				     size_t nbytes, size_t nchars);
+
 /* Destroy a piece table and free all resources.  PT may be NULL.  */
 extern void pt_destroy (PieceTable *pt);
 

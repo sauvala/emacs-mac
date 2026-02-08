@@ -1459,8 +1459,17 @@ insert_from_buffer_1 (struct buffer *buf,
       modiff_incr (&MODIFF, nchars);
       CHARS_MODIFF = MODIFF;
 
-      pt_insert_chunked_emacs (PT_BYTE, tmp, outgoing_nbytes, nchars);
-      xfree (tmp);
+      /* If the piece table is empty (e.g., initial file load), adopt
+	 the buffer directly instead of copying through chunked insert.
+	 This avoids one full-size memcpy.  */
+      if (Z == BEG
+	  && pt_adopt_original_emacs (tmp, outgoing_nbytes, nchars) == 0)
+	tmp = NULL;  /* Adopted — don't free.  */
+      else
+	{
+	  pt_insert_chunked_emacs (PT_BYTE, tmp, outgoing_nbytes, nchars);
+	  xfree (tmp);
+	}
 
       ZV += nchars;
       Z += nchars;

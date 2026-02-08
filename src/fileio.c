@@ -5013,21 +5013,19 @@ by calling `format-decode', which see.  */)
 
 	  if (CODING_MAY_REQUIRE_DECODING (&coding))
 	    {
-	      /* Wrap raw file data in a unibyte Lisp string for
-		 decode_coding_object.  */
-	      Lisp_Object raw_string
-		= make_unibyte_string (file_data, file_size);
-	      xfree (file_data);
-	      file_data = NULL;
-
 	      ptrdiff_t saved_pt = PT;
 	      ptrdiff_t saved_pt_byte = PT_BYTE;
 
-	      /* Decode from string into piece table buffer.  */
+	      /* Pass raw file data as a C buffer source to avoid
+		 copying into a Lisp string.  */
 	      coding.mode |= CODING_MODE_LAST_BLOCK;
-	      decode_coding_object (&coding, raw_string,
+	      coding.source = (const unsigned char *) file_data;
+	      decode_coding_object (&coding, Qnil,
 				    0, 0, file_size, file_size,
 				    Fcurrent_buffer ());
+	      xfree (file_data);
+	      file_data = NULL;
+
 	      inserted = coding.produced_char;
 	      coding_system = CODING_ID_NAME (coding.id);
 
@@ -5036,18 +5034,44 @@ by calling `format-decode', which see.  */)
 	    }
 	  else
 	    {
-	      /* No decoding needed.  This branch is only reached when
-		 dst_multibyte is false (unibyte buffer) and no other
-		 decoding flags are set.  In unibyte mode, each byte
-		 is one character.  */
+	      /* No decoding needed.  In unibyte mode, each byte is one
+		 character.  */
 	      ptrdiff_t nchars = file_size;
 
 	      ptrdiff_t saved_pt = PT;
 	      ptrdiff_t saved_pt_byte = PT_BYTE;
 
-	      insert_1_both (file_data, nchars, file_size, 0, 0, 0);
-	      xfree (file_data);
-	      file_data = NULL;
+	      /* If the piece table is empty (initial file load), adopt
+		 the malloc'd buffer directly as the original buffer,
+		 avoiding a full-size memcpy.  */
+	      if (Z == BEG
+		  && pt_adopt_original_emacs (file_data, file_size,
+					      nchars) == 0)
+		{
+		  /* Adopted — piece table owns file_data now.  Update
+		     buffer positions manually.  */
+		  BUF_COMPUTE_UNCHANGED (current_buffer, PT, PT);
+		  record_insert (PT, nchars);
+		  modiff_incr (&MODIFF, nchars);
+		  CHARS_MODIFF = MODIFF;
+		  ZV += nchars;
+		  Z += nchars;
+		  ZV_BYTE += file_size;
+		  Z_BYTE += file_size;
+		  GPT = Z;
+		  GPT_BYTE = Z_BYTE;
+		  /* No markers or intervals to adjust in an empty
+		     buffer.  Just move point past inserted text.  */
+		  SET_BUF_PT_BOTH (current_buffer,
+				   PT + nchars, PT_BYTE + file_size);
+		  file_data = NULL;
+		}
+	      else
+		{
+		  insert_1_both (file_data, nchars, file_size, 0, 0, 0);
+		  xfree (file_data);
+		  file_data = NULL;
+		}
 
 	      inserted = nchars;
 

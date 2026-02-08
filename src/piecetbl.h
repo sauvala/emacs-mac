@@ -60,6 +60,11 @@ extern int pt_insert_emacs (ptrdiff_t bytepos, const char *text,
 extern int pt_insert_chunked_emacs (ptrdiff_t bytepos, const char *text,
 				    ptrdiff_t nbytes, ptrdiff_t nchars);
 
+/* Adopt DATA as the original buffer of the current buffer's (empty)
+   piece table.  Takes ownership of DATA (allocated with xmalloc).  */
+extern int pt_adopt_original_emacs (char *data, ptrdiff_t nbytes,
+				    ptrdiff_t nchars);
+
 /* Delete NBYTES bytes starting at Emacs byte position BYTEPOS.  */
 extern int pt_delete_emacs (ptrdiff_t bytepos, ptrdiff_t nbytes);
 

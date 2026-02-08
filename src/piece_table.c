@@ -903,6 +903,36 @@ pt_create_with_content (const char *content, size_t length)
   return pt_create_with_content_ex (content, length, false);
 }
 
+int
+pt_adopt_original_buffer (PieceTable *pt, char *data, size_t nbytes,
+			  size_t nchars)
+{
+  if (!pt || !data || nbytes == 0)
+    return -1;
+
+  /* Must be an empty piece table (no existing content).  */
+  if (pt->total_length != 0)
+    return -1;
+
+  /* Take ownership of the data buffer — caller must not free it.  */
+  pt->original_buffer = data;
+  pt->original_length = nbytes;
+
+  /* Create single piece spanning entire original buffer.  */
+  Piece *p = piece_create_ex (pt, BUFFER_ORIGINAL, 0, nbytes, nchars);
+  if (!p)
+    {
+      pt->original_buffer = NULL;
+      pt->original_length = 0;
+      return -1;
+    }
+  p->color = COLOR_BLACK;
+  pt->root = p;
+  pt->total_length = nbytes;
+  pt->total_charlen = nchars;
+  return 0;
+}
+
 void
 pt_destroy (PieceTable *pt)
 {

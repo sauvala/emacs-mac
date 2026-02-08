@@ -298,23 +298,47 @@ looking_at_1 (Lisp_Object string, bool posix, bool modify_data)
   /* Get pointers and sizes of the two strings
      that make up the visible portion of the buffer. */
 
-  p1 = BEGV_ADDR;
-  s1 = GPT_BYTE - BEGV_BYTE;
-  p2 = GAP_END_ADDR;
-  s2 = ZV_BYTE - GPT_BYTE;
-  if (s1 < 0)
+  specpdl_ref count = SPECPDL_INDEX ();
+
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
     {
-      p2 = p1;
-      s2 = ZV_BYTE - BEGV_BYTE;
-      s1 = 0;
-    }
-  if (s2 < 0)
-    {
-      s1 = ZV_BYTE - BEGV_BYTE;
+      /* Linearize the visible portion for the regex engine, which
+	 assumes at most 2 contiguous regions (gap buffer model).  */
+      ptrdiff_t visible_bytes = ZV_BYTE - BEGV_BYTE;
+      if (visible_bytes > 0)
+	{
+	  unsigned char *linearized = xmalloc (visible_bytes);
+	  record_unwind_protect_ptr (xfree, linearized);
+	  pt_get_text_emacs (BEGV_BYTE, visible_bytes, (char *) linearized);
+	  p1 = linearized;
+	}
+      else
+	p1 = NULL;
+      s1 = visible_bytes;
+      p2 = NULL;
       s2 = 0;
     }
+  else
+#endif
+    {
+      p1 = BEGV_ADDR;
+      s1 = GPT_BYTE - BEGV_BYTE;
+      p2 = GAP_END_ADDR;
+      s2 = ZV_BYTE - GPT_BYTE;
+      if (s1 < 0)
+	{
+	  p2 = p1;
+	  s2 = ZV_BYTE - BEGV_BYTE;
+	  s1 = 0;
+	}
+      if (s2 < 0)
+	{
+	  s1 = ZV_BYTE - BEGV_BYTE;
+	  s2 = 0;
+	}
+    }
 
-  specpdl_ref count = SPECPDL_INDEX ();
   freeze_buffer_relocation ();
   freeze_pattern (cache_entry);
   re_match_object = Qnil;
