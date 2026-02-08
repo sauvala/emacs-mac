@@ -100,6 +100,16 @@ extern int pt_insert_for_buffer_emacs (struct buffer *buf,
 				       ptrdiff_t bytepos, const char *text,
 				       ptrdiff_t nbytes, ptrdiff_t nchars);
 
+/* Count newlines in [START_BYTE, END_BYTE) using tree-based line
+   counting.  Both positions are 1-based.  O(log n).  */
+extern ptrdiff_t pt_count_newlines_emacs (ptrdiff_t start_byte,
+					   ptrdiff_t end_byte);
+
+/* Find byte position after the Nth newline (1-indexed) at or after
+   START_BYTE.  Returns Z_BYTE if not found.  1-based positions.  */
+extern ptrdiff_t pt_find_nth_newline_emacs (ptrdiff_t start_byte,
+					     ptrdiff_t n);
+
 #endif /* USE_PIECE_TABLE */
 
 #endif /* EMACS_PIECETBL_H */

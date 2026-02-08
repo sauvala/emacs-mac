@@ -29613,6 +29613,63 @@ display_count_lines (ptrdiff_t start_byte,
     = (!NILP (BVAR (current_buffer, selective_display))
        && !FIXNUMP (BVAR (current_buffer, selective_display)));
 
+#ifdef USE_PIECE_TABLE
+  /* Fast path for piece table buffers: use tree-based newline
+     counting instead of scanning byte-by-byte through every piece.
+     This turns O(n) scanning into O(log n) tree walk, critical for
+     large files where the gap buffer would do a single memchr but
+     the piece table would need thousands of tree lookups per
+     piece.  */
+  if (current_buffer->text->using_piece_table && !selective_display)
+    {
+      if (count > 0 && start_byte < limit_byte)
+	{
+	  ptrdiff_t newlines
+	    = pt_count_newlines_emacs (start_byte, limit_byte);
+	  if (newlines < count)
+	    {
+	      /* Fewer newlines than requested — scanned entire range.  */
+	      *byte_pos_ptr = limit_byte;
+	      return newlines;
+	    }
+	  /* Need to find position of the count-th newline.  */
+	  ptrdiff_t pos
+	    = pt_find_nth_newline_emacs (start_byte, count);
+	  *byte_pos_ptr = pos;
+	  return orig_count;
+	}
+      else if (count < 0 && start_byte > limit_byte)
+	{
+	  ptrdiff_t newlines
+	    = pt_count_newlines_emacs (limit_byte, start_byte);
+	  if (newlines < -count)
+	    {
+	      /* Fewer newlines than requested.  */
+	      *byte_pos_ptr = limit_byte;
+	      return -orig_count + newlines;
+	    }
+	  /* Need to find position of the |count|-th newline
+	     counting backwards.  Count newlines before start_byte,
+	     then find the target newline from the beginning.  */
+	  ptrdiff_t nl_before_start
+	    = pt_count_newlines_emacs (BEG_BYTE, start_byte);
+	  ptrdiff_t target = nl_before_start + count; /* count is negative */
+	  if (target < 0)
+	    {
+	      *byte_pos_ptr = limit_byte;
+	      return -orig_count + newlines;
+	    }
+	  /* Find byte position after the target-th newline.  */
+	  ptrdiff_t pos
+	    = pt_find_nth_newline_emacs (BEG_BYTE, target + 1);
+	  *byte_pos_ptr = pos;
+	  return -orig_count - 1;
+	}
+      *byte_pos_ptr = limit_byte;
+      return 0;
+    }
+#endif
+
   if (count > 0)
     {
       while (start_byte < limit_byte)

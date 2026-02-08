@@ -352,4 +352,39 @@ pt_insert_for_buffer_emacs (struct buffer *buf, ptrdiff_t bytepos,
 				 bytepos - BEG_BYTE, text, nbytes, nchars);
 }
 
+/* Count newlines in the byte range [START_BYTE, END_BYTE) using the
+   piece table's tree-based line counting.  START_BYTE and END_BYTE are
+   Emacs's 1-based byte positions.  O(log n) + O(piece_size).  */
+
+ptrdiff_t
+pt_count_newlines_emacs (ptrdiff_t start_byte, ptrdiff_t end_byte)
+{
+  struct PieceTable *pt = current_buffer->text->piece_table;
+  if (!pt)
+    return 0;
+
+  size_t start = start_byte - BEG_BYTE;
+  size_t end = end_byte - BEG_BYTE;
+
+  size_t nl_before_end = pt_newlines_before (pt, end);
+  size_t nl_before_start = pt_newlines_before (pt, start);
+  return (ptrdiff_t) (nl_before_end - nl_before_start);
+}
+
+/* Find the byte position of the Nth newline (1-indexed) at or after
+   START_BYTE.  Returns 1-based byte position after the newline, or
+   Z_BYTE if not found.  */
+
+ptrdiff_t
+pt_find_nth_newline_emacs (ptrdiff_t start_byte, ptrdiff_t n)
+{
+  struct PieceTable *pt = current_buffer->text->piece_table;
+  if (!pt)
+    return Z_BYTE;
+
+  size_t pos = pt_find_nth_newline_after (pt, start_byte - BEG_BYTE,
+					   (size_t) n);
+  return (ptrdiff_t) pos + BEG_BYTE;
+}
+
 #endif /* USE_PIECE_TABLE */

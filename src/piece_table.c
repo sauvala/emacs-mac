@@ -2116,6 +2116,129 @@ pt_position_to_line_col (const PieceTable *pt, size_t position,
   *col = position - last_newline_pos;
 }
 
+/* Count total newlines in [0, position) using tree structure.
+   O(log n) tree walk + O(piece_size) for the partial piece.  */
+size_t
+pt_newlines_before (const PieceTable *pt, size_t position)
+{
+  if (!pt || pt->root == pt->nil || position == 0)
+    return 0;
+
+  if (position > pt->total_length)
+    position = pt->total_length;
+
+  size_t newlines = 0;
+  size_t current_pos = 0;
+  Piece *node = pt->root;
+
+  while (node != pt->nil)
+    {
+      size_t left_length = node->left_subtree_length;
+      size_t left_lines = node->left_subtree_lines;
+
+      if (position <= current_pos + left_length)
+	{
+	  /* Position is in left subtree.  */
+	  node = node->left;
+	}
+      else if (position <= current_pos + left_length + node->length)
+	{
+	  /* Position is in this node.  Add left subtree newlines
+	     plus newlines within this piece up to offset.  */
+	  newlines += left_lines;
+	  size_t offset = position - current_pos - left_length;
+	  const char *buffer = pt_get_buffer (pt, node->buffer_type);
+	  const unsigned char *p
+	    = (const unsigned char *) buffer + node->start;
+	  const unsigned char *end = p + offset;
+	  /* Use memchr for fast scanning within the piece.  */
+	  while (p < end)
+	    {
+	      const unsigned char *nl = memchr (p, '\n', end - p);
+	      if (!nl)
+		break;
+	      newlines++;
+	      p = nl + 1;
+	    }
+	  return newlines;
+	}
+      else
+	{
+	  /* Position is past this node.  Add all newlines from
+	     left subtree and this node.  */
+	  newlines += left_lines + node->line_count;
+	  current_pos += left_length + node->length;
+	  node = node->right;
+	}
+    }
+
+  return newlines;
+}
+
+/* Find the byte position of the Nth newline (0-indexed) at or after
+   START_POS.  Returns the position after the newline, or
+   pt->total_length if not found.  O(log n) + O(piece_size).  */
+size_t
+pt_find_nth_newline_after (const PieceTable *pt, size_t start_pos,
+			    size_t n)
+{
+  if (!pt || pt->root == pt->nil)
+    return pt ? pt->total_length : 0;
+
+  /* Count newlines before start_pos to get the absolute line number
+     of the Nth newline we're looking for.  */
+  size_t newlines_before_start = pt_newlines_before (pt, start_pos);
+  size_t target_newline = newlines_before_start + n;
+
+  /* Now find the byte position of the target_newline-th newline
+     (0-indexed).  Walk the tree.  */
+  size_t newlines = 0;
+  size_t current_pos = 0;
+  Piece *node = pt->root;
+
+  while (node != pt->nil)
+    {
+      size_t left_length = node->left_subtree_length;
+      size_t left_lines = node->left_subtree_lines;
+
+      if (target_newline < newlines + left_lines)
+	{
+	  /* Target newline is in left subtree.  */
+	  node = node->left;
+	}
+      else if (target_newline < newlines + left_lines + node->line_count)
+	{
+	  /* Target newline is in this node.  Scan to find exact
+	     position.  */
+	  newlines += left_lines;
+	  size_t need = target_newline - newlines;
+	  const char *buffer = pt_get_buffer (pt, node->buffer_type);
+	  const unsigned char *p
+	    = (const unsigned char *) buffer + node->start;
+	  const unsigned char *end = p + node->length;
+	  for (size_t i = 0; i <= need; i++)
+	    {
+	      const unsigned char *nl = memchr (p, '\n', end - p);
+	      if (!nl)
+		return pt->total_length;
+	      if (i == need)
+		return current_pos + left_length + (nl - (const unsigned char *) buffer - node->start) + 1;
+	      p = nl + 1;
+	    }
+	  return pt->total_length;
+	}
+      else
+	{
+	  /* Target is past this node.  */
+	  newlines += left_lines + node->line_count;
+	  current_pos += left_length + node->length;
+	  node = node->right;
+	}
+    }
+
+  return pt->total_length;
+}
+
 /* ============================================================================
  * Debug
  * ============================================================================ */

@@ -207,6 +207,16 @@ extern size_t pt_get_line (const PieceTable *pt, size_t line_number,
 extern void pt_position_to_line_col (const PieceTable *pt, size_t position,
 				     size_t *line, size_t *col);
 
+/* Count newlines in bytes [0, POSITION) using the tree structure.
+   O(log n) tree walk + O(piece_size) scan within one piece.  */
+extern size_t pt_newlines_before (const PieceTable *pt, size_t position);
+
+/* Find byte position of the Nth newline (0-indexed) at or after
+   START_POS.  Returns position after the newline, or total_length
+   if not found.  */
+extern size_t pt_find_nth_newline_after (const PieceTable *pt,
+					  size_t start_pos, size_t n);
+
 /* ============================================================================
  * Undo/Redo (only available if undo was not disabled at creation)
  * ============================================================================ */
