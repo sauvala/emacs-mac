@@ -2784,6 +2784,78 @@ current buffer is cleared.  */)
 
   invalidate_buffer_caches (current_buffer, BEGV, ZV);
 
+#ifdef USE_PIECE_TABLE
+  if (current_buffer->text->using_piece_table)
+    {
+      /* Piece table buffers can't be modified in place.  Extract
+	 content, convert, and re-insert.  */
+      ptrdiff_t old_pt = PT;
+      Lisp_Object str = make_buffer_string_both (BEG, BEG_BYTE,
+						 Z, Z_BYTE, 0);
+
+      if (NILP (flag))
+	{
+	  /* Multibyte → Unibyte.  */
+	  str = Fstring_to_unibyte (str);
+
+	  set_intervals_multibyte (false);
+	  set_overlays_multibyte (false);
+
+	  /* Delete all content and switch to unibyte.  */
+	  del_range_2 (BEG, BEG_BYTE, Z, Z_BYTE, 0);
+	  bset_enable_multibyte_characters (current_buffer, Qnil);
+
+	  /* Re-insert converted content.  */
+	  insert_from_string (str, 0, 0,
+			      SCHARS (str), SBYTES (str), 0);
+
+	  /* In unibyte, charpos == bytepos.  */
+	  Z = Z_BYTE;
+	  BEGV = BEGV_BYTE;
+	  ZV = ZV_BYTE;
+	  GPT = GPT_BYTE;
+	  if (old_pt <= Z)
+	    TEMP_SET_PT_BOTH (old_pt, old_pt);
+	  else
+	    TEMP_SET_PT_BOTH (Z, Z_BYTE);
+
+	  for (tail = BUF_MARKERS (current_buffer); tail; tail = tail->next)
+	    tail->charpos = tail->bytepos;
+	}
+      else
+	{
+	  /* Unibyte → Multibyte.  */
+	  str = Fstring_to_multibyte (str);
+
+	  /* Delete all content and switch to multibyte.  */
+	  del_range_2 (BEG, BEG_BYTE, Z, Z_BYTE, 0);
+	  bset_enable_multibyte_characters (current_buffer, Qt);
+
+	  /* Re-insert converted content.  */
+	  insert_from_string (str, 0, 0,
+			      SCHARS (str), SBYTES (str), 0);
+
+	  /* Character count is unchanged; recompute byte positions.  */
+	  if (old_pt <= Z)
+	    TEMP_SET_PT_BOTH (old_pt, CHAR_TO_BYTE (old_pt));
+	  else
+	    TEMP_SET_PT_BOTH (Z, Z_BYTE);
+
+	  /* Detach markers temporarily to avoid confusion during
+	     BYTE_TO_CHAR / CHAR_TO_BYTE.  */
+	  markers = BUF_MARKERS (current_buffer);
+	  BUF_MARKERS (current_buffer) = NULL;
+	  for (tail = markers; tail; tail = tail->next)
+	    tail->bytepos = CHAR_TO_BYTE (tail->charpos);
+	  BUF_MARKERS (current_buffer) = markers;
+
+	  set_intervals_multibyte (true);
+	  set_overlays_multibyte (true);
+	}
+      goto done;
+    }
+#endif
+
   if (NILP (flag))
     {
       ptrdiff_t pos, stop;
@@ -2983,6 +3055,9 @@ current buffer is cleared.  */)
       set_overlays_multibyte (true);
     }
 
+#ifdef USE_PIECE_TABLE
+ done:
+#endif
   if (!EQ (old_undo, Qt))
     {
       /* Represent all the above changes by a special undo entry.  */

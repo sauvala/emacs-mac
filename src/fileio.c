@@ -5036,10 +5036,11 @@ by calling `format-decode', which see.  */)
 	    }
 	  else
 	    {
-	      /* No decoding needed.  Insert raw bytes directly.  */
-	      ptrdiff_t nchars
-		= multibyte_chars_in_text
-		    ((const unsigned char *) file_data, file_size);
+	      /* No decoding needed.  This branch is only reached when
+		 dst_multibyte is false (unibyte buffer) and no other
+		 decoding flags are set.  In unibyte mode, each byte
+		 is one character.  */
+	      ptrdiff_t nchars = file_size;
 
 	      ptrdiff_t saved_pt = PT;
 	      ptrdiff_t saved_pt_byte = PT_BYTE;
