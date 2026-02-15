@@ -29634,7 +29634,7 @@ display_count_lines (ptrdiff_t start_byte,
 	    }
 	  /* Need to find position of the count-th newline.  */
 	  ptrdiff_t pos
-	    = pt_find_nth_newline_emacs (start_byte, count);
+	    = pt_find_nth_newline_emacs (start_byte, count - 1);
 	  *byte_pos_ptr = pos;
 	  return orig_count;
 	}
@@ -29646,7 +29646,7 @@ display_count_lines (ptrdiff_t start_byte,
 	    {
 	      /* Fewer newlines than requested.  */
 	      *byte_pos_ptr = limit_byte;
-	      return -orig_count + newlines;
+	      return newlines;
 	    }
 	  /* Need to find position of the |count|-th newline
 	     counting backwards.  Count newlines before start_byte,
@@ -29657,11 +29657,11 @@ display_count_lines (ptrdiff_t start_byte,
 	  if (target < 0)
 	    {
 	      *byte_pos_ptr = limit_byte;
-	      return -orig_count + newlines;
+	      return newlines;
 	    }
 	  /* Find byte position after the target-th newline.  */
 	  ptrdiff_t pos
-	    = pt_find_nth_newline_emacs (BEG_BYTE, target + 1);
+	    = pt_find_nth_newline_emacs (BEG_BYTE, target);
 	  *byte_pos_ptr = pos;
 	  return -orig_count - 1;
 	}
