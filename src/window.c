@@ -5889,17 +5889,19 @@ resize_mini_window_apply (struct window *w, int delta)
   w->pixel_height = w->pixel_height + delta;
   w->total_lines = w->pixel_height / FRAME_LINE_HEIGHT (f);
 
-  window_resize_apply (r, false);
-
   if (FRAME_MINIBUF_AT_TOP_P (f))
     {
-      /* Mini window stays at top; root moves down.  */
+      /* Mini window stays at top; update root position BEFORE
+	 window_resize_apply so children get correct pixel_top.  */
       w->top_line = FRAME_TOP_MARGIN (f);
       w->pixel_top = FRAME_TOP_MARGIN_HEIGHT (f);
       r->top_line = w->top_line + w->total_lines;
       r->pixel_top = w->pixel_top + w->pixel_height;
     }
-  else
+
+  window_resize_apply (r, false);
+
+  if (!FRAME_MINIBUF_AT_TOP_P (f))
     {
       w->pixel_top = r->pixel_top + r->pixel_height;
       w->top_line = r->top_line + r->total_lines;
