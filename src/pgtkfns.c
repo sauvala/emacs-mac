@@ -996,6 +996,7 @@ frame_parm_handler pgtk_frame_parm_handlers[] =
     pgtk_set_alpha_background,
     gui_set_borders_respect_alpha_background,
     NULL,
+    gui_set_minibuffer_position,
   };
 
 

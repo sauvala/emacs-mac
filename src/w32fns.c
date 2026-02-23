@@ -11385,6 +11385,7 @@ frame_parm_handler w32_frame_parm_handlers[] =
   gui_set_alpha_background,
   gui_set_borders_respect_alpha_background,
   0, /* x_set_use_frame_synchronization */
+  gui_set_minibuffer_position,
 };
 
 void

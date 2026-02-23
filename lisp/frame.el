@@ -3569,6 +3569,16 @@ See also `toggle-frame-maximized'."
        frame `((fullscreen . fullboth) (fullscreen-restore . ,fullscreen))))))
 
 
+(defun toggle-minibuffer-position (&optional frame)
+  "Toggle the minibuffer between top and bottom of FRAME.
+If FRAME is nil, use the selected frame."
+  (interactive)
+  (let* ((frame (or frame (selected-frame)))
+         (current (frame-parameter frame 'minibuffer-position)))
+    (set-frame-parameter frame 'minibuffer-position
+                         (if (eq current 'top) 'bottom 'top))))
+
+
 ;;;; Key bindings
 
 (define-key ctl-x-5-map "2" #'make-frame-command)

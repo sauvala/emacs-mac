@@ -2598,6 +2598,8 @@ DEFUN ("x-create-frame", Fx_create_frame, Sx_create_frame,
 			 mac_inhibit_double_buffering_default_value (),
                          "inhibitDoubleBuffering", "InhibitDoubleBuffering",
                          RES_TYPE_BOOLEAN);
+  gui_default_parameter (f, parms, Qminibuffer_position, Qbottom,
+			 NULL, NULL, RES_TYPE_SYMBOL);
 
   /* Compute the size of the window.  */
   window_prompting = gui_figure_window_size (f, parms, true, true);
@@ -5276,6 +5278,7 @@ frame_parm_handler mac_frame_parm_handlers[] =
      ns-transparent-titlebar
    */
   mac_set_transparent_titlebar,
+  gui_set_minibuffer_position,
 };
 
 void
