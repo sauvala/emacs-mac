@@ -1,0 +1,537 @@
+diff --git a/lisp/frame.el b/lisp/frame.el
+index b95d8a3c7a9..37975b06a12 100644
+--- a/lisp/frame.el
++++ b/lisp/frame.el
+@@ -3578,6 +3578,15 @@ toggle-minibuffer-position
+     (set-frame-parameter frame 'minibuffer-position
+                          (if (eq current 'top) 'bottom 'top))))
+ 
++(defun toggle-mode-line-position (&optional frame)
++  "Toggle the mode-line between top and bottom of windows on FRAME.
++If FRAME is nil, use the selected frame."
++  (interactive)
++  (let* ((frame (or frame (selected-frame)))
++         (current (frame-parameter frame 'mode-line-position)))
++    (set-frame-parameter frame 'mode-line-position
++                         (if (eq current 'top) 'bottom 'top))))
++
+ 
+ ;;;; Key bindings
+ 
+diff --git a/src/androidfns.c b/src/androidfns.c
+index 43dc4a12d9e..28d13a4db75 100644
+--- a/src/androidfns.c
++++ b/src/androidfns.c
+@@ -3193,6 +3193,7 @@ android_set_no_accept_focus (struct frame *f, Lisp_Object new_value,
+   gui_set_borders_respect_alpha_background,
+   NULL,
+   gui_set_minibuffer_position,
++  gui_set_mode_line_position,
+ };
+ 
+ 
+diff --git a/src/dispextern.h b/src/dispextern.h
+index 761e800d0f4..eb95991183d 100644
+--- a/src/dispextern.h
++++ b/src/dispextern.h
+@@ -1252,7 +1252,7 @@ #define MR_PARTIALLY_VISIBLE(ROW)	\
+   ((ROW)->height != (ROW)->visible_height)
+ 
+ #define MR_PARTIALLY_VISIBLE_AT_TOP(W, ROW)  \
+-  ((ROW)->y < WINDOW_TAB_LINE_HEIGHT (W) + WINDOW_HEADER_LINE_HEIGHT (W))
++  ((ROW)->y < WINDOW_TOP_LINES_HEIGHT (W))
+ 
+ #define MR_PARTIALLY_VISIBLE_AT_BOTTOM(W, ROW)  \
+   (((ROW)->y + (ROW)->height - (ROW)->extra_line_spacing) \
+diff --git a/src/dispnew.c b/src/dispnew.c
+index c731e456791..10d981a5d9e 100644
+--- a/src/dispnew.c
++++ b/src/dispnew.c
+@@ -767,7 +767,7 @@ shift_glyph_matrix (struct window *w, struct glyph_matrix *matrix, int start, in
+   eassert (start >= 0 && start < matrix->nrows);
+   eassert (end >= 0 && end <= matrix->nrows);
+ 
+-  min_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
++  min_y = WINDOW_TOP_LINES_HEIGHT (w);
+   max_y = WINDOW_BOX_HEIGHT_NO_MODE_LINE (w);
+ 
+   for (; start < end; ++start)
+@@ -907,7 +907,7 @@ blank_row (struct window *w, struct glyph_row *row, int y)
+ {
+   int min_y, max_y;
+ 
+-  min_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
++  min_y = WINDOW_TOP_LINES_HEIGHT (w);
+   max_y = WINDOW_BOX_HEIGHT_NO_MODE_LINE (w);
+ 
+   clear_glyph_row (row);
+@@ -4473,7 +4473,11 @@ update_window (struct window *w)
+   mode_line_row = MATRIX_MODE_LINE_ROW (desired_matrix);
+   if (mode_line_row->mode_line_p && mode_line_row->enabled_p)
+     {
+-      mode_line_row->y = yb + WINDOW_SCROLL_BAR_AREA_HEIGHT (w);
++      if (WINDOW_MODE_LINE_AT_TOP_P (w))
++	mode_line_row->y = WINDOW_TAB_LINE_HEIGHT (w)
++			   + WINDOW_HEADER_LINE_HEIGHT (w);
++      else
++	mode_line_row->y = yb + WINDOW_SCROLL_BAR_AREA_HEIGHT (w);
+       update_window_line (w, MATRIX_ROW_VPOS (mode_line_row,
+ 					      desired_matrix),
+ 			  &mouse_face_overwritten_p);
+diff --git a/src/frame.c b/src/frame.c
+index bcddc3f8530..eaa10f39733 100644
+--- a/src/frame.c
++++ b/src/frame.c
+@@ -1176,6 +1176,7 @@ make_frame (bool mini_p)
+      Lisp data to nil, so do it only for slots which should not be nil.  */
+   fset_tool_bar_position (f, Qtop);
+   fset_minibuffer_position (f, Qbottom);
++  fset_mode_line_position (f, Qbottom);
+ 
+   /* Initialize non-Lisp data.  Note that allocate_frame zeroes out all
+      non-Lisp data, so do it only for slots which should not be zero.
+@@ -4846,6 +4847,7 @@ DEFUN ("frame-scale-factor", Fframe_scale_factor, Sframe_scale_factor,
+   {"mac-transparent-titlebar",  SYMBOL_INDEX (Qmac_transparent_titlebar)},
+ #endif
+   {"minibuffer-position",	SYMBOL_INDEX (Qminibuffer_position)},
++  {"mode-line-position",	SYMBOL_INDEX (Qmode_line_position)},
+ };
+ 
+ #ifdef HAVE_WINDOW_SYSTEM
+@@ -5448,6 +5450,8 @@ gui_report_frame_params (struct frame *f, Lisp_Object *alistptr)
+   store_in_alist (alistptr, Qtool_bar_position, FRAME_TOOL_BAR_POSITION (f));
+   store_in_alist (alistptr, Qminibuffer_position,
+ 		  FRAME_MINIBUFFER_POSITION (f));
++  store_in_alist (alistptr, Qmode_line_position,
++		  FRAME_MODE_LINE_POSITION (f));
+ }
+ 
+ 
+@@ -5829,6 +5833,20 @@ gui_set_minibuffer_position (struct frame *f, Lisp_Object arg,
+     }
+ }
+ 
++void
++gui_set_mode_line_position (struct frame *f, Lisp_Object arg,
++			    Lisp_Object oldval)
++{
++  if (!EQ (arg, Qtop) && !EQ (arg, Qbottom))
++    error ("Invalid mode-line position: must be `top' or `bottom'");
++
++  if (!EQ (arg, oldval))
++    {
++      fset_mode_line_position (f, arg);
++      SET_FRAME_GARBAGED (f);
++    }
++}
++
+ void
+ gui_set_visibility (struct frame *f, Lisp_Object value, Lisp_Object oldval)
+ {
+@@ -7291,6 +7309,7 @@ syms_of_frame (void)
+   DEFSYM (Qline_spacing, "line-spacing");
+   DEFSYM (Qmenu_bar_lines, "menu-bar-lines");
+   DEFSYM (Qminibuffer_position, "minibuffer-position");
++  DEFSYM (Qmode_line_position, "mode-line-position");
+   DEFSYM (Qtab_bar_lines, "tab-bar-lines");
+   DEFSYM (Qmouse_color, "mouse-color");
+   DEFSYM (Qname, "name");
+diff --git a/src/frame.h b/src/frame.h
+index 7ea11b6a343..8290a919895 100644
+--- a/src/frame.h
++++ b/src/frame.h
+@@ -277,6 +277,9 @@ #define EMACS_FRAME_H
+   /* Where the minibuffer is, `top' or `bottom'.  */
+   Lisp_Object minibuffer_position;
+ 
++  /* Where the mode line is, `top' or `bottom'.  */
++  Lisp_Object mode_line_position;
++
+ #if defined (HAVE_XFT) || defined (HAVE_FREETYPE)
+   /* List of data specific to font-driver and frame, but common to faces.  */
+   Lisp_Object font_data;
+@@ -915,6 +918,12 @@ fset_minibuffer_position (struct frame *f, Lisp_Object val)
+   f->minibuffer_position = val;
+ }
+ 
++INLINE void
++fset_mode_line_position (struct frame *f, Lisp_Object val)
++{
++  f->mode_line_position = val;
++}
++
+ INLINE double
+ NUMVAL (Lisp_Object x)
+ {
+@@ -1143,6 +1152,13 @@ #define FRAME_MINIBUFFER_POSITION(f) (f)->minibuffer_position
+ #define FRAME_MINIBUF_AT_TOP_P(f) \
+   (BASE_EQ ((f)->minibuffer_position, Qtop))
+ 
++/* Position of the mode line; Qtop or Qbottom.  */
++#define FRAME_MODE_LINE_POSITION(f) (f)->mode_line_position
++
++/* True if the mode line should be at the top of each window.  */
++#define FRAME_MODE_LINE_AT_TOP_P(f) \
++  (BASE_EQ ((f)->mode_line_position, Qtop))
++
+ /* Size of frame F's internal tool bar in frame lines and pixels.  */
+ #define FRAME_TOOL_BAR_LINES(f) (f)->tool_bar_lines
+ #define FRAME_TOOL_BAR_HEIGHT(f) (f)->tool_bar_height
+@@ -1906,6 +1922,8 @@ #define EMACS_CLASS "Emacs"
+                                           Lisp_Object);
+ extern void gui_set_minibuffer_position (struct frame *, Lisp_Object,
+ 					 Lisp_Object);
++extern void gui_set_mode_line_position (struct frame *, Lisp_Object,
++					Lisp_Object);
+ extern void gui_set_visibility (struct frame *, Lisp_Object, Lisp_Object);
+ extern void gui_set_autoraise (struct frame *, Lisp_Object, Lisp_Object);
+ extern void gui_set_autolower (struct frame *, Lisp_Object, Lisp_Object);
+diff --git a/src/haikufns.c b/src/haikufns.c
+index c97820b4274..cbaa91d0186 100644
+--- a/src/haikufns.c
++++ b/src/haikufns.c
+@@ -3200,6 +3200,7 @@ DEFUN ("haiku-display-monitor-attributes-list",
+     gui_set_borders_respect_alpha_background,
+     haiku_set_use_frame_synchronization,
+     gui_set_minibuffer_position,
++    gui_set_mode_line_position,
+   };
+ 
+ void
+diff --git a/src/keyboard.c b/src/keyboard.c
+index 1299b3fd0cf..d47337ddeb1 100644
+--- a/src/keyboard.c
++++ b/src/keyboard.c
+@@ -5871,7 +5871,7 @@ make_lispy_position (struct frame *f, Lisp_Object x, Lisp_Object y,
+       if (part == ON_TEXT)
+ 	{
+ 	  xret = mx - window_box_left (w, TEXT_AREA);
+-	  yret = wy - WINDOW_TAB_LINE_HEIGHT (w) - WINDOW_HEADER_LINE_HEIGHT (w);
++	  yret = wy - WINDOW_TOP_LINES_HEIGHT (w);
+ 	}
+       /* For mode line and header line clicks, return X, Y relative to
+ 	 the left window edge.  Use mode_line_string to look for a
+@@ -5915,7 +5915,7 @@ make_lispy_position (struct frame *f, Lisp_Object x, Lisp_Object y,
+ 	  if (STRINGP (string))
+ 	    string_info = Fcons (string, make_fixnum (charpos));
+ 	  xret = wx;
+-	  yret = wy - WINDOW_TAB_LINE_HEIGHT (w) - WINDOW_HEADER_LINE_HEIGHT (w);
++	  yret = wy - WINDOW_TOP_LINES_HEIGHT (w);
+ 	}
+       else if (part == ON_LEFT_FRINGE)
+ 	{
+diff --git a/src/macfns.c b/src/macfns.c
+index a7e2ff79603..68b4c3816c5 100644
+--- a/src/macfns.c
++++ b/src/macfns.c
+@@ -5279,6 +5279,7 @@ DEFUN ("mac-start-animation", Fmac_start_animation, Smac_start_animation, 1, MAN
+    */
+   mac_set_transparent_titlebar,
+   gui_set_minibuffer_position,
++  gui_set_mode_line_position,
+ };
+ 
+ void
+diff --git a/src/nsfns.m b/src/nsfns.m
+index f805726e74c..d69fa67ba39 100644
+--- a/src/nsfns.m
++++ b/src/nsfns.m
+@@ -1113,6 +1113,7 @@ Turn the input menu (an NSMenu) into a lisp list for tracking on lisp side.
+   ns_set_transparent_titlebar,
+ #endif
+   gui_set_minibuffer_position,
++  gui_set_mode_line_position,
+ };
+ 
+ 
+diff --git a/src/pgtkfns.c b/src/pgtkfns.c
+index c37ce82e5a4..ccde25e6e3e 100644
+--- a/src/pgtkfns.c
++++ b/src/pgtkfns.c
+@@ -997,6 +997,7 @@ DEFUN ("x-export-frames", Fx_export_frames, Sx_export_frames, 0, 2, 0,
+     gui_set_borders_respect_alpha_background,
+     NULL,
+     gui_set_minibuffer_position,
++    gui_set_mode_line_position,
+   };
+ 
+ 
+diff --git a/src/w32fns.c b/src/w32fns.c
+index a53bda19aa1..9fbc69ebbd3 100644
+--- a/src/w32fns.c
++++ b/src/w32fns.c
+@@ -11386,6 +11386,7 @@ DEFUN ("w32-progress-indicator",
+   gui_set_borders_respect_alpha_background,
+   0, /* x_set_use_frame_synchronization */
+   gui_set_minibuffer_position,
++  gui_set_mode_line_position,
+ };
+ 
+ void
+diff --git a/src/window.c b/src/window.c
+index 057d8fdb220..da7f4d0d6d6 100644
+--- a/src/window.c
++++ b/src/window.c
+@@ -1380,14 +1380,17 @@ coordinates_in_window (register struct window *w, int x, int y)
+   else if ((WINDOW_HAS_HORIZONTAL_SCROLL_BAR (w)
+ 	    && y >= (bottom_y
+ 		     - WINDOW_SCROLL_BAR_AREA_HEIGHT (w)
+-		     - CURRENT_MODE_LINE_HEIGHT (w)
++		     - (WINDOW_MODE_LINE_AT_TOP_P (w)
++			? 0 : CURRENT_MODE_LINE_HEIGHT (w))
+ 		     - WINDOW_BOTTOM_DIVIDER_WIDTH (w))
+ 	    && y <= (bottom_y
+-		     - CURRENT_MODE_LINE_HEIGHT (w)
++		     - (WINDOW_MODE_LINE_AT_TOP_P (w)
++			? 0 : CURRENT_MODE_LINE_HEIGHT (w))
+ 		     - WINDOW_BOTTOM_DIVIDER_WIDTH (w))))
+     return ON_HORIZONTAL_SCROLL_BAR;
+   /* On the mode or header/tab line?   */
+   else if ((window_wants_mode_line (w)
++	    && !WINDOW_MODE_LINE_AT_TOP_P (w)
+ 	    && y >= (bottom_y
+ 		     - CURRENT_MODE_LINE_HEIGHT (w)
+ 		     - WINDOW_BOTTOM_DIVIDER_WIDTH (w))
+@@ -1401,7 +1404,17 @@ coordinates_in_window (register struct window *w, int x, int y)
+ 	       + (window_wants_tab_line (w)
+ 		  ? CURRENT_TAB_LINE_HEIGHT (w)
+ 		  : 0)
+-	       && (part = ON_HEADER_LINE)))
++	       && (part = ON_HEADER_LINE))
++	   || (window_wants_mode_line (w)
++	       && WINDOW_MODE_LINE_AT_TOP_P (w)
++	       && y >= (top_y
++			+ CURRENT_TAB_LINE_HEIGHT (w)
++			+ CURRENT_HEADER_LINE_HEIGHT (w))
++	       && y < (top_y
++		       + CURRENT_TAB_LINE_HEIGHT (w)
++		       + CURRENT_HEADER_LINE_HEIGHT (w)
++		       + CURRENT_MODE_LINE_HEIGHT (w))
++	       && (part = ON_MODE_LINE)))
+     {
+       /* If it's under/over the scroll bar portion of the mode/header
+ 	 line, say it's on the vertical line.  That's to be able to
+@@ -2120,9 +2133,12 @@ DEFUN ("window-line-height", Fwindow_line_height,
+       return (row->enabled_p ?
+ 	      list4i (row->height,
+ 		      0, /* not accurate */
+-		      (WINDOW_TAB_LINE_HEIGHT (w)
+-		       + WINDOW_HEADER_LINE_HEIGHT (w)
+-		       + window_text_bottom_y (w)),
++		      (WINDOW_MODE_LINE_AT_TOP_P (w)
++		       ? (WINDOW_TAB_LINE_HEIGHT (w)
++			  + WINDOW_HEADER_LINE_HEIGHT (w))
++		       : (WINDOW_TAB_LINE_HEIGHT (w)
++			  + WINDOW_HEADER_LINE_HEIGHT (w)
++			  + window_text_bottom_y (w))),
+ 		      0)
+ 	      : Qnil);
+     }
+diff --git a/src/window.h b/src/window.h
+index 6ffe386605a..8ea05585e70 100644
+--- a/src/window.h
++++ b/src/window.h
+@@ -1058,13 +1058,26 @@ #define WINDOW_TAB_LINE_HEIGHT(W)	\
+ #define WINDOW_TAB_LINE_LINES(W)	\
+   window_wants_tab_line (W)
+ 
++/* True if the mode line of W is displayed at the top of the window.  */
++#define WINDOW_MODE_LINE_AT_TOP_P(W)	\
++  FRAME_MODE_LINE_AT_TOP_P (WINDOW_XFRAME (W))
++
++/* Total pixel height of top decoration lines in W (tab line, header
++   line, and mode line when at top).  */
++#define WINDOW_TOP_LINES_HEIGHT(W)				\
++  (WINDOW_TAB_LINE_HEIGHT (W) + WINDOW_HEADER_LINE_HEIGHT (W)	\
++   + (WINDOW_MODE_LINE_AT_TOP_P (W)				\
++      ? WINDOW_MODE_LINE_HEIGHT (W) : 0))
++
+ /* Pixel height of window W without mode line, bottom scroll bar and
+-   bottom divider.  */
+-#define WINDOW_BOX_HEIGHT_NO_MODE_LINE(W)	\
+-  (WINDOW_PIXEL_HEIGHT (W)			\
+-   - WINDOW_BOTTOM_DIVIDER_WIDTH (W)		\
+-   - WINDOW_SCROLL_BAR_AREA_HEIGHT (W)		\
+-   - WINDOW_MODE_LINE_HEIGHT (W))
++   bottom divider.  When the mode line is at the top, don't subtract
++   its height from the bottom.  */
++#define WINDOW_BOX_HEIGHT_NO_MODE_LINE(W)		\
++  (WINDOW_PIXEL_HEIGHT (W)				\
++   - WINDOW_BOTTOM_DIVIDER_WIDTH (W)			\
++   - WINDOW_SCROLL_BAR_AREA_HEIGHT (W)			\
++   - (WINDOW_MODE_LINE_AT_TOP_P (W)			\
++      ? 0 : WINDOW_MODE_LINE_HEIGHT (W)))
+ 
+ /* Pixel height of window W without mode and header/tab line and bottom
+    divider.  */
+diff --git a/src/xdisp.c b/src/xdisp.c
+index fa354ea169e..d35a348f339 100644
+--- a/src/xdisp.c
++++ b/src/xdisp.c
+@@ -1250,7 +1250,7 @@ window_text_bottom_y (struct window *w)
+ 
+   height -= WINDOW_BOTTOM_DIVIDER_WIDTH (w);
+ 
+-  if (window_wants_mode_line (w))
++  if (window_wants_mode_line (w) && !WINDOW_MODE_LINE_AT_TOP_P (w))
+     height -= CURRENT_MODE_LINE_HEIGHT (w);
+ 
+   height -= WINDOW_SCROLL_BAR_AREA_HEIGHT (w);
+@@ -1800,7 +1800,7 @@ pos_visible_p (struct window *w, ptrdiff_t charpos, int *x, int *y,
+ 	 glyph.  */
+       int top_x = it.current_x;
+       int top_y = it.current_y;
+-      int window_top_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
++      int window_top_y = WINDOW_TOP_LINES_HEIGHT (w);
+       int bottom_y;
+       struct it save_it;
+       void *save_it_data = NULL;
+@@ -2536,7 +2536,7 @@ get_glyph_string_clip_rects (struct glyph_string *s, NativeRectangle *rects, int
+      intentionally draws over other lines.  */
+   if (s->for_overlaps)
+     {
+-      r.y = WINDOW_TAB_LINE_HEIGHT (s->w) + WINDOW_HEADER_LINE_HEIGHT (s->w);
++      r.y = WINDOW_TOP_LINES_HEIGHT (s->w);
+       r.height = window_text_bottom_y (s->w) - r.y;
+ 
+       /* Alas, the above simple strategy does not work for the
+@@ -2563,7 +2563,7 @@ get_glyph_string_clip_rects (struct glyph_string *s, NativeRectangle *rects, int
+ 	 partially visible lines at the top of a window.  */
+       if (!s->row->full_width_p
+ 	  && MATRIX_ROW_PARTIALLY_VISIBLE_AT_TOP_P (s->w, s->row))
+-	r.y = WINDOW_TAB_LINE_HEIGHT (s->w) + WINDOW_HEADER_LINE_HEIGHT (s->w);
++	r.y = WINDOW_TOP_LINES_HEIGHT (s->w);
+       else
+ 	r.y = max (0, s->row->y);
+     }
+@@ -2740,7 +2740,7 @@ get_phys_cursor_geometry (struct window *w, struct glyph_row *row,
+   h = min (h, row->height);
+   h0 = min (h0, ascent + glyph->descent);
+ 
+-  y0 = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
++  y0 = WINDOW_TOP_LINES_HEIGHT (w);
+   if (y < y0)
+     {
+       h = max (h - (y0 - y) + 1, h0);
+@@ -3461,7 +3461,7 @@ init_iterator (struct it *it, struct window *w,
+ 
+       it->tab_line_p = window_wants_tab_line (w);
+       it->header_line_p = window_wants_header_line (w);
+-      body_height = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
++      body_height = WINDOW_TOP_LINES_HEIGHT (w);
+       it->current_y =  body_height + w->vscroll;
+     }
+ 
+@@ -11883,12 +11883,11 @@ window_text_pixel_size (Lisp_Object window, Lisp_Object from, Lisp_Object to,
+   if (it.current_y > start_y)
+     start_x = 0;
+ 
+-  /* Subtract height of header-line and tab-line which was counted
++  /* Subtract height of top decoration lines which was counted
+      automatically by start_display.  */
+   if (!NILP (ignore_line_at_end))
+     y = (it.current_y + doff
+-	 - WINDOW_TAB_LINE_HEIGHT (w)
+-	 - WINDOW_HEADER_LINE_HEIGHT (w));
++	 - WINDOW_TOP_LINES_HEIGHT (w));
+   else
+     y = (it.current_y + it.max_ascent + it.max_descent + doff
+ 	 - WINDOW_TAB_LINE_HEIGHT (w) - WINDOW_HEADER_LINE_HEIGHT (w));
+@@ -21038,7 +21037,7 @@ redisplay_window (Lisp_Object window, bool just_this_one_p)
+ 		centering_position -= pt_offset;
+ 	      centering_position -=
+ 		(frame_line_height * (1 + margin + last_line_misfit)
+-		 + WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w));
++		 + WINDOW_TOP_LINES_HEIGHT (w));
+ 	      /* Don't let point enter the scroll margin near top of
+ 		 the window.  */
+ 	      if (centering_position < margin * frame_line_height)
+@@ -21818,7 +21817,7 @@ try_window_reusing_current_matrix (struct window *w)
+ 	    (start_row + i)->enabled_p = false;
+ 
+ 	  /* Re-compute Y positions.  */
+-	  min_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
++	  min_y = WINDOW_TOP_LINES_HEIGHT (w);
+ 	  max_y = it.last_visible_y;
+ 	  for (row = start_row + nrows_scrolled;
+ 	       row < bottom_row;
+@@ -21925,7 +21924,7 @@ try_window_reusing_current_matrix (struct window *w)
+       it.vpos = (MATRIX_ROW_VPOS (first_row_to_display, w->current_matrix)
+ 		 - nrows_scrolled);
+       it.current_y = (first_row_to_display->y - first_reusable_row->y
+-		      + WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w));
++		      + WINDOW_TOP_LINES_HEIGHT (w));
+ 
+       /* Display lines beginning with first_row_to_display in the
+          desired matrix.  Set last_text_row to the last row displayed
+@@ -21958,7 +21957,7 @@ try_window_reusing_current_matrix (struct window *w)
+ 
+       /* Scroll the display.  */
+       run.current_y = first_reusable_row->y;
+-      run.desired_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
++      run.desired_y = WINDOW_TOP_LINES_HEIGHT (w);
+       run.height = it.last_visible_y - run.current_y;
+       dy = run.current_y - run.desired_y;
+ 
+@@ -21976,7 +21975,7 @@ try_window_reusing_current_matrix (struct window *w)
+ 
+       /* Adjust Y positions of reused rows.  */
+       bottom_row = MATRIX_BOTTOM_TEXT_ROW (w->current_matrix, w);
+-      min_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
++      min_y = WINDOW_TOP_LINES_HEIGHT (w);
+       max_y = it.last_visible_y;
+       for (row = first_reusable_row; row < first_row_to_display; ++row)
+ 	{
+@@ -23945,7 +23944,7 @@ compute_line_metrics (struct it *it)
+       /* Compute how much of the line is visible.  */
+       row->visible_height = row->height;
+ 
+-      min_y = WINDOW_TAB_LINE_HEIGHT (it->w) + WINDOW_HEADER_LINE_HEIGHT (it->w);
++      min_y = WINDOW_TOP_LINES_HEIGHT (it->w);
+       max_y = WINDOW_BOX_HEIGHT_NO_MODE_LINE (it->w);
+ 
+       if (row->y < min_y)
+@@ -34097,7 +34096,7 @@ gui_clear_end_of_line (struct window *w, struct glyph_row *updated_row,
+       to_x += area_left;
+     }
+ 
+-  min_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
++  min_y = WINDOW_TOP_LINES_HEIGHT (w);
+   from_y = WINDOW_TO_FRAME_PIXEL_Y (w, max (min_y, w->output_cursor.y));
+   to_y = WINDOW_TO_FRAME_PIXEL_Y (w, to_y);
+ 
+@@ -36169,13 +36168,17 @@ note_line_or_margin_highlight (Lisp_Object window, int x, int y,
+       /* Change the mouse pointer according to what is under it.  */
+       if (FRAME_WINDOW_P (f))
+ 	{
++	  bool mode_line_at_top = (area == ON_MODE_LINE
++				   && WINDOW_MODE_LINE_AT_TOP_P (w));
+ 	  bool draggable_window_bottom_line =
+-	    (area == ON_MODE_LINE && (! WINDOW_BOTTOMMOST_P (w)
+-				      || minibuf_level
+-				      || NILP (Vresize_mini_windows)));
++	    (area == ON_MODE_LINE && !mode_line_at_top
++	     && (! WINDOW_BOTTOMMOST_P (w)
++		 || minibuf_level
++		 || NILP (Vresize_mini_windows)));
+ 	  bool draggable_window_top_line =
+-	    ((area == ON_HEADER_LINE || area == ON_TAB_LINE)
+-	     && ! WINDOW_TOPMOST_P (w));
++	    (((area == ON_HEADER_LINE || area == ON_TAB_LINE)
++	      && ! WINDOW_TOPMOST_P (w))
++	     || (mode_line_at_top && ! WINDOW_TOPMOST_P (w)));
+ 
+ 	  if (STRINGP (string))
+ 	    {
+diff --git a/src/xfns.c b/src/xfns.c
+index 13a58f6ecf8..1b20e21c66d 100644
+--- a/src/xfns.c
++++ b/src/xfns.c
+@@ -10218,6 +10218,7 @@ DEFUN ("x-test-string-conversion", Fx_test_string_conversion,
+   x_set_use_frame_synchronization,
+   x_set_shaded,
+   gui_set_minibuffer_position,
++  gui_set_mode_line_position,
+ };
+ 
+ /* Some versions of libX11 don't have symbols for a few functions we
