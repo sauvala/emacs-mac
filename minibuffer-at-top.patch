@@ -1,0 +1,354 @@
+diff --git a/lisp/frame.el b/lisp/frame.el
+index 6a0eafe46c5..b95d8a3c7a9 100644
+--- a/lisp/frame.el
++++ b/lisp/frame.el
+@@ -3569,6 +3569,16 @@ toggle-frame-fullscreen
+        frame `((fullscreen . fullboth) (fullscreen-restore . ,fullscreen))))))
+ 
+ 
++(defun toggle-minibuffer-position (&optional frame)
++  "Toggle the minibuffer between top and bottom of FRAME.
++If FRAME is nil, use the selected frame."
++  (interactive)
++  (let* ((frame (or frame (selected-frame)))
++         (current (frame-parameter frame 'minibuffer-position)))
++    (set-frame-parameter frame 'minibuffer-position
++                         (if (eq current 'top) 'bottom 'top))))
++
++
+ ;;;; Key bindings
+ 
+ (define-key ctl-x-5-map "2" #'make-frame-command)
+diff --git a/src/androidfns.c b/src/androidfns.c
+index 6d9af385ce7..43dc4a12d9e 100644
+--- a/src/androidfns.c
++++ b/src/androidfns.c
+@@ -3192,6 +3192,7 @@ android_set_no_accept_focus (struct frame *f, Lisp_Object new_value,
+   NULL,
+   gui_set_borders_respect_alpha_background,
+   NULL,
++  gui_set_minibuffer_position,
+ };
+ 
+ 
+diff --git a/src/frame.c b/src/frame.c
+index 848d94a2454..bcddc3f8530 100644
+--- a/src/frame.c
++++ b/src/frame.c
+@@ -1018,7 +1018,11 @@ adjust_frame_size (struct frame *f, int new_text_width, int new_text_height,
+ 			       inhibit_horizontal, inhibit_vertical);
+ 
+   if ((XWINDOW (FRAME_ROOT_WINDOW (f))->pixel_top
+-       == FRAME_TOP_MARGIN_HEIGHT (f))
++       == (FRAME_TOP_MARGIN_HEIGHT (f)
++	   + (FRAME_MINIBUF_AT_TOP_P (f)
++	      && FRAME_HAS_MINIBUF_P (f)
++	      && !FRAME_MINIBUF_ONLY_P (f)
++	      ? XWINDOW (f->minibuffer_window)->pixel_height : 0)))
+       && new_text_width == old_text_width
+       && new_text_height == old_text_height
+       && new_inner_width == old_inner_width
+@@ -1171,6 +1175,7 @@ make_frame (bool mini_p)
+   /* Initialize Lisp data.  Note that allocate_frame initializes all
+      Lisp data to nil, so do it only for slots which should not be nil.  */
+   fset_tool_bar_position (f, Qtop);
++  fset_minibuffer_position (f, Qbottom);
+ 
+   /* Initialize non-Lisp data.  Note that allocate_frame zeroes out all
+      non-Lisp data, so do it only for slots which should not be zero.
+@@ -4840,6 +4845,7 @@ DEFUN ("frame-scale-factor", Fframe_scale_factor, Sframe_scale_factor,
+ #ifdef HAVE_MACGUI
+   {"mac-transparent-titlebar",  SYMBOL_INDEX (Qmac_transparent_titlebar)},
+ #endif
++  {"minibuffer-position",	SYMBOL_INDEX (Qminibuffer_position)},
+ };
+ 
+ #ifdef HAVE_WINDOW_SYSTEM
+@@ -5440,6 +5446,8 @@ gui_report_frame_params (struct frame *f, Lisp_Object *alistptr)
+   store_in_alist (alistptr, Qexplicit_name, (f->explicit_name ? Qt : Qnil));
+   store_in_alist (alistptr, Qparent_id, tem);
+   store_in_alist (alistptr, Qtool_bar_position, FRAME_TOOL_BAR_POSITION (f));
++  store_in_alist (alistptr, Qminibuffer_position,
++		  FRAME_MINIBUFFER_POSITION (f));
+ }
+ 
+ 
+@@ -5805,6 +5813,22 @@ gui_set_bottom_divider_width (struct frame *f, Lisp_Object arg, Lisp_Object oldv
+     }
+ }
+ 
++void
++gui_set_minibuffer_position (struct frame *f, Lisp_Object arg,
++			     Lisp_Object oldval)
++{
++  if (!EQ (arg, Qtop) && !EQ (arg, Qbottom))
++    error ("Invalid minibuffer position: must be `top' or `bottom'");
++
++  if (!EQ (arg, oldval)
++      && FRAME_HAS_MINIBUF_P (f) && !FRAME_MINIBUF_ONLY_P (f))
++    {
++      fset_minibuffer_position (f, arg);
++      resize_frame_windows (f, FRAME_INNER_HEIGHT (f), false);
++      SET_FRAME_GARBAGED (f);
++    }
++}
++
+ void
+ gui_set_visibility (struct frame *f, Lisp_Object value, Lisp_Object oldval)
+ {
+@@ -7266,6 +7290,7 @@ syms_of_frame (void)
+   DEFSYM (Qleft_fringe_help, "left-fringe-help");
+   DEFSYM (Qline_spacing, "line-spacing");
+   DEFSYM (Qmenu_bar_lines, "menu-bar-lines");
++  DEFSYM (Qminibuffer_position, "minibuffer-position");
+   DEFSYM (Qtab_bar_lines, "tab-bar-lines");
+   DEFSYM (Qmouse_color, "mouse-color");
+   DEFSYM (Qname, "name");
+diff --git a/src/frame.h b/src/frame.h
+index b7cbffbaab7..7ea11b6a343 100644
+--- a/src/frame.h
++++ b/src/frame.h
+@@ -274,6 +274,9 @@ #define EMACS_FRAME_H
+      Except with GTK, the only supported position is `top'.  */
+   Lisp_Object tool_bar_position;
+ 
++  /* Where the minibuffer is, `top' or `bottom'.  */
++  Lisp_Object minibuffer_position;
++
+ #if defined (HAVE_XFT) || defined (HAVE_FREETYPE)
+   /* List of data specific to font-driver and frame, but common to faces.  */
+   Lisp_Object font_data;
+@@ -906,6 +909,12 @@ fset_tool_bar_position (struct frame *f, Lisp_Object val)
+   f->tool_bar_position = val;
+ }
+ 
++INLINE void
++fset_minibuffer_position (struct frame *f, Lisp_Object val)
++{
++  f->minibuffer_position = val;
++}
++
+ INLINE double
+ NUMVAL (Lisp_Object x)
+ {
+@@ -1127,6 +1136,13 @@ #define FRAME_EXTERNAL_TOOL_BAR(f) false
+    Qleft and Qright are not supported outside GTK+.  */
+ #define FRAME_TOOL_BAR_POSITION(f) (f)->tool_bar_position
+ 
++/* Position of the minibuffer; Qtop or Qbottom.  */
++#define FRAME_MINIBUFFER_POSITION(f) (f)->minibuffer_position
++
++/* True if the minibuffer should be at the top of the frame.  */
++#define FRAME_MINIBUF_AT_TOP_P(f) \
++  (BASE_EQ ((f)->minibuffer_position, Qtop))
++
+ /* Size of frame F's internal tool bar in frame lines and pixels.  */
+ #define FRAME_TOOL_BAR_LINES(f) (f)->tool_bar_lines
+ #define FRAME_TOOL_BAR_HEIGHT(f) (f)->tool_bar_height
+@@ -1888,6 +1904,8 @@ #define EMACS_CLASS "Emacs"
+                                          Lisp_Object);
+ extern void gui_set_bottom_divider_width (struct frame *, Lisp_Object,
+                                           Lisp_Object);
++extern void gui_set_minibuffer_position (struct frame *, Lisp_Object,
++					 Lisp_Object);
+ extern void gui_set_visibility (struct frame *, Lisp_Object, Lisp_Object);
+ extern void gui_set_autoraise (struct frame *, Lisp_Object, Lisp_Object);
+ extern void gui_set_autolower (struct frame *, Lisp_Object, Lisp_Object);
+diff --git a/src/haikufns.c b/src/haikufns.c
+index e24dfd2193e..c97820b4274 100644
+--- a/src/haikufns.c
++++ b/src/haikufns.c
+@@ -3199,6 +3199,7 @@ DEFUN ("haiku-display-monitor-attributes-list",
+     gui_set_alpha_background,
+     gui_set_borders_respect_alpha_background,
+     haiku_set_use_frame_synchronization,
++    gui_set_minibuffer_position,
+   };
+ 
+ void
+diff --git a/src/macfns.c b/src/macfns.c
+index c07bfc0dac3..a7e2ff79603 100644
+--- a/src/macfns.c
++++ b/src/macfns.c
+@@ -2598,6 +2598,8 @@ DEFUN ("x-create-frame", Fx_create_frame, Sx_create_frame,
+ 			 mac_inhibit_double_buffering_default_value (),
+                          "inhibitDoubleBuffering", "InhibitDoubleBuffering",
+                          RES_TYPE_BOOLEAN);
++  gui_default_parameter (f, parms, Qminibuffer_position, Qbottom,
++			 NULL, NULL, RES_TYPE_SYMBOL);
+ 
+   /* Compute the size of the window.  */
+   window_prompting = gui_figure_window_size (f, parms, true, true);
+@@ -5276,6 +5278,7 @@ DEFUN ("mac-start-animation", Fmac_start_animation, Smac_start_animation, 1, MAN
+      ns-transparent-titlebar
+    */
+   mac_set_transparent_titlebar,
++  gui_set_minibuffer_position,
+ };
+ 
+ void
+diff --git a/src/nsfns.m b/src/nsfns.m
+index cf685630ab7..f805726e74c 100644
+--- a/src/nsfns.m
++++ b/src/nsfns.m
+@@ -1112,6 +1112,7 @@ Turn the input menu (an NSMenu) into a lisp list for tracking on lisp side.
+   ns_set_appearance,
+   ns_set_transparent_titlebar,
+ #endif
++  gui_set_minibuffer_position,
+ };
+ 
+ 
+diff --git a/src/pgtkfns.c b/src/pgtkfns.c
+index c336ce36d58..c37ce82e5a4 100644
+--- a/src/pgtkfns.c
++++ b/src/pgtkfns.c
+@@ -996,6 +996,7 @@ DEFUN ("x-export-frames", Fx_export_frames, Sx_export_frames, 0, 2, 0,
+     pgtk_set_alpha_background,
+     gui_set_borders_respect_alpha_background,
+     NULL,
++    gui_set_minibuffer_position,
+   };
+ 
+ 
+diff --git a/src/w32fns.c b/src/w32fns.c
+index b75bce8d1a2..a53bda19aa1 100644
+--- a/src/w32fns.c
++++ b/src/w32fns.c
+@@ -11385,6 +11385,7 @@ DEFUN ("w32-progress-indicator",
+   gui_set_alpha_background,
+   gui_set_borders_respect_alpha_background,
+   0, /* x_set_use_frame_synchronization */
++  gui_set_minibuffer_position,
+ };
+ 
+ void
+diff --git a/src/window.c b/src/window.c
+index d73715158d2..057d8fdb220 100644
+--- a/src/window.c
++++ b/src/window.c
+@@ -5014,7 +5014,14 @@ DEFUN ("window-resize-apply-total", Fwindow_resize_apply_total, Swindow_resize_a
+   block_input ();
+   /* Necessary when deleting the top-/or leftmost window.  */
+   r->left_col = 0;
+-  r->top_line = FRAME_TOP_MARGIN (f);
++  if (FRAME_MINIBUF_AT_TOP_P (f)
++      && FRAME_HAS_MINIBUF_P (f) && !FRAME_MINIBUF_ONLY_P (f))
++    {
++      struct window *m = XWINDOW (f->minibuffer_window);
++      r->top_line = FRAME_TOP_MARGIN (f) + m->total_lines;
++    }
++  else
++    r->top_line = FRAME_TOP_MARGIN (f);
+   window_resize_apply_total (r, !NILP (horizontal));
+   /* Handle the mini window.  */
+   if (FRAME_HAS_MINIBUF_P (f) && !FRAME_MINIBUF_ONLY_P (f))
+@@ -5023,8 +5030,14 @@ DEFUN ("window-resize-apply-total", Fwindow_resize_apply_total, Swindow_resize_a
+ 
+       if (NILP (horizontal))
+ 	{
+-	  m->top_line = r->top_line + r->total_lines;
+ 	  m->total_lines = XFIXNAT (m->new_total);
++	  if (FRAME_MINIBUF_AT_TOP_P (f))
++	    {
++	      m->top_line = FRAME_TOP_MARGIN (f);
++	      r->top_line = m->top_line + m->total_lines;
++	    }
++	  else
++	    m->top_line = r->top_line + r->total_lines;
+ 	}
+       else
+ 	m->total_cols = XFIXNAT (m->new_total);
+@@ -5056,8 +5069,12 @@ resize_frame_windows (struct frame *f, int size, bool horflag)
+   new_pixel_size = max (horflag ? size : size - mini_height, unit);
+   new_size = new_pixel_size / unit;
+ 
++  int expected_root_top
++    = (FRAME_TOP_MARGIN_HEIGHT (f)
++       + (FRAME_MINIBUF_AT_TOP_P (f) ? mini_height : 0));
++
+   if (new_pixel_size == old_pixel_size
+-      && (horflag || r->pixel_top == FRAME_TOP_MARGIN_HEIGHT (f)))
++      && (horflag || r->pixel_top == expected_root_top))
+     ;
+   else if (WINDOW_LEAF_P (r))
+     {
+@@ -5069,8 +5086,8 @@ resize_frame_windows (struct frame *f, int size, bool horflag)
+ 	}
+       else
+ 	{
+-	  r->top_line = FRAME_TOP_MARGIN (f);
+-	  r->pixel_top = FRAME_TOP_MARGIN_HEIGHT (f);
++	  r->top_line = expected_root_top / unit;
++	  r->pixel_top = expected_root_top;
+ 
+ 	  r->total_lines = new_size;
+ 	  r->pixel_height = new_pixel_size;
+@@ -5085,8 +5102,8 @@ resize_frame_windows (struct frame *f, int size, bool horflag)
+ 
+       if (!horflag)
+ 	{
+-	  r->top_line = FRAME_TOP_MARGIN (f);
+-	  r->pixel_top = FRAME_TOP_MARGIN_HEIGHT (f);
++	  r->top_line = expected_root_top / unit;
++	  r->pixel_top = expected_root_top;
+ 	}
+ 
+       XSETINT (delta, new_pixel_size - old_pixel_size);
+@@ -5124,8 +5141,16 @@ resize_frame_windows (struct frame *f, int size, bool horflag)
+ 	{
+ 	  m->total_lines = mini_height / unit;
+ 	  m->pixel_height = mini_height;
+-	  m->top_line = r->top_line + r->total_lines;
+-	  m->pixel_top = r->pixel_top + r->pixel_height;
++	  if (FRAME_MINIBUF_AT_TOP_P (f))
++	    {
++	      m->top_line = FRAME_TOP_MARGIN (f);
++	      m->pixel_top = FRAME_TOP_MARGIN_HEIGHT (f);
++	    }
++	  else
++	    {
++	      m->top_line = r->top_line + r->total_lines;
++	      m->pixel_top = r->pixel_top + r->pixel_height;
++	    }
+ 	}
+     }
+ 
+@@ -5864,10 +5889,23 @@ resize_mini_window_apply (struct window *w, int delta)
+   w->pixel_height = w->pixel_height + delta;
+   w->total_lines = w->pixel_height / FRAME_LINE_HEIGHT (f);
+ 
++  if (FRAME_MINIBUF_AT_TOP_P (f))
++    {
++      /* Mini window stays at top; update root position BEFORE
++	 window_resize_apply so children get correct pixel_top.  */
++      w->top_line = FRAME_TOP_MARGIN (f);
++      w->pixel_top = FRAME_TOP_MARGIN_HEIGHT (f);
++      r->top_line = w->top_line + w->total_lines;
++      r->pixel_top = w->pixel_top + w->pixel_height;
++    }
++
+   window_resize_apply (r, false);
+ 
+-  w->pixel_top = r->pixel_top + r->pixel_height;
+-  w->top_line = r->top_line + r->total_lines;
++  if (!FRAME_MINIBUF_AT_TOP_P (f))
++    {
++      w->pixel_top = r->pixel_top + r->pixel_height;
++      w->top_line = r->top_line + r->total_lines;
++    }
+ 
+   /* Enforce full redisplay of the frame.  If f->redisplay is already
+      set, which it generally is in the wake of a ConfigureNotify
+diff --git a/src/xfns.c b/src/xfns.c
+index 70a4b6d5509..13a58f6ecf8 100644
+--- a/src/xfns.c
++++ b/src/xfns.c
+@@ -10217,6 +10217,7 @@ DEFUN ("x-test-string-conversion", Fx_test_string_conversion,
+   gui_set_borders_respect_alpha_background,
+   x_set_use_frame_synchronization,
+   x_set_shaded,
++  gui_set_minibuffer_position,
+ };
+ 
+ /* Some versions of libX11 don't have symbols for a few functions we
