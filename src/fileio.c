@@ -50,6 +50,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "composite.h"
 #include "character.h"
 #include "buffer.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#include "rope.h"
+#endif
 #include "coding.h"
 #include "window.h"
 #include "blockinput.h"
@@ -4893,6 +4897,380 @@ by calling `format-decode', which see.  */)
   if (BASE_EQ (replace, Qunbound))
     del_range (BEGV, ZV);
 
+#ifdef USE_ROPE
+  /* For rope buffers, read the file into a malloc'd buffer,
+     detect the coding system, and decode via decode_coding_object
+     which handles rope destinations correctly.  */
+  if (current_buffer->text->using_rope)
+    {
+      /* Determine actual file size to read.  st_size is set for regular
+	 files; for other files, we read in chunks until EOF.  */
+      ptrdiff_t alloc_size = (st_size >= 0 && st_size <= PTRDIFF_MAX
+			      ? (ptrdiff_t) st_size + 1 : 4096);
+      char *file_data = xmalloc (alloc_size);
+      ptrdiff_t file_size = 0;
+
+      /* Read file data, growing buffer as needed.  */
+      while (true)
+	{
+	  ptrdiff_t space = alloc_size - file_size;
+	  if (space == 0)
+	    {
+	      /* Grow buffer.  */
+	      if (alloc_size > PTRDIFF_MAX / 2)
+		{
+		  xfree (file_data);
+		  buffer_overflow ();
+		}
+	      alloc_size *= 2;
+	      file_data = xrealloc (file_data, alloc_size);
+	      space = alloc_size - file_size;
+	    }
+
+	  ptrdiff_t nread = emacs_fd_read (fd, file_data + file_size, space);
+	  if (nread < 0)
+	    {
+	      int err = errno;
+	      xfree (file_data);
+	      report_file_errno ("Read error", orig_filename, err);
+	    }
+	  if (nread == 0)
+	    break;  /* EOF */
+	  file_size += nread;
+	}
+
+      emacs_fd_close (fd);
+      clear_unwind_protect (fd_index);
+
+      if (file_size == 0)
+	{
+	  xfree (file_data);
+	  inserted = 0;
+	  if (we_locked_file)
+	    Funlock_file (BVAR (current_buffer, file_truename));
+	  Vdeactivate_mark = old_Vdeactivate_mark;
+	}
+      else
+	{
+	  Fset (Qdeactivate_mark, Qt);
+
+	  /* Detect coding system.  Follow the same approach as the
+	     gap buffer path: try auto-coding (file-local variables,
+	     BOM, etc.), then file-coding-system-alist, then fall
+	     back to `undecided' and let decode_coding_object's
+	     internal detect_coding handle the real detection on the
+	     full data.  Do NOT call detect_coding_system here -- it
+	     can misdetect UTF-8 with non-ASCII bytes as raw-text,
+	     and once raw-text is set, detect_coding inside
+	     decode_coding_object never re-detects.  */
+	  if (NILP (coding_system))
+	    {
+	      if (!NILP (Vcoding_system_for_read))
+		coding_system = Vcoding_system_for_read;
+	      else
+		{
+		  /* Try auto-coding (file-local variables, BOM,
+		     magic cookies like "-*- coding: xxx -*-").  */
+		  if (regular && !NILP (Vset_auto_coding_function))
+		    {
+		      /* Insert raw data into a work buffer and call
+			 set-auto-coding-function, mirroring the gap
+			 buffer path.  */
+		      AUTO_STRING (name, " *code-converting-work*");
+		      struct buffer *prev = current_buffer;
+		      record_unwind_current_buffer ();
+		      Lisp_Object workbuf
+			= Fget_buffer_create (name, Qt);
+		      struct buffer *buf = XBUFFER (workbuf);
+		      delete_all_overlays (buf);
+		      bset_directory
+			(buf, BVAR (current_buffer, directory));
+		      bset_read_only (buf, Qnil);
+		      bset_filename (buf, Qnil);
+		      bset_undo_list (buf, Qt);
+		      set_buffer_internal (buf);
+		      Ferase_buffer ();
+		      bset_enable_multibyte_characters (buf, Qnil);
+		      ptrdiff_t detect_len
+			= min (file_size, 4 * 1024);
+		      insert_1_both (file_data, detect_len,
+				     detect_len, 0, 0, 0);
+		      TEMP_SET_PT_BOTH (BEG, BEG_BYTE);
+		      coding_system
+			= calln (Vset_auto_coding_function,
+				 filename,
+				 make_fixnum (detect_len));
+		      set_buffer_internal (prev);
+		      specpdl_ptr--;
+		    }
+
+		  /* Try file-coding-system-alist.  */
+		  if (NILP (coding_system))
+		    {
+		      coding_system
+			= CALLN (Ffind_operation_coding_system,
+				 Qinsert_file_contents, orig_filename,
+				 visit, beg, end, Qnil);
+		      if (CONSP (coding_system))
+			coding_system = XCAR (coding_system);
+		    }
+		}
+
+	      if (NILP (coding_system))
+		coding_system = Qundecided;
+	      else
+		CHECK_CODING_SYSTEM (coding_system);
+
+	      if (NILP (BVAR (current_buffer,
+			      enable_multibyte_characters)))
+		coding_system = raw_text_coding_system (coding_system);
+	    }
+
+	  setup_coding_system (coding_system, &coding);
+	  set_coding_system = true;
+
+	  /* Check if we should make the buffer unibyte for visiting
+	     with raw-text.  */
+	  if (!NILP (visit)
+	      && CODING_FOR_UNIBYTE (&coding)
+	      && NILP (replace))
+	    {
+	      if (file_size > 0)
+		bset_enable_multibyte_characters (current_buffer, Qnil);
+	      else
+		Fset_buffer_multibyte (Qnil);
+	    }
+
+	  coding.dst_multibyte
+	    = !NILP (BVAR (current_buffer,
+			   enable_multibyte_characters));
+
+	  /* Fast path: for valid UTF-8 data with no CR bytes (thus no
+	     EOL conversion needed), the decoded output is byte-for-byte
+	     identical to the input.  Create a new rope directly from
+	     the file data, avoiding decode_coding_object entirely.  */
+	  Lisp_Object attrs = CODING_ID_ATTRS (coding.id);
+	  Lisp_Object coding_type = CODING_ATTR_TYPE (attrs);
+	  Lisp_Object eol_type = CODING_ID_EOL_TYPE (coding.id);
+	  bool rope_fast_adopted = false;
+
+	  /* This fast path applies when:
+	     - Buffer is empty (initial file load)
+	     - Buffer is multibyte
+	     - Coding is utf-8 (or undecided, which resolves to utf-8)
+	     - No BOM to strip
+	     - No post-read hook or translation tables
+	     - EOL is unix or undecided (we verify no CR in the data)  */
+	  if (Z == BEG
+	      && coding.dst_multibyte
+	      && (EQ (coding_type, Qutf_8) || EQ (coding_type, Qundecided))
+	      && (EQ (coding_type, Qundecided)
+		  || coding.spec.utf_8_bom == utf_without_bom)
+	      && (EQ (eol_type, Qunix) || VECTORP (eol_type))
+	      && NILP (CODING_ATTR_POST_READ (attrs))
+	      && (NILP (Venable_character_translation)
+		  || (NILP (CODING_ATTR_DECODE_TBL (attrs))
+		      && NILP (Vstandard_translation_table_for_decode))))
+	    {
+	      /* Validate UTF-8 and count characters.  For valid UTF-8,
+		 Emacs's internal multibyte encoding is identical.  */
+	      const unsigned char *p = (const unsigned char *) file_data;
+	      const unsigned char *pend = p + file_size;
+
+	      /* Reject data with BOM -- would need stripping.  */
+	      if (file_size >= 3
+		  && p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF)
+		goto rope_fast_path_skip;
+	      ptrdiff_t nchars = 0;
+	      bool valid = true;
+
+	      while (p < pend)
+		{
+		  unsigned char c = *p;
+		  if (c < 0x80)
+		    {
+		      /* Reject CR -- means DOS/Mac line endings that
+			 need conversion.  */
+		      if (c == '\r')
+			{ valid = false; break; }
+		      p++;
+		    }
+		  else if (c < 0xC2)
+		    {
+		      /* Overlong or continuation byte.  */
+		      valid = false;
+		      break;
+		    }
+		  else if (c < 0xE0)
+		    {
+		      if (p + 1 >= pend || (p[1] & 0xC0) != 0x80)
+			{ valid = false; break; }
+		      p += 2;
+		    }
+		  else if (c < 0xF0)
+		    {
+		      if (p + 2 >= pend
+			  || (p[1] & 0xC0) != 0x80
+			  || (p[2] & 0xC0) != 0x80)
+			{ valid = false; break; }
+		      /* Check for overlong and surrogates.  */
+		      unsigned int cp = ((c & 0x0F) << 12)
+			| ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+		      if (cp < 0x800 || (cp >= 0xD800 && cp < 0xE000))
+			{ valid = false; break; }
+		      p += 3;
+		    }
+		  else if (c < 0xF5)
+		    {
+		      if (p + 3 >= pend
+			  || (p[1] & 0xC0) != 0x80
+			  || (p[2] & 0xC0) != 0x80
+			  || (p[3] & 0xC0) != 0x80)
+			{ valid = false; break; }
+		      unsigned int cp = ((c & 0x07) << 18)
+			| ((p[1] & 0x3F) << 12)
+			| ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+		      if (cp < 0x10000 || cp > 0x10FFFF)
+			{ valid = false; break; }
+		      p += 4;
+		    }
+		  else
+		    {
+		      valid = false;
+		      break;
+		    }
+		  nchars++;
+		}
+
+	      if (valid)
+		{
+		  /* Create a new rope from the file data and swap it
+		     into the buffer.  */
+		  Rope *old_rope = current_buffer->text->rope;
+		  Rope *new_rope = rope_from_str (file_data, file_size);
+		  if (new_rope)
+		    {
+		      rope_free (old_rope);
+		      current_buffer->text->rope = new_rope;
+		      xfree (file_data);
+
+		      BUF_COMPUTE_UNCHANGED (current_buffer, PT, PT);
+		      record_insert (PT, nchars);
+		      modiff_incr (&MODIFF, nchars);
+		      CHARS_MODIFF = MODIFF;
+		      ZV += nchars;
+		      Z += nchars;
+		      ZV_BYTE += file_size;
+		      Z_BYTE += file_size;
+		      GPT = Z;
+		      GPT_BYTE = Z_BYTE;
+		      SET_BUF_PT_BOTH (current_buffer,
+				       PT + nchars, PT_BYTE + file_size);
+		      inserted = nchars;
+		      file_data = NULL;
+		      rope_fast_adopted = true;
+		      /* Resolve coding system: undecided -> utf-8-unix.  */
+		      coding_system = Qutf_8_unix;
+
+		      /* Restore PT to start of inserted text.  */
+		      TEMP_SET_PT_BOTH (BEG, BEG_BYTE);
+		    }
+		}
+	    }
+	rope_fast_path_skip:
+
+	  if (rope_fast_adopted)
+	    {
+	      /* Already adopted above -- nothing more to do.  */
+	    }
+	  else if (CODING_MAY_REQUIRE_DECODING (&coding))
+	    {
+	      ptrdiff_t saved_pt = PT;
+	      ptrdiff_t saved_pt_byte = PT_BYTE;
+
+	      /* Pass raw file data as a C buffer source to avoid
+		 copying into a Lisp string.  */
+	      coding.mode |= CODING_MODE_LAST_BLOCK;
+	      coding.source = (const unsigned char *) file_data;
+	      decode_coding_object (&coding, Qnil,
+				    0, 0, file_size, file_size,
+				    Fcurrent_buffer ());
+	      xfree (file_data);
+	      file_data = NULL;
+
+	      inserted = coding.produced_char;
+	      coding_system = CODING_ID_NAME (coding.id);
+
+	      /* Restore PT to start of inserted text.  */
+	      TEMP_SET_PT_BOTH (saved_pt, saved_pt_byte);
+	    }
+	  else
+	    {
+	      /* No decoding needed.  In unibyte mode, each byte is one
+		 character.  */
+	      ptrdiff_t nchars = file_size;
+
+	      ptrdiff_t saved_pt = PT;
+	      ptrdiff_t saved_pt_byte = PT_BYTE;
+
+	      /* If the rope is empty (initial file load), create a
+		 new rope directly from the malloc'd buffer, avoiding
+		 a full-size memcpy.  */
+	      if (Z == BEG)
+		{
+		  Rope *old_rope = current_buffer->text->rope;
+		  Rope *new_rope = rope_from_str (file_data, file_size);
+		  if (new_rope)
+		    {
+		      rope_free (old_rope);
+		      current_buffer->text->rope = new_rope;
+		      xfree (file_data);
+
+		      BUF_COMPUTE_UNCHANGED (current_buffer, PT, PT);
+		      record_insert (PT, nchars);
+		      modiff_incr (&MODIFF, nchars);
+		      CHARS_MODIFF = MODIFF;
+		      ZV += nchars;
+		      Z += nchars;
+		      ZV_BYTE += file_size;
+		      Z_BYTE += file_size;
+		      GPT = Z;
+		      GPT_BYTE = Z_BYTE;
+		      SET_BUF_PT_BOTH (current_buffer,
+				       PT + nchars, PT_BYTE + file_size);
+		      file_data = NULL;
+		    }
+		}
+
+	      if (file_data)
+		{
+		  insert_1_both (file_data, nchars, file_size, 0, 0, 0);
+		  xfree (file_data);
+		  file_data = NULL;
+		}
+
+	      inserted = nchars;
+
+	      /* Restore PT to start of inserted text.  */
+	      TEMP_SET_PT_BOTH (saved_pt, saved_pt_byte);
+	    }
+
+	  if (file_data)
+	    xfree (file_data);
+	}
+
+      /* Call after-change hooks.  */
+      if (inserted > 0 && total > 0
+	  && (NILP (visit) || !NILP (replace)))
+	{
+	  signal_after_change (PT, 0, inserted);
+	  update_compositions (PT, PT, CHECK_BORDER);
+	}
+
+      goto handled;
+    }
+#endif
+
   move_gap_both (PT, PT_BYTE);
 
   /* Ensure the gap is at least one byte larger than needed for the
@@ -5977,6 +6355,17 @@ a_write (int desc, Lisp_Object string, ptrdiff_t pos,
   ptrdiff_t nextpos;
   ptrdiff_t lastpos = pos + nchars;
 
+#ifdef USE_ROPE
+  /* For rope buffers, convert buffer content to a string first
+     since the encoding code in e_write expects contiguous memory.  */
+  if (NILP (string) && current_buffer->text->using_rope && nchars > 0)
+    {
+      string = make_buffer_string (pos, pos + nchars, 0);
+      pos = 0;
+      lastpos = nchars;
+    }
+#endif
+
   while (NILP (*annot) || CONSP (*annot))
     {
       tem = Fcar_safe (Fcar (*annot));
@@ -6076,17 +6465,32 @@ e_write (int desc, Lisp_Object string, ptrdiff_t start, ptrdiff_t end,
 	    }
 	  else
 	    {
-	      coding->dst_object = Qnil;
-	      coding->dst_pos_byte = start_byte;
-	      if (start >= GPT || end <= GPT)
+#ifdef USE_ROPE
+	      /* For rope buffers, extract text to a string since
+		 buffer content may not be contiguous in memory.  */
+	      if (current_buffer->text->using_rope)
 		{
+		  Lisp_Object region_string
+		    = make_buffer_string (start, end, 0);
+		  coding->dst_object = region_string;
 		  coding->consumed_char = end - start;
-		  coding->produced = end_byte - start_byte;
+		  coding->produced = SBYTES (region_string);
 		}
 	      else
+#endif
 		{
-		  coding->consumed_char = GPT - start;
-		  coding->produced = GPT_BYTE - start_byte;
+		  coding->dst_object = Qnil;
+		  coding->dst_pos_byte = start_byte;
+		  if (start >= GPT || end <= GPT)
+		    {
+		      coding->consumed_char = end - start;
+		      coding->produced = end_byte - start_byte;
+		    }
+		  else
+		    {
+		      coding->consumed_char = GPT - start;
+		      coding->produced = GPT_BYTE - start_byte;
+		    }
 		}
 	    }
 	}

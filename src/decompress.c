@@ -26,6 +26,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "buffer.h"
 #include "composite.h"
 #include "md5.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
 
 #ifdef WINDOWSNT
 # include <windows.h>
@@ -290,29 +293,65 @@ This function can be called only in unibyte buffers.  */)
   pos_byte = istart;
 
   /* Keep calling 'inflate' until it reports an error or end-of-input.  */
-  do
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
     {
-      /* Maximum number of bytes that one 'inflate' call should read and write.
-	 Do not make avail_out too large, as that might unduly delay C-g.
-	 zlib requires that avail_in and avail_out not exceed UINT_MAX.  */
-      ptrdiff_t avail_in = min (iend - pos_byte, UINT_MAX);
-      int avail_out = 16 * 1024;
-      int decompressed;
+      int avail_out_size = 16 * 1024;
+      unsigned char *outbuf = xmalloc (avail_out_size);
 
-      if (GAP_SIZE < avail_out)
-	make_gap (avail_out - GAP_SIZE);
-      stream.next_in = BYTE_POS_ADDR (pos_byte);
-      stream.avail_in = avail_in;
-      stream.next_out = GPT_ADDR;
-      stream.avail_out = avail_out;
-      inflate_status = inflate (&stream, Z_NO_FLUSH);
-      pos_byte += avail_in - stream.avail_in;
-      decompressed = avail_out - stream.avail_out;
-      insert_from_gap (decompressed, decompressed, 0, false);
-      unwind_data.nbytes += decompressed;
-      maybe_quit ();
+      do
+	{
+	  ptrdiff_t ceiling = BUFFER_CEILING_OF (pos_byte);
+	  ptrdiff_t max_contig = ceiling - pos_byte + 1;
+	  ptrdiff_t avail_in
+	    = min (min (iend - pos_byte, max_contig), UINT_MAX);
+	  int decompressed;
+
+	  stream.next_in = BYTE_POS_ADDR (pos_byte);
+	  stream.avail_in = avail_in;
+	  stream.next_out = outbuf;
+	  stream.avail_out = avail_out_size;
+	  inflate_status = inflate (&stream, Z_NO_FLUSH);
+	  pos_byte += avail_in - stream.avail_in;
+	  decompressed = avail_out_size - stream.avail_out;
+	  if (decompressed > 0)
+	    {
+	      insert_1_both ((char *) outbuf, decompressed,
+			     decompressed, 0, 1, 0);
+	      unwind_data.nbytes += decompressed;
+	    }
+	  maybe_quit ();
+	}
+      while (inflate_status == Z_OK);
+
+      xfree (outbuf);
     }
-  while (inflate_status == Z_OK);
+  else
+#endif
+    do
+      {
+	/* Maximum number of bytes that one 'inflate' call should read and
+	   write.  Do not make avail_out too large, as that might unduly
+	   delay C-g.  zlib requires that avail_in and avail_out not exceed
+	   UINT_MAX.  */
+	ptrdiff_t avail_in = min (iend - pos_byte, UINT_MAX);
+	int avail_out = 16 * 1024;
+	int decompressed;
+
+	if (GAP_SIZE < avail_out)
+	  make_gap (avail_out - GAP_SIZE);
+	stream.next_in = BYTE_POS_ADDR (pos_byte);
+	stream.avail_in = avail_in;
+	stream.next_out = GPT_ADDR;
+	stream.avail_out = avail_out;
+	inflate_status = inflate (&stream, Z_NO_FLUSH);
+	pos_byte += avail_in - stream.avail_in;
+	decompressed = avail_out - stream.avail_out;
+	insert_from_gap (decompressed, decompressed, 0, false);
+	unwind_data.nbytes += decompressed;
+	maybe_quit ();
+      }
+    while (inflate_status == Z_OK);
 
   Lisp_Object ret = Qt;
   if (inflate_status != Z_STREAM_END)

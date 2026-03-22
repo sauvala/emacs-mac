@@ -221,5 +221,34 @@
     (should (= (skip-syntax-forward "w") 5))
     (should (= (point) 6))))
 
+(ert-deftest rope-test-insert-file-contents ()
+  "Test insert-file-contents on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (let ((tmpfile (make-temp-file "rope-test")))
+    (unwind-protect
+        (progn
+          (with-temp-file tmpfile
+            (insert "test content\nline 2\n"))
+          (with-temp-buffer
+            (buffer-enable-rope)
+            (insert-file-contents tmpfile)
+            (should (string= (buffer-string) "test content\nline 2\n"))))
+      (delete-file tmpfile))))
+
+(ert-deftest rope-test-write-region ()
+  "Test write-region on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (let ((tmpfile (make-temp-file "rope-test")))
+    (unwind-protect
+        (progn
+          (with-temp-buffer
+            (buffer-enable-rope)
+            (insert "rope output\n")
+            (write-region (point-min) (point-max) tmpfile))
+          (with-temp-buffer
+            (insert-file-contents tmpfile)
+            (should (string= (buffer-string) "rope output\n"))))
+      (delete-file tmpfile))))
+
 (provide 'rope-tests)
 ;;; rope-tests.el ends here
