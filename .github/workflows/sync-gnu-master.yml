@@ -1,0 +1,161 @@
+name: Sync GNU Emacs master
+
+on:
+  schedule:
+    # Run weekly on Mondays at 06:00 UTC
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.merge.outputs.status }}
+      conflicts: ${{ steps.merge.outputs.conflicts }}
+      branch: ${{ steps.create-pr.outputs.branch }}
+      pr_number: ${{ steps.create-pr.outputs.pr_number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: gnu-master
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add GNU remote and fetch
+        run: |
+          git remote add gnu https://git.savannah.gnu.org/git/emacs.git
+          git fetch gnu master
+
+      - name: Attempt merge
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git merge gnu/master --no-edit -m "Merge GNU Emacs master"; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            # Capture conflicting files before aborting
+            CONFLICTS=$(git diff --name-only --diff-filter=U | head -50)
+            echo "conflicts<<CONFLICTS_EOF" >> "$GITHUB_OUTPUT"
+            echo "$CONFLICTS" >> "$GITHUB_OUTPUT"
+            echo "CONFLICTS_EOF" >> "$GITHUB_OUTPUT"
+            git merge --abort
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push if merged
+        if: steps.merge.outputs.status == 'success'
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/gnu-master)" ]; then
+            git push origin gnu-master
+          else
+            echo "Already up to date, nothing to push."
+          fi
+
+      - name: Create PR for conflicts
+        id: create-pr
+        if: steps.merge.outputs.status == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="sync/gnu-master-$(date +%Y%m%d)"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          git checkout -b "$BRANCH"
+
+          # Redo the merge, leaving conflict markers in the files
+          git merge gnu/master --no-edit || true
+
+          # Commit the conflicted state
+          git add -A
+          git commit --no-verify -m "WIP: merge GNU master with conflicts"
+          git push --force origin "$BRANCH"
+
+          CONFLICTS="${{ steps.merge.outputs.conflicts }}"
+
+          # Reuse existing PR or create a new one
+          EXISTING_PR=$(gh pr list --base gnu-master --head "$BRANCH" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING_PR" ]; then
+            PR_NUMBER="$EXISTING_PR"
+            gh pr comment "$PR_NUMBER" --body "$(cat <<EOF
+          Retrying conflict resolution. Conflicting files:
+
+          \`\`\`
+          $CONFLICTS
+          \`\`\`
+          EOF
+          )"
+          else
+            PR_URL=$(gh pr create \
+              --base gnu-master \
+              --head "$BRANCH" \
+              --title "Sync GNU Emacs master (conflicts)" \
+              --draft \
+              --body "$(cat <<EOF
+          ## GNU master sync — merge conflicts
+
+          The automatic merge of GNU Emacs master encountered conflicts in the following files:
+
+          \`\`\`
+          $CONFLICTS
+          \`\`\`
+
+          Claude Code will attempt to resolve these conflicts automatically.
+          EOF
+          )")
+            PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+          fi
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+  resolve-conflicts:
+    needs: sync
+    if: needs.sync.outputs.status == 'conflict'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout conflict branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.branch }}
+          fetch-depth: 0
+
+      - name: Resolve conflicts with Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            This branch has merge conflicts from merging GNU Emacs master into
+            the emacs-mac port branch. The conflicting files are:
+
+            ${{ needs.sync.outputs.conflicts }}
+
+            Please resolve all merge conflicts in these files. The conflict markers
+            (<<<<<<< HEAD, =======, >>>>>>>) indicate where the conflicts are.
+
+            Guidelines for resolving:
+            - This is the emacs-mac port (a macOS-specific fork of GNU Emacs)
+            - Prefer keeping BOTH sides of changes when possible (GNU upstream changes
+              AND mac-port specific changes)
+            - For mac-port specific code (inside #ifdef MAC_OS, HAVE_MACGUI, etc.),
+              preserve the mac-port version while integrating any upstream structural changes
+            - For files that are purely upstream (no mac-port changes), take the upstream version
+            - After resolving, stage and commit the changes
+
+            After resolving all conflicts, run: git add -A && git commit -m "Resolve merge conflicts from GNU master sync"
+          claude_args: |
+            --model claude-opus-4-6
+            --max-turns 30
+            --allowedTools Bash,Read,Edit,Write,Grep,Glob
+
+      - name: Mark PR ready and merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ needs.sync.outputs.pr_number }}"
+          gh pr ready "$PR_NUMBER" --repo sauvala/emacs-mac
+          gh pr merge "$PR_NUMBER" --repo sauvala/emacs-mac --merge --delete-branch
