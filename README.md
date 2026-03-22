@@ -175,6 +175,9 @@ The `nemesis` branch tracks GNU Emacs master and adds the following on top of th
 - **Automated GNU master sync**: Weekly GitHub Actions workflow that merges upstream GNU Emacs master, with automatic Claude-assisted conflict resolution.
 - **Scroll path optimization**: Try reusing the current glyph matrix before falling back to full window redisplay during scrolling, significantly reducing per-scroll cost for long wrapped continuation lines.
 - **Long-line bidi optimization**: Disable bidi reordering when long-line optimizations are active, preventing O(n) bidi cache degradation on large single-line files.
+- **Rope data structure** (experimental, `--with-rope`): Alternative text storage backend using a B-tree sumtree rope with 128-byte leaf chunks. Provides O(log n) insert/delete/replace and O(log n) line counting via aggregated summaries at each tree node. Per-buffer opt-in via `(buffer-enable-rope)` or `(rope-enable-default)` for new buffers. Build with `./configure --with-rope` to enable.
+- **Wrap position cache**: Per-window cache of visual line start positions for O(1) movement within long wrapped continuation lines, replacing the O(buffer_size) scan from logical line start.
+- **WrapMap module**: Centralized visual line estimation for long wrapped lines, consolidating duplicated formulas across the display engine. For rope buffers, uses O(log n) tree operations for precise estimation.
 
 ## Debugging
 
