@@ -3581,6 +3581,8 @@ ptrdiff_t get_large_narrowing_zv (ptrdiff_t);
 void init_iterator_to_row_start (struct it *, struct window *,
                                  struct glyph_row *);
 void start_display (struct it *, struct window *, struct text_pos);
+struct glyph_row *matrix_row_containing_charpos (struct window *, ptrdiff_t);
+ptrdiff_t wrap_cache_find (struct window *, ptrdiff_t, struct buffer *);
 void move_it_vertically (struct it *, int);
 void move_it_vertically_backward (struct it *, int);
 void move_it_by_lines (struct it *, ptrdiff_t);

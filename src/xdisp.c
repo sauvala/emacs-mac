@@ -486,6 +486,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifdef USE_ROPE
 #include "ropebuf.h"
 #endif
+#include "wrapmap.h"
 #include "charset.h"
 #include "indent.h"
 #include "commands.h"
@@ -3837,6 +3838,174 @@ unwind_narrowed_begv (Lisp_Object point_min)
       DST = EXPR;							\
   } while (0)
 
+/* Check if W's wrap cache is still valid for the given buffer.  */
+
+static bool
+wrap_cache_valid_p (struct window *w, struct buffer *buf)
+{
+  return (w->wrap_cache.count > 0
+	  && w->wrap_cache.modiff == BUF_MODIFF (buf)
+	  && w->wrap_cache.overlay_modiff == BUF_OVERLAY_MODIFF (buf)
+	  && w->wrap_cache.window_body_width == window_body_width (w, true));
+}
+
+/* Invalidate (clear) W's wrap cache.  */
+
+static void
+wrap_cache_invalidate (struct window *w)
+{
+  w->wrap_cache.count = 0;
+}
+
+/* Record a visual line start position in W's wrap cache.
+   CHARPOS, BYTEPOS, and CONT_WIDTH describe the start of a
+   continuation row.  Entries are kept sorted by CHARPOS and
+   deduplicated.  */
+
+static void
+wrap_cache_record (struct window *w, struct glyph_row *row)
+{
+  ptrdiff_t charpos = row->start.pos.charpos;
+  ptrdiff_t bytepos = row->start.pos.bytepos;
+  int cont_width = row->continuation_lines_width;
+  struct buffer *buf = XBUFFER (w->contents);
+
+  /* If the cache is stale, start fresh.  */
+  if (w->wrap_cache.count > 0
+      && (w->wrap_cache.modiff != BUF_MODIFF (buf)
+	  || w->wrap_cache.overlay_modiff != BUF_OVERLAY_MODIFF (buf)
+	  || w->wrap_cache.window_body_width != window_body_width (w, true)))
+    w->wrap_cache.count = 0;
+
+  /* Initialize metadata for a fresh cache.  */
+  if (w->wrap_cache.count == 0)
+    {
+      w->wrap_cache.modiff = BUF_MODIFF (buf);
+      w->wrap_cache.overlay_modiff = BUF_OVERLAY_MODIFF (buf);
+      w->wrap_cache.window_body_width = window_body_width (w, true);
+      /* Find the logical line start.  */
+      w->wrap_cache.line_beg = find_newline_no_quit (charpos, bytepos,
+						     -1, NULL);
+    }
+
+  /* Binary search for insertion point.  */
+  ptrdiff_t lo = 0, hi = w->wrap_cache.count;
+  while (lo < hi)
+    {
+      ptrdiff_t mid = lo + (hi - lo) / 2;
+      if (w->wrap_cache.charpos[mid] < charpos)
+	lo = mid + 1;
+      else
+	hi = mid;
+    }
+
+  /* If already present, update and return.  */
+  if (lo < w->wrap_cache.count && w->wrap_cache.charpos[lo] == charpos)
+    {
+      w->wrap_cache.bytepos[lo] = bytepos;
+      w->wrap_cache.cont_width[lo] = cont_width;
+      return;
+    }
+
+  /* Grow the arrays if needed.  */
+  if (w->wrap_cache.count >= w->wrap_cache.capacity)
+    {
+      ptrdiff_t new_cap = w->wrap_cache.capacity < 64 ? 64
+	: w->wrap_cache.capacity + w->wrap_cache.capacity / 2;
+      w->wrap_cache.charpos = xrealloc (w->wrap_cache.charpos,
+					new_cap * sizeof (ptrdiff_t));
+      w->wrap_cache.bytepos = xrealloc (w->wrap_cache.bytepos,
+					new_cap * sizeof (ptrdiff_t));
+      w->wrap_cache.cont_width = xrealloc (w->wrap_cache.cont_width,
+					   new_cap * sizeof (int));
+      w->wrap_cache.capacity = new_cap;
+    }
+
+  /* Shift elements to make room.  */
+  memmove (w->wrap_cache.charpos + lo + 1, w->wrap_cache.charpos + lo,
+	   (w->wrap_cache.count - lo) * sizeof (ptrdiff_t));
+  memmove (w->wrap_cache.bytepos + lo + 1, w->wrap_cache.bytepos + lo,
+	   (w->wrap_cache.count - lo) * sizeof (ptrdiff_t));
+  memmove (w->wrap_cache.cont_width + lo + 1, w->wrap_cache.cont_width + lo,
+	   (w->wrap_cache.count - lo) * sizeof (int));
+
+  w->wrap_cache.charpos[lo] = charpos;
+  w->wrap_cache.bytepos[lo] = bytepos;
+  w->wrap_cache.cont_width[lo] = cont_width;
+  w->wrap_cache.count++;
+}
+
+/* Find the wrap cache entry at or before TARGET_CHARPOS.
+   Returns the index, or -1 if the cache is empty or stale.  */
+
+ptrdiff_t
+wrap_cache_find (struct window *w, ptrdiff_t target_charpos,
+		 struct buffer *buf)
+{
+  if (!wrap_cache_valid_p (w, buf))
+    return -1;
+
+  ptrdiff_t lo = 0, hi = w->wrap_cache.count;
+  while (lo < hi)
+    {
+      ptrdiff_t mid = lo + (hi - lo) / 2;
+      if (w->wrap_cache.charpos[mid] <= target_charpos)
+	lo = mid + 1;
+      else
+	hi = mid;
+    }
+
+  /* lo is the first entry > target_charpos, so lo-1 is at or before.  */
+  return lo - 1;
+}
+
+
+/* Find the glyph_row in W's current_matrix that contains CHARPOS.
+   Returns NULL if not found or matrix is invalid.  Skips tab/header rows.
+   Only returns rows from buffer text (no overlay/display strings).  */
+
+struct glyph_row *
+matrix_row_containing_charpos (struct window *w, ptrdiff_t charpos)
+{
+  struct glyph_matrix *matrix = w->current_matrix;
+  if (!matrix)
+    return NULL;
+
+  int first_text_row = window_wants_tab_line (w) + window_wants_header_line (w);
+  int last_vpos = w->window_end_vpos;
+
+  if (last_vpos <= first_text_row || last_vpos >= matrix->nrows)
+    return NULL;
+
+  struct glyph_row *best = NULL;
+
+  for (int i = first_text_row; i <= last_vpos; i++)
+    {
+      struct glyph_row *row = matrix->rows + i;
+      if (!row->enabled_p)
+	continue;
+      /* Skip rows starting from overlay strings or display vectors.  */
+      if (row->start.overlay_string_index >= 0)
+	continue;
+      ptrdiff_t row_start = MATRIX_ROW_START_CHARPOS (row);
+      if (row_start <= charpos)
+	best = row;
+      else
+	break;
+    }
+
+  /* Verify the position is actually within the best row's range.  */
+  if (best)
+    {
+      ptrdiff_t row_end = MATRIX_ROW_END_CHARPOS (best);
+      if (charpos > row_end)
+	return NULL;
+    }
+
+  return best;
+}
+
+
 /* Initialize IT for the display of window W with window start POS.  */
 
 void
@@ -3870,7 +4039,86 @@ start_display (struct it *it, struct window *w, struct text_pos pos)
 
 	  if (method != GET_FROM_BUFFER)
 	    SAVE_IT (it2, *it, itdata);
-	  reseat_at_previous_visible_line_start (it);
+
+	  /* Fast path: use the glyph matrix to find the visual line
+	     containing POS, avoiding the expensive reseat to logical
+	     line start + full window scan.  */
+	  struct glyph_row *cached_row = NULL;
+	  if (w->current_matrix && w->window_end_valid
+	      && !current_buffer->clip_changed)
+	    cached_row = matrix_row_containing_charpos (w, CHARPOS (pos));
+
+	  if (cached_row)
+	    {
+	      reseat_1 (it, cached_row->start.pos, true);
+	      it->continuation_lines_width
+		= cached_row->continuation_lines_width;
+	      it->current_x = it->hpos = 0;
+	    }
+	  else
+	    {
+	      /* Try the persistent wrap cache before falling back to
+		 the expensive reseat to logical line start.  */
+	      ptrdiff_t wc_idx = wrap_cache_find (w, CHARPOS (pos),
+						  current_buffer);
+	      if (wc_idx >= 0
+		  && (CHARPOS (pos) - w->wrap_cache.charpos[wc_idx]
+		      < (FRAME_COLUMN_WIDTH (it->f) > 0
+			 ? ((it->last_visible_x - it->first_visible_x)
+			    / FRAME_COLUMN_WIDTH (it->f)) * 5
+			 : 5000)))
+		{
+		  struct text_pos wcpos;
+		  SET_TEXT_POS (wcpos, w->wrap_cache.charpos[wc_idx],
+			       w->wrap_cache.bytepos[wc_idx]);
+		  reseat_1 (it, wcpos, true);
+		  it->continuation_lines_width
+		    = w->wrap_cache.cont_width[wc_idx];
+		  it->current_x = it->hpos = 0;
+		}
+	      else if (current_buffer->long_line_optimizations_p
+		       && it->line_wrap != TRUNCATE)
+		{
+		  struct wrapmap_result wr;
+		  if (wrapmap_estimate_vline (w, CHARPOS (pos),
+					      BYTEPOS (pos), &wr))
+		    {
+		      struct text_pos est;
+		      SET_TEXT_POS (est, wr.vline_start_charpos,
+				   wr.vline_start_bytepos);
+		      reseat_1 (it, est, true);
+		      it->continuation_lines_width
+			= wr.continuation_lines_width;
+		      it->current_x = it->hpos = 0;
+		    }
+		  else
+		    reseat_at_previous_visible_line_start (it);
+		}
+	      else
+		{
+		  reseat_at_previous_visible_line_start (it);
+
+		  /* For very long lines, the above reseats to the
+		     logical line start, making move_it_to below O(pos).
+		     If the window's start is on the same logical line
+		     and closer to pos, use it as the starting point
+		     instead.  */
+		  if (w->window_end_valid && !w->update_mode_line)
+		    {
+		      ptrdiff_t ws = marker_position (w->start);
+		      if (ws > IT_CHARPOS (*it) && ws <= CHARPOS (pos))
+			{
+			  struct text_pos wspos;
+			  SET_TEXT_POS (wspos, ws,
+				       marker_byte_position (w->start));
+			  reseat_1 (it, wspos, true);
+			  it->current_x = 0;
+			  it->hpos = 0;
+			}
+		    }
+		}
+	    }
+
 	  move_it_to (it, CHARPOS (pos), -1, -1, -1, MOVE_TO_POS);
 
 	  new_x = it->current_x + it->pixel_width;
@@ -11271,23 +11519,109 @@ move_it_vertically_backward (struct it *it, int dy)
   else
     pos_limit = max (start_pos - nlines * nchars_per_row, BEGV);
 
-  /* Set the iterator's position that many lines back.  But don't go
-     back more than NLINES full screen lines -- this wins a day with
-     buffers which have very long lines.  */
-  while (nlines-- && IT_CHARPOS (*it) > pos_limit)
-    back_to_previous_visible_line_start (it);
+  /* For long wrapped lines, try to use the wrap position cache to
+     avoid going all the way back to the logical line start (which
+     could be millions of characters away for single-line files).
+     Find a cached visual line start approximately nlines visual
+     lines before start_pos.  */
+  bool used_wrap_cache = false;
+  if (it->line_wrap != TRUNCATE && nchars_per_row > 0)
+    {
+      ptrdiff_t wc_idx = wrap_cache_find (it->w, start_pos,
+					  current_buffer);
+      if (wc_idx >= 0)
+	{
+	  /* Go back nlines entries in the cache.  Each entry
+	     is one visual line start.  */
+	  ptrdiff_t back_idx = wc_idx - nlines;
+	  if (back_idx < 0)
+	    back_idx = 0;
+	  /* Only use the cached position if it's reasonably close
+	     to start_pos.  After a large jump (e.g. end-of-buffer),
+	     the cache may contain entries from a distant part of
+	     the buffer, leading to an O(buffer_size) forward scan.  */
+	  ptrdiff_t max_distance
+	    = (ptrdiff_t)(nlines + 5) * nchars_per_row * 2;
+	  if (it->w->wrap_cache.charpos[back_idx] < start_pos
+	      && start_pos - it->w->wrap_cache.charpos[back_idx]
+		 <= max_distance)
+	    {
+	      struct text_pos cached_pos;
+	      SET_TEXT_POS (cached_pos,
+			   it->w->wrap_cache.charpos[back_idx],
+			   it->w->wrap_cache.bytepos[back_idx]);
+	      reseat_1 (it, cached_pos, true);
+	      it->continuation_lines_width
+		= it->w->wrap_cache.cont_width[back_idx];
+	      it->current_x = it->hpos = 0;
+	      it->wrap_prefix_width = 0;
+	      used_wrap_cache = true;
+	    }
+	}
 
-  /* Reseat the iterator here.  When moving backward, we don't want
-     reseat to skip forward over invisible text, set up the iterator
-     to deliver from overlay strings at the new position etc.  So,
-     use reseat_1 here.  */
-  reseat_1 (it, it->current.pos, true);
+      /* Try glyph matrix as fallback.  */
+      if (!used_wrap_cache && it->w->current_matrix
+	  && it->w->window_end_valid)
+	{
+	  struct glyph_row *row
+	    = matrix_row_containing_charpos (it->w, pos_limit);
+	  if (row && row->start.pos.charpos < start_pos)
+	    {
+	      reseat_1 (it, row->start.pos, true);
+	      it->continuation_lines_width
+		= row->continuation_lines_width;
+	      it->current_x = it->hpos = 0;
+	      it->wrap_prefix_width = 0;
+	      used_wrap_cache = true;
+	    }
+	}
 
-  /* We are now surely at a line start.  */
-  it->wrap_prefix_width = 0;
-  it->current_x = it->hpos = 0;	/* FIXME: this is incorrect when bidi
-				   reordering is in effect.  */
-  it->continuation_lines_width = 0;
+      /* For long wrapped lines with no cache data (e.g., after
+	 jumping to end-of-buffer), estimate the backward position
+	 directly.  For rope buffers this uses O(log n) tree ops;
+	 for gap buffers it uses character arithmetic.  */
+      if (!used_wrap_cache
+	  && current_buffer->long_line_optimizations_p)
+	{
+	  struct wrapmap_result wr;
+	  ptrdiff_t start_bytepos = CHAR_TO_BYTE (start_pos);
+	  if (wrapmap_estimate_backward (it->w, start_pos,
+					 start_bytepos,
+					 nlines + 2, &wr))
+	    {
+	      struct text_pos est_text_pos;
+	      SET_TEXT_POS (est_text_pos, wr.vline_start_charpos,
+			   wr.vline_start_bytepos);
+	      reseat_1 (it, est_text_pos, true);
+	      it->continuation_lines_width
+		= wr.continuation_lines_width;
+	      it->current_x = it->hpos = 0;
+	      it->wrap_prefix_width = 0;
+	      used_wrap_cache = true;
+	    }
+	}
+    }
+
+  if (!used_wrap_cache)
+    {
+      /* Set the iterator's position that many lines back.  But don't
+	 go back more than NLINES full screen lines -- this wins a day
+	 with buffers which have very long lines.  */
+      while (nlines-- && IT_CHARPOS (*it) > pos_limit)
+	back_to_previous_visible_line_start (it);
+
+      /* Reseat the iterator here.  When moving backward, we don't want
+	 reseat to skip forward over invisible text, set up the iterator
+	 to deliver from overlay strings at the new position etc.  So,
+	 use reseat_1 here.  */
+      reseat_1 (it, it->current.pos, true);
+
+      /* We are now surely at a line start.  */
+      it->wrap_prefix_width = 0;
+      it->current_x = it->hpos = 0;	/* FIXME: this is incorrect when bidi
+					   reordering is in effect.  */
+      it->continuation_lines_width = 0;
+    }
 
   /* Move forward and see what y-distance we moved.  First move to the
      start of the next line so that we get its height.  We need this
@@ -11526,6 +11860,74 @@ move_it_by_lines (struct it *it, ptrdiff_t dvpos)
       bool hit_pos_limit = false;
       ptrdiff_t pos_limit;
 
+      /* Direct glyph matrix fast path: when it->vpos == 0 (the
+	 common case for C-p movement) and the glyph matrix contains
+	 both the current position and the target row, skip the
+	 expensive move_it_vertically_backward call entirely.  This
+	 reduces the backward move from 3-4 forward scans to just 1
+	 verification scan.  */
+      if (it->vpos == 0
+	  && current_buffer->long_line_optimizations_p
+	  && it->line_wrap != TRUNCATE
+	  && nchars_per_row > 0
+	  && it->w->current_matrix && it->w->window_end_valid)
+	{
+	  orig_charpos = IT_CHARPOS (*it);
+	  struct glyph_row *cur_row
+	    = matrix_row_containing_charpos (it->w, orig_charpos);
+	  if (cur_row && cur_row->start.overlay_string_index < 0)
+	    {
+	      int first_text = (window_wants_tab_line (it->w)
+				+ window_wants_header_line (it->w));
+	      int cur_row_idx = cur_row - it->w->current_matrix->rows;
+	      int target_idx = cur_row_idx + dvpos;
+	      if (target_idx >= first_text)
+		{
+		  struct glyph_row *target_row
+		    = it->w->current_matrix->rows + target_idx;
+		  if (target_row->enabled_p
+		      && target_row->start.overlay_string_index < 0)
+		    {
+		      start_charpos = MATRIX_ROW_START_CHARPOS (cur_row);
+		      reseat_1 (it, target_row->start.pos, true);
+		      it->continuation_lines_width
+			= target_row->continuation_lines_width;
+		      it->current_x = it->hpos
+			= it->wrap_prefix_width = 0;
+
+		      /* Verify by scanning forward from the target
+			 row to the current row's start.  */
+		      SAVE_IT (it2, *it, it2data);
+		      it2.vpos = it2.current_y = 0;
+		      move_it_to (&it2, start_charpos, -1, -1, -1,
+				  MOVE_TO_POS);
+		      it->vpos = -(it2.vpos);
+		      it->current_y = -(it2.current_y);
+		      it->current_x = it->hpos
+			= it->wrap_prefix_width = 0;
+
+		      if (it2.vpos > -dvpos)
+			{
+			  int delta = it2.vpos + dvpos;
+			  RESTORE_IT (&it2, &it2, it2data);
+			  SAVE_IT (it2, *it, it2data);
+			  move_it_to (it, -1, -1, -1,
+				      it->vpos + delta,
+				      MOVE_TO_VPOS);
+			  if (it->vpos - it2.vpos > delta
+			      || IT_CHARPOS (*it) == orig_charpos)
+			    RESTORE_IT (it, &it2, it2data);
+			  else
+			    bidi_unshelve_cache (it2data, true);
+			}
+		      else
+			RESTORE_IT (it, it, it2data);
+		      goto move_by_lines_done;
+		    }
+		}
+	    }
+	}
+
       /* Start at the beginning of the screen line containing IT's
 	 position.  This may actually move vertically backwards,
          in case of overlays, so adjust dvpos accordingly.  */
@@ -11537,6 +11939,193 @@ move_it_by_lines (struct it *it, ptrdiff_t dvpos)
       /* Go back -DVPOS buffer lines, but no farther than -DVPOS full
 	 screen lines, and reseat the iterator there.  */
       start_charpos = IT_CHARPOS (*it);
+
+      /* Fast path for long wrapped lines: use the glyph matrix or
+	 wrap cache to go back -DVPOS visual lines directly, instead
+	 of the expensive back_to_previous_visible_line_start (which
+	 goes to BEGV for single-line files) + O(position) forward
+	 scan.  */
+      if (current_buffer->long_line_optimizations_p
+	  && it->line_wrap != TRUNCATE
+	  && nchars_per_row > 0)
+	{
+	  bool fast_done = false;
+
+	  /* Try glyph matrix: directly look up the target row.  */
+	  if (!fast_done
+	      && it->w->current_matrix && it->w->window_end_valid)
+	    {
+	      struct glyph_row *row
+		= matrix_row_containing_charpos (it->w, start_charpos);
+	      if (row)
+		{
+		  int first_text = (window_wants_tab_line (it->w)
+				    + window_wants_header_line (it->w));
+		  int row_idx = row - it->w->current_matrix->rows;
+		  int target_idx = row_idx + dvpos;  /* dvpos is negative */
+		  if (target_idx >= first_text)
+		    {
+		      struct glyph_row *target_row
+			= it->w->current_matrix->rows + target_idx;
+		      if (target_row->enabled_p
+			  && target_row->start.overlay_string_index < 0)
+			{
+			  reseat_1 (it, target_row->start.pos, true);
+			  it->continuation_lines_width
+			    = target_row->continuation_lines_width;
+			  it->current_x = it->hpos
+			    = it->wrap_prefix_width = 0;
+
+			  /* Verify by scanning forward from the
+			     target row to start_charpos.  The glyph
+			     matrix may have stale row positions if
+			     the window start was estimated.  */
+			  SAVE_IT (it2, *it, it2data);
+			  it2.vpos = it2.current_y = 0;
+			  move_it_to (&it2, start_charpos, -1, -1, -1,
+				      MOVE_TO_POS);
+			  it->vpos = -(it2.vpos);
+			  it->current_y = -(it2.current_y);
+			  it->current_x = it->hpos
+			    = it->wrap_prefix_width = 0;
+
+			  if (it2.vpos > -dvpos)
+			    {
+			      int delta = it2.vpos + dvpos;
+			      RESTORE_IT (&it2, &it2, it2data);
+			      SAVE_IT (it2, *it, it2data);
+			      move_it_to (it, -1, -1, -1,
+					  it->vpos + delta,
+					  MOVE_TO_VPOS);
+			      if (it->vpos - it2.vpos > delta
+				  || IT_CHARPOS (*it) == orig_charpos)
+				RESTORE_IT (it, &it2, it2data);
+			      else
+				bidi_unshelve_cache (it2data, true);
+			    }
+			  else
+			    RESTORE_IT (it, it, it2data);
+			  fast_done = true;
+			}
+		    }
+		}
+	    }
+
+	  /* Try wrap cache: find a cached visual line start near
+	     the target position.  */
+	  if (!fast_done)
+	    {
+	      ptrdiff_t wc_idx
+		= wrap_cache_find (it->w, start_charpos,
+				   current_buffer);
+	      if (wc_idx >= 0)
+		{
+		  ptrdiff_t back_idx = wc_idx + dvpos;
+		  ptrdiff_t wc_max_dist
+		    = (ptrdiff_t)(-dvpos + 5) * nchars_per_row * 2;
+		  if (back_idx >= 0
+		      && it->w->wrap_cache.charpos[back_idx]
+			 < start_charpos
+		      && start_charpos
+			 - it->w->wrap_cache.charpos[back_idx]
+			 <= wc_max_dist)
+		    {
+		      struct text_pos cached_pos;
+		      SET_TEXT_POS (cached_pos,
+				   it->w->wrap_cache.charpos[back_idx],
+				   it->w->wrap_cache.bytepos[back_idx]);
+		      reseat_1 (it, cached_pos, true);
+		      it->continuation_lines_width
+			= it->w->wrap_cache.cont_width[back_idx];
+		      it->current_x = it->hpos
+			= it->wrap_prefix_width = 0;
+
+		      /* Verify exact visual line count by scanning
+			 forward from the cached position.  This is
+			 O(dvpos * line_width) instead of
+			 O(position).  */
+		      SAVE_IT (it2, *it, it2data);
+		      it2.vpos = it2.current_y = 0;
+		      move_it_to (&it2, start_charpos, -1, -1, -1,
+				  MOVE_TO_POS);
+		      it->vpos = -(it2.vpos);
+		      it->current_y = -(it2.current_y);
+		      it->current_x = it->hpos
+			= it->wrap_prefix_width = 0;
+
+		      if (it2.vpos > -dvpos)
+			{
+			  int delta = it2.vpos + dvpos;
+			  RESTORE_IT (&it2, &it2, it2data);
+			  SAVE_IT (it2, *it, it2data);
+			  move_it_to (it, -1, -1, -1,
+				      it->vpos + delta,
+				      MOVE_TO_VPOS);
+			  if (it->vpos - it2.vpos > delta
+			      || IT_CHARPOS (*it) == orig_charpos)
+			    RESTORE_IT (it, &it2, it2data);
+			  else
+			    bidi_unshelve_cache (it2data, true);
+			}
+		      else
+			RESTORE_IT (it, it, it2data);
+		      fast_done = true;
+		    }
+		}
+	    }
+
+	  /* Estimation fallback: use WrapMap.  */
+	  if (!fast_done)
+	    {
+	      struct wrapmap_result wr;
+	      ptrdiff_t start_bytepos = CHAR_TO_BYTE (start_charpos);
+	      if (wrapmap_estimate_backward (it->w, start_charpos,
+					     start_bytepos,
+					     -dvpos + 2, &wr))
+		{
+		  struct text_pos est_text_pos;
+		  SET_TEXT_POS (est_text_pos, wr.vline_start_charpos,
+			       wr.vline_start_bytepos);
+		  reseat_1 (it, est_text_pos, true);
+		  it->continuation_lines_width
+		    = wr.continuation_lines_width;
+		  it->current_x = it->hpos
+		    = it->wrap_prefix_width = 0;
+
+		  /* Scan forward to verify exact visual line count.  */
+		  SAVE_IT (it2, *it, it2data);
+		  it2.vpos = it2.current_y = 0;
+		  move_it_to (&it2, start_charpos, -1, -1, -1,
+			      MOVE_TO_POS);
+		  it->vpos = -(it2.vpos);
+		  it->current_y = -(it2.current_y);
+		  it->current_x = it->hpos
+		    = it->wrap_prefix_width = 0;
+
+		  if (it2.vpos > -dvpos)
+		    {
+		      int delta = it2.vpos + dvpos;
+		      RESTORE_IT (&it2, &it2, it2data);
+		      SAVE_IT (it2, *it, it2data);
+		      move_it_to (it, -1, -1, -1,
+				  it->vpos + delta,
+				  MOVE_TO_VPOS);
+		      if (it->vpos - it2.vpos > delta
+			  || IT_CHARPOS (*it) == orig_charpos)
+			RESTORE_IT (it, &it2, it2data);
+		      else
+			bidi_unshelve_cache (it2data, true);
+		    }
+		  else
+		    RESTORE_IT (it, it, it2data);
+		  fast_done = true;
+		}
+	    }
+
+	  if (fast_done)
+	    goto move_by_lines_done;
+	}
+
       if (it->line_wrap == TRUNCATE || nchars_per_row == 0)
 	pos_limit = BEGV;
       else
@@ -11612,6 +12201,7 @@ move_it_by_lines (struct it *it, ptrdiff_t dvpos)
 	}
       else
 	RESTORE_IT (it, it, it2data);
+    move_by_lines_done: ;
     }
 }
 
@@ -19490,6 +20080,60 @@ try_scrolling (Lisp_Object window, bool just_this_one_p,
 
  too_near_end:
 
+  /* Fast path for scrolling down: when the glyph matrix is available
+     and PT is just past the last visible row, compute the new window
+     start directly from the matrix instead of doing an expensive
+     start_display + move_it_to scan across the entire visible window.
+     This halves the per-keystroke cost for long wrapped lines.  */
+  if (PT > CHARPOS (startp)
+      && w->current_matrix && w->window_end_valid
+      && !current_buffer->clip_changed
+      && extra_scroll_margin_lines == 0)
+    {
+      int first_text = (window_wants_tab_line (w)
+			+ window_wants_header_line (w));
+      int end_vpos = w->window_end_vpos;
+      if (end_vpos > first_text && end_vpos < w->current_matrix->nrows)
+	{
+	  struct glyph_row *end_row
+	    = w->current_matrix->rows + end_vpos;
+	  if (end_row->enabled_p
+	      && PT > MATRIX_ROW_END_CHARPOS (end_row)
+	      && !end_row->ends_at_zv_p
+	      /* Only use this fast path when PT is close to the
+		 visible area (e.g. scrolling down by one line).
+		 For large jumps like end-of-buffer, skip this to
+		 avoid a wasted try_window call.  */
+	      && (PT - MATRIX_ROW_END_CHARPOS (end_row)
+		  < (end_vpos - first_text)
+		    * (window_body_width (w, false)
+		       / max (1, FRAME_COLUMN_WIDTH (XFRAME (w->frame))))))
+	    {
+	      /* PT is just past the visible area.  Compute rows to
+		 scroll.  For scroll-conservatively, the minimum
+		 (1 row) suffices since PT is just past the window.
+		 For scroll-step, use that many rows.  */
+	      int scroll_rows = 1;
+	      if (scroll_step > 0)
+		scroll_rows = min ((int) scroll_step,
+				   end_vpos - first_text);
+
+	      int new_start_vpos = first_text + scroll_rows;
+	      if (new_start_vpos <= end_vpos)
+		{
+		  struct glyph_row *new_row
+		    = w->current_matrix->rows + new_start_vpos;
+		  if (new_row->enabled_p
+		      && new_row->start.overlay_string_index < 0)
+		    {
+		      startp = new_row->start.pos;
+		      goto do_scroll;
+		    }
+		}
+	    }
+	}
+    }
+
   /* Decide whether to scroll down.  */
   if (PT > CHARPOS (startp))
     {
@@ -19722,6 +20366,8 @@ try_scrolling (Lisp_Object window, bool just_this_one_p,
 	}
     }
 
+ do_scroll:
+
   /* Run window scroll functions.  */
   startp = run_window_scroll_functions (window, startp);
 
@@ -19823,13 +20469,76 @@ compute_window_start_on_continuation_line (struct window *w)
       else if (CHARPOS (start_pos) > ZV)
 	SET_TEXT_POS (start_pos, ZV, ZV_BYTE);
 
-      /* Find the start of the continued line.  This should be fast
-	 because find_newline is fast (newline cache).  */
+      /* Find the start of the continued line.  Use the wrap cache
+	 or glyph matrix to avoid scanning from the logical line
+	 start, which for single-line files is O(position).  */
       row = w->desired_matrix->rows + window_wants_tab_line (w)
 				    + window_wants_header_line (w);
       init_iterator (&it, w, CHARPOS (start_pos), BYTEPOS (start_pos),
 		     row, DEFAULT_FACE_ID);
-      reseat_at_previous_visible_line_start (&it);
+
+      {
+	bool found_nearby_start = false;
+	/* Try wrap cache.  We want the visual line start nearest
+	   to start_pos, within one window's worth of lines.  */
+	ptrdiff_t wc_idx = wrap_cache_find (w, CHARPOS (start_pos),
+					    current_buffer);
+	if (wc_idx >= 0)
+	  {
+	    /* Go back a window's worth of visual lines.  */
+	    ptrdiff_t back_idx = wc_idx - WINDOW_TOTAL_LINES (w);
+	    if (back_idx < 0)
+	      back_idx = 0;
+	    struct text_pos cached_pos;
+	    SET_TEXT_POS (cached_pos,
+			 w->wrap_cache.charpos[back_idx],
+			 w->wrap_cache.bytepos[back_idx]);
+	    reseat_1 (&it, cached_pos, true);
+	    it.continuation_lines_width
+	      = w->wrap_cache.cont_width[back_idx];
+	    it.current_x = it.hpos = 0;
+	    found_nearby_start = true;
+	  }
+
+	if (!found_nearby_start)
+	  {
+	    /* Try glyph matrix.  */
+	    struct glyph_row *mrow
+	      = matrix_row_containing_charpos (w, CHARPOS (start_pos));
+	    if (mrow)
+	      {
+		reseat_1 (&it, mrow->start.pos, true);
+		it.continuation_lines_width
+		  = mrow->continuation_lines_width;
+		it.current_x = it.hpos = 0;
+		found_nearby_start = true;
+	      }
+	  }
+
+	if (!found_nearby_start
+	    && current_buffer->long_line_optimizations_p
+	    && it.line_wrap != TRUNCATE)
+	  {
+	    struct wrapmap_result wr;
+	    if (wrapmap_estimate_backward (w, CHARPOS (start_pos),
+					   BYTEPOS (start_pos),
+					   WINDOW_TOTAL_LINES (w),
+					   &wr))
+	      {
+		struct text_pos est;
+		SET_TEXT_POS (est, wr.vline_start_charpos,
+			     wr.vline_start_bytepos);
+		reseat_1 (&it, est, true);
+		it.continuation_lines_width
+		  = wr.continuation_lines_width;
+		it.current_x = it.hpos = 0;
+		found_nearby_start = true;
+	      }
+	  }
+
+	if (!found_nearby_start)
+	  reseat_at_previous_visible_line_start (&it);
+      }
 
       /* Give up (by not using the code in the block below) and say it
          takes too much time to compute a new window start, if the
@@ -25906,6 +26615,13 @@ display_line (struct it *it, int cursor_vpos)
   row->y = it->current_y;
   row->start = it->start;
   row->continuation_lines_width = it->continuation_lines_width;
+
+  /* Record continuation rows in the wrap position cache for fast
+     lookup when scrolling through very long wrapped lines.  */
+  if (row->continuation_lines_width > 0
+      && current_buffer->long_line_optimizations_p)
+    wrap_cache_record (it->w, row);
+
   row->displays_text_p = true;
   row->starts_in_middle_of_char_p = it->starts_in_middle_of_char_p;
   it->starts_in_middle_of_char_p = false;

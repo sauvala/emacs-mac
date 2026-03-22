@@ -485,6 +485,20 @@ struct window
     /* Z_BYTE - buffer position of the last glyph in the current matrix of W.
        Should be nonnegative, and only valid if window_end_valid is true.  */
     ptrdiff_t window_end_bytepos;
+
+    /* Cache of visual line start positions for long wrapped lines.
+       Used to avoid rescanning from logical line start when scrolling.  */
+    struct {
+      ptrdiff_t *charpos;       /* Visual line start char positions (sorted).  */
+      ptrdiff_t *bytepos;       /* Corresponding byte positions.  */
+      int *cont_width;          /* continuation_lines_width at each start.  */
+      ptrdiff_t count;          /* Number of entries.  */
+      ptrdiff_t capacity;       /* Allocated capacity.  */
+      ptrdiff_t line_beg;       /* Logical line start this cache covers.  */
+      int window_body_width;    /* Window pixel width when cache was built.  */
+      modiff_count modiff;      /* Buffer modiff when built.  */
+      modiff_count overlay_modiff; /* Overlay modiff when built.  */
+    } wrap_cache;
   } GCALIGNED_STRUCT;
 
 INLINE bool

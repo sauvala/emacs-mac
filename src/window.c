@@ -5805,6 +5805,16 @@ Signal an error when WINDOW is the only window on its frame.  */)
       wset_next (w, Qnil);  /* Don't delete w->next too.  */
       free_window_matrices (w);
 
+      /* Free the wrap position cache.  */
+      xfree (w->wrap_cache.charpos);
+      xfree (w->wrap_cache.bytepos);
+      xfree (w->wrap_cache.cont_width);
+      w->wrap_cache.charpos = NULL;
+      w->wrap_cache.bytepos = NULL;
+      w->wrap_cache.cont_width = NULL;
+      w->wrap_cache.count = 0;
+      w->wrap_cache.capacity = 0;
+
       if (WINDOWP (w->contents))
 	{
 	  delete_all_child_windows (w->contents);
@@ -7339,10 +7349,16 @@ and redisplay normally--don't erase and redraw the frame.  */)
 
   /* Don't use the display code for initial frames, as the necessary
      data structures might not be set up yet then.  Also don't use it
-     for buffers with very long lines, as it tremdously slows down
-     redisplay, especially when lines are truncated.  */
+     for buffers with very long lines, as it tremendously slows down
+     redisplay, especially when lines are truncated.  However, rope
+     buffers have efficient O(log n) operations via wrapmap, so the
+     iterator path is preferred over the O(n) vmotion fallback.  */
   if (!FRAME_INITIAL_P (XFRAME (w->frame))
-      && !current_buffer->long_line_optimizations_p)
+      && (!current_buffer->long_line_optimizations_p
+#ifdef USE_ROPE
+	  || current_buffer->text->using_rope
+#endif
+	  ))
     {
       specpdl_ref count = SPECPDL_INDEX ();
 

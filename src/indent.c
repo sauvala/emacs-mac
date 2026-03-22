@@ -34,6 +34,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifdef USE_ROPE
 #include "ropebuf.h"
 #endif
+#include "wrapmap.h"
 
 #define CR 015
 
@@ -2478,11 +2479,104 @@ buffer, whether or not it is currently displayed in some window.  */)
 	}
       else
 	{
-	  /* Scan from the start of the line containing PT.  If we don't
-	     do this, we start moving with IT->current_x == 0, while PT is
-	     really at some x > 0.  */
-	  reseat_at_previous_visible_line_start (&it);
-	  it.current_x = it.hpos = 0;
+	  bool used_matrix = false;
+
+	  /* Fast path: use the glyph matrix as a cache of visual line
+	     start positions.  If the current position is within a row
+	     that's already been displayed, we can start from that row's
+	     position instead of scanning from the logical line start.
+	     This reduces per-keystroke cost from O(window_area) to
+	     O(visual_line_width) for long wrapped lines.  */
+	  if (w->current_matrix && w->window_end_valid
+	      && !w->update_mode_line && !current_buffer->clip_changed
+	      && !windows_or_buffers_changed)
+	    {
+	      struct glyph_row *row
+		= matrix_row_containing_charpos (w, PT);
+	      if (row)
+		{
+		  init_iterator (&it, w,
+				 row->start.pos.charpos,
+				 row->start.pos.bytepos,
+				 NULL, DEFAULT_FACE_ID);
+		  it.lnum_width = lnum_width;
+		  it.continuation_lines_width
+		    = row->continuation_lines_width;
+		  it.current_x = it.hpos = 0;
+		  used_matrix = true;
+		}
+	    }
+
+	  if (!used_matrix)
+	    {
+	      /* Try the persistent wrap cache before the expensive
+		 reseat to logical line start.  */
+	      ptrdiff_t wc_idx = wrap_cache_find (w, PT,
+						  current_buffer);
+	      if (wc_idx >= 0
+		  /* Ensure the cached position is close to PT.  */
+		  && (PT - w->wrap_cache.charpos[wc_idx]
+		      < (ptrdiff_t) window_body_width (w, false)
+			/ max (1, FRAME_COLUMN_WIDTH (it.f)) * 5))
+		{
+		  init_iterator (&it, w,
+				 w->wrap_cache.charpos[wc_idx],
+				 w->wrap_cache.bytepos[wc_idx],
+				 NULL, DEFAULT_FACE_ID);
+		  it.lnum_width = lnum_width;
+		  it.continuation_lines_width
+		    = w->wrap_cache.cont_width[wc_idx];
+		  it.current_x = it.hpos = 0;
+		}
+	      else if (current_buffer->long_line_optimizations_p
+		       && it.line_wrap != TRUNCATE)
+		{
+		  struct wrapmap_result wr;
+		  if (wrapmap_estimate_vline (w, PT, PT_BYTE, &wr))
+		    {
+		      init_iterator (&it, w,
+				     wr.vline_start_charpos,
+				     wr.vline_start_bytepos,
+				     NULL, DEFAULT_FACE_ID);
+		      it.lnum_width = lnum_width;
+		      it.continuation_lines_width
+			= wr.continuation_lines_width;
+		      it.current_x = it.hpos = 0;
+		    }
+		  else
+		    {
+		      reseat_at_previous_visible_line_start (&it);
+		      it.current_x = it.hpos = 0;
+		    }
+		}
+	      else
+		{
+		  /* Scan from the start of the line containing PT.
+		     If we don't do this, we start moving with
+		     IT->current_x == 0, while PT is really at some
+		     x > 0.  */
+		  reseat_at_previous_visible_line_start (&it);
+		  it.current_x = it.hpos = 0;
+
+		  /* For very long lines (e.g. single-line files), the
+		     above reseats to the logical line start which can
+		     be millions of characters away, making the
+		     subsequent move_it_to O(PT).  If window_start is
+		     on the same logical line and closer to PT, use it
+		     instead.  */
+		  if (w->window_end_valid && !w->update_mode_line)
+		    {
+		      ptrdiff_t ws = marker_position (w->start);
+		      if (ws > IT_CHARPOS (it) && ws <= PT)
+			{
+			  init_iterator (&it, w, ws,
+					 marker_byte_position (w->start),
+					 NULL, DEFAULT_FACE_ID);
+			  it.current_x = it.hpos = 0;
+			}
+		    }
+		}
+	    }
 	}
       if (IT_CHARPOS (it) != PT)
 	/* We used to temporarily disable selective display here; the
