@@ -2260,7 +2260,6 @@ killed."
 	(let (kill-buffer-query-functions kill-buffer-hook)
 	  (kill-buffer obuf))))))
 
-;; FIXME we really need to fold the uniquify stuff in here by default,
 (defun create-file-buffer (filename)
   "Create a suitably named buffer for visiting FILENAME, and return it.
 FILENAME (sans directory) is used unchanged if that name is free;
@@ -3115,6 +3114,8 @@ since only a single case-insensitive search through the alist is made."
     ;; Bash builtin 'fc' creates a temp file named "bash-fc.XXXXXX"
     ;; to edit shell commands from its history list.
     ("/bash-fc\\.[0-9A-Za-z]\\{6\\}\\'" . sh-mode)
+    ;; A login sh first attempts to read /etc/profile.
+    ("\\`/etc/profile\\'" . sh-mode)
     ("/PKGBUILD\\'" . sh-mode)
     ("\\(/\\|\\`\\)\\.\\(bash_\\(profile\\|history\\|log\\(in\\|out\\)\\)\\|z?log\\(in\\|out\\)\\)\\'" . sh-mode)
     ("\\(/\\|\\`\\)\\.\\(shrc\\|zshrc\\|m?kshrc\\|bashrc\\|t?cshrc\\|esrc\\)\\'" . sh-mode)
@@ -5478,7 +5479,7 @@ BACKUPNAME is the backup file name, which is the old file renamed."
 
 (defvar file-name-version-regexp
   "\\(?:~\\|\\.~[-[:alnum:]:#@^._]+\\(?:~[[:digit:]]+\\)?~\\)"
-  ;; The last ~[[:digit]]+ matches relative versions in git,
+  ;; The last ~[[:digit:]]+ matches relative versions in git,
   ;; e.g. `foo.js.~HEAD~1~'.
   "Regular expression matching the backup/version part of a file name.
 Used by `file-name-sans-versions'.")
@@ -6275,7 +6276,7 @@ Before and after saving the buffer, this function runs
 		  (when save-silently (message nil)))
 	      ;; If we failed, restore the buffer's modtime.
 	      (error (set-visited-file-modtime old-modtime)
-		     (signal (car err) (cdr err))))
+		     (signal err)))
 	    ;; Since we have created an entirely new file,
 	    ;; make sure it gets the right permission bits set.
 	    (setq setmodes
@@ -6351,9 +6352,6 @@ Before and after saving the buffer, this function runs
 	      (setq buffer-backed-up nil)))))))
     setmodes))
 
-(declare-function diff-no-select "diff"
-		  (old new &optional switches no-async buf))
-
 (defvar save-some-buffers--switch-window-callback nil)
 
 (defvar save-some-buffers-action-alist
@@ -6384,7 +6382,6 @@ Before and after saving the buffer, this function runs
     (?d ,(lambda (buf)
            (if (null (buffer-file-name buf))
                (message "Not applicable: no file")
-             (require 'diff)            ;for diff-no-select.
              (let ((diffbuf (diff-no-select (buffer-file-name buf) buf
                                             nil 'noasync)))
                (if (not enable-recursive-minibuffers)
@@ -6683,7 +6680,7 @@ Return non-nil if DIR is already a directory."
       (make-directory-internal dir)
     (error
      (or (file-directory-p dir)
-	 (signal (car err) (cdr err))))))
+	 (signal err)))))
 
 (defun make-directory (dir &optional parents)
   "Create the directory DIR and optionally any nonexistent parent dirs.
@@ -6756,7 +6753,7 @@ This acts like (apply FN ARGS) except it returns NO-SUCH if it is
 non-nil and if FN fails due to a missing file or directory."
   (condition-case err
       (apply fn args)
-    (file-missing (or no-such (signal (car err) (cdr err))))))
+    (file-missing (or no-such (signal err)))))
 
 (defun delete-file (filename &optional trash)
   "Delete file named FILENAME.  If it is a symlink, remove the symlink.
@@ -6997,7 +6994,7 @@ into NEWNAME instead."
 		  (make-directory (directory-file-name newname) parents)
 		(error
 		 (or (file-directory-p newname)
-		     (signal (car err) (cdr err)))))))
+		     (signal err))))))
 
         ;; Copy recursively.
         (dolist (file
@@ -7984,26 +7981,30 @@ default directory.  However, if FULL is non-nil, they are absolute."
   "Rules for finding \"sibling\" files.
 This is used by the `find-sibling-file' command.
 
-This variable is a list of (MATCH EXPANSION...) elements.
+The value of this variable should a list (RULE1 RULE2 ...), where each
+RULE has the form (MATCH EXPANSION...).
 
-MATCH is a regular expression that should match a file name that
-has a sibling.  It can contain sub-expressions that will be used
-in EXPANSIONS.
+MATCH is a regular expression that should match a file name which might
+have a sibling.  It can contain sub-expressions that will be used in
+EXPANSIONs as \\N and \\& replacements.
 
-EXPANSION is a string that matches file names.  For instance, to
-define \".h\" files as siblings of any \".c\", you could say:
+Each EXPANSION is a string that matches names of files that are to be
+considered siblings of a file whose name matches MATCH.  For instance,
+to define \".h\" files as siblings of any \".c\" with the same basename,
+you could use the following RULE element in the list of rules:
 
   (\"\\\\([^/]+\\\\)\\\\.c\\\\\\='\" \"\\\\1.h\")
 
-MATCH and EXPANSION can also be fuller paths.  For instance, if
-you want to define other versions of a project as being sibling
-files, you could say something like:
+MATCH and EXPANSION can also include leading directories.  For instance,
+if you want to treat as siblings same-name files in directory trees
+corresponding to different versions of Emacs, you could use a RULE like
+this:
 
   (\"src/emacs/[^/]+/\\\\(.*\\\\)\\\\\\='\" \"src/emacs/.*/\\\\1\\\\\\='\")
 
 In this example, if you're in \"src/emacs/emacs-27/lisp/abbrev.el\",
-and a \"src/emacs/emacs-28/lisp/abbrev.el\" file exists, it's now
-defined as a sibling."
+and a \"src/emacs/emacs-28/lisp/abbrev.el\" file exists, the latter file
+will be considered a sibling of the former one."
   :type '(alist :key-type (regexp :tag "Match")
                 :value-type (repeat (string :tag "Expansion")))
   :version "29.1")
@@ -8048,14 +8049,12 @@ see), and if nil, defaults to `find-sibling-rules'."
             (let ((start 0))
               ;; Expand \\1 forms in the expansions.
               (while (string-match "\\\\\\([&0-9]+\\)" expansion start)
-                (let ((index (string-to-number (match-string 1 expansion))))
-                  (setq start (match-end 0)
-                        expansion
-                        (replace-match
-                         (substring file
-                                    (elt match-data (* index 2))
-                                    (elt match-data (1+ (* index 2))))
-                         t t expansion)))))
+                (let* ((index (string-to-number (match-string 1 expansion)))
+                       (value (substring file
+                                         (elt match-data (* index 2))
+                                         (elt match-data (1+ (* index 2))))))
+                  (setq start (+ (match-beginning 0) (length value))
+                        expansion (replace-match value t t expansion)))))
             ;; Then see which files we have that are matching.  (And
             ;; expand from the end of the file's match, since we might
             ;; be doing a relative match.)

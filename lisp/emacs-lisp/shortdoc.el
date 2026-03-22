@@ -731,7 +731,12 @@ A FUNC form can have any number of `:no-eval' (or `:no-value'),
    :eval (number-sequence 5 8))
   (ensure-list
    :eval (ensure-list "foo")
-   :eval (ensure-list '(1 2 3)))
+   :eval (ensure-list '(1 2 3))
+   :eval (ensure-list '(1 . 2)))
+  (ensure-proper-list
+   :eval (ensure-proper-list "foo")
+   :eval (ensure-proper-list '(1 2 3))
+   :eval (ensure-proper-list '(1 . 2)))
   "Operations on Lists"
   (append
    :eval (append '("foo" "bar") '("zot")))
@@ -1586,9 +1591,12 @@ A FUNC form can have any number of `:no-eval' (or `:no-value'),
    :no-eval (text-property-search-backward 'face nil t)))
 
 (define-short-documentation-group keymaps
-  "Defining keymaps"
+  "Defining keymaps or adding bindings to existing keymaps"
   (define-keymap
-    :no-eval (define-keymap "C-c C-c" #'quit-buffer))
+    :no-eval (define-keymap "C-c C-c" #'quit-buffer)
+    :no-eval (define-keymap :keymap ctl-x-map
+               "C-r"      #'recentf-open
+               "k"        #'kill-current-buffer))
   (defvar-keymap
       :no-eval (defvar-keymap my-keymap "C-c C-c" #'quit-buffer))
   "Setting keys"
@@ -1707,7 +1715,9 @@ function's documentation in the Info manual"))
     ;; Doc string.
     (insert "  "
             (or (plist-get data :doc)
-                (car (split-string (documentation function) "\n"))))
+                (car (split-string (or (documentation function)
+                                       "Error: missing docstring.")
+                                   "\n"))))
     (insert "\n")
     (add-face-text-property start-section (point) 'shortdoc-section t)
     (let ((print-escape-newlines t)
