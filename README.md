@@ -173,6 +173,7 @@ The `nemesis` branch tracks GNU Emacs master and adds the following on top of th
 - **Minibuffer position**: New `minibuffer-position` frame parameter to place the minibuffer at the top or bottom of the frame. Use `M-x toggle-minibuffer-position` to switch.
 - **Mode-line position**: New `mode-line-position` frame parameter to place the mode-line at the top or bottom of windows. Use `M-x toggle-mode-line-position` to switch.
 - **Automated GNU master sync**: Weekly GitHub Actions workflow that merges upstream GNU Emacs master, with automatic Claude-assisted conflict resolution.
+- **Scroll path optimization**: Try reusing the current glyph matrix before falling back to full window redisplay during scrolling, significantly reducing per-scroll cost for long wrapped continuation lines.
 
 ## Debugging
 

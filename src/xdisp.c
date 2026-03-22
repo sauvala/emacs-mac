@@ -19630,6 +19630,31 @@ try_scrolling (Lisp_Object window, bool just_this_one_p,
   /* Run window scroll functions.  */
   startp = run_window_scroll_functions (window, startp);
 
+  /* Try reusing the current matrix first.  For continuation line
+     scrolling, this shifts existing rows and only calls display_line
+     for the 1-2 new rows, instead of redisplaying all ~50 visible
+     rows.  */
+  if (NILP (Vwindow_scroll_functions))
+    {
+      set_marker_both (w->start, Qnil,
+		       CHARPOS (startp), BYTEPOS (startp));
+      if (try_window_reusing_current_matrix (w))
+	{
+	  if (w->cursor.vpos >= 0
+	      && cursor_row_fully_visible_p (w,
+					     extra_scroll_margin_lines <= 1,
+					     false, false))
+	    {
+	      if (!BASE_LINE_NUMBER_VALID_P (w))
+		w->base_line_number = 0;
+	      rc = SCROLLING_SUCCESS;
+	      return rc;
+	    }
+	  /* Cursor not fully visible — fall through to try_window.  */
+	  clear_glyph_matrix (w->desired_matrix);
+	}
+    }
+
   /* Display the window.  Give up if new fonts are loaded, or if point
      doesn't appear.  */
   if (!try_window (window, startp, 0))
