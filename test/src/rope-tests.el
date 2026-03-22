@@ -146,6 +146,34 @@
     ;; Count lines.
     (should (= (count-lines (point-min) (point-max)) 3))))
 
+(ert-deftest rope-test-line-number ()
+  "Test line-number-at-pos on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "line1\nline2\nline3\n")
+    (goto-char (point-min))
+    (should (= (line-number-at-pos) 1))
+    (forward-line 2)
+    (should (= (line-number-at-pos) 3))))
+
+(ert-deftest rope-test-current-column ()
+  "Test current-column on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "hello world")
+    (goto-char 7)
+    (should (= (current-column) 6))))
+
+(ert-deftest rope-test-display-count-lines ()
+  "Test count-lines via display engine on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "a\nb\nc\nd\ne\n")
+    (should (= (count-lines (point-min) (point-max)) 5))))
+
 (ert-deftest rope-test-replace-regexp ()
   "Test replace-regexp-in-string equivalent via re-search + replace-match."
   (skip-unless (fboundp 'buffer-enable-rope))

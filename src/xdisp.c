@@ -483,6 +483,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "character.h"
 #include "category.h"
 #include "buffer.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
 #include "charset.h"
 #include "indent.h"
 #include "commands.h"
@@ -9934,7 +9937,33 @@ next_element_from_buffer (struct it *it)
       /* Get the next character, maybe multibyte.  */
       p = BYTE_POS_ADDR (IT_BYTEPOS (*it));
       if (it->multibyte_p && !ASCII_CHAR_P (*p))
-	it->c = string_char_and_length (p, &it->len);
+	{
+#ifdef USE_ROPE
+	  /* For rope buffers, the multibyte sequence might
+	     span two chunks.  Check available contiguous bytes and
+	     use a stack buffer if needed.  */
+	  if (current_buffer->text->using_rope)
+	    {
+	      ptrdiff_t avail
+		= BUFFER_CEILING_OF (IT_BYTEPOS (*it))
+		  - IT_BYTEPOS (*it) + 1;
+	      if (avail < MAX_MULTIBYTE_LENGTH)
+		{
+		  unsigned char buf[MAX_MULTIBYTE_LENGTH];
+		  ptrdiff_t remaining
+		    = min (MAX_MULTIBYTE_LENGTH,
+			   ZV_BYTE - IT_BYTEPOS (*it));
+		  for (ptrdiff_t i = 0; i < remaining; i++)
+		    buf[i] = FETCH_BYTE (IT_BYTEPOS (*it) + i);
+		  it->c = string_char_and_length (buf, &it->len);
+		}
+	      else
+		it->c = string_char_and_length (p, &it->len);
+	    }
+	  else
+#endif
+	    it->c = string_char_and_length (p, &it->len);
+	}
       else
 	it->c = *p, it->len = 1;
 
@@ -12474,6 +12503,61 @@ message_log_check_duplicate (ptrdiff_t prev_bol_byte, ptrdiff_t this_bol_byte)
   ptrdiff_t i;
   ptrdiff_t len = Z_BYTE - 1 - this_bol_byte;
   bool seen_dots = false;
+
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      /* Rope-safe path: use FETCH_BYTE for byte-at-a-time access.  */
+      for (i = 0; i < len; i++)
+	{
+	  if (i >= 3
+	      && FETCH_BYTE (prev_bol_byte + i - 3) == '.'
+	      && FETCH_BYTE (prev_bol_byte + i - 2) == '.'
+	      && FETCH_BYTE (prev_bol_byte + i - 1) == '.')
+	    seen_dots = true;
+	  if (FETCH_BYTE (prev_bol_byte + i) != FETCH_BYTE (this_bol_byte + i))
+	    return seen_dots;
+	}
+      ptrdiff_t pos = prev_bol_byte + len;
+      if (FETCH_BYTE (pos) == '\n')
+	return 2;
+      if (FETCH_BYTE (pos) == ' ' && FETCH_BYTE (pos + 1) == '[')
+	{
+	  /* Extract the count by reading bytes into a small buffer.  */
+	  pos += 2;
+	  char numbuf[32];
+	  int ni = 0;
+	  while (ni < 31 && pos + ni < Z_BYTE)
+	    {
+	      numbuf[ni] = (char) FETCH_BYTE (pos + ni);
+	      if (numbuf[ni] == ' ' || numbuf[ni] == '\n')
+		break;
+	      ni++;
+	    }
+	  numbuf[ni] = '\0';
+	  char *pend;
+	  intmax_t n = strtoimax (numbuf, &pend, 10);
+	  if (0 < n && n < INTMAX_MAX
+	      && pend > numbuf
+	      && (pos + (pend - numbuf) + 8 <= Z_BYTE))
+	    {
+	      /* Check " times]\n" suffix.  */
+	      ptrdiff_t spos = pos + (pend - numbuf);
+	      if (FETCH_BYTE (spos) == ' '
+		  && FETCH_BYTE (spos + 1) == 't'
+		  && FETCH_BYTE (spos + 2) == 'i'
+		  && FETCH_BYTE (spos + 3) == 'm'
+		  && FETCH_BYTE (spos + 4) == 'e'
+		  && FETCH_BYTE (spos + 5) == 's'
+		  && FETCH_BYTE (spos + 6) == ']'
+		  && FETCH_BYTE (spos + 7) == '\n')
+		return n + 1;
+	    }
+	}
+      return 0;
+    }
+#endif
+
   unsigned char *p1 = BUF_BYTE_ADDRESS (current_buffer, prev_bol_byte);
   unsigned char *p2 = BUF_BYTE_ADDRESS (current_buffer, this_bol_byte);
 
@@ -16955,7 +17039,12 @@ text_outside_line_unchanged_p (struct window *w,
   if (window_outdated (w))
     {
       /* Gap in the line?  */
+#ifdef USE_ROPE
+      if (!current_buffer->text->using_rope
+	  && (GPT < start || Z - GPT < end))
+#else
       if (GPT < start || Z - GPT < end)
+#endif
 	unchanged_p = false;
 
       /* Changes start in front of the line, or end after it?  */
@@ -16969,7 +17058,13 @@ text_outside_line_unchanged_p (struct window *w,
       if (unchanged_p
 	  && FIXNUMP (BVAR (current_buffer, selective_display))
 	  && XFIXNUM (BVAR (current_buffer, selective_display)) > 0
-	  && (BEG_UNCHANGED < start || GPT <= start))
+	  && (BEG_UNCHANGED < start
+#ifdef USE_ROPE
+	      || (!current_buffer->text->using_rope && GPT <= start)
+#else
+	      || GPT <= start
+#endif
+	      ))
 	unchanged_p = false;
 
       /* If there are overlays at the start or end of the line, these
@@ -20639,22 +20734,37 @@ redisplay_window (Lisp_Object window, bool just_this_one_p)
       && (CHARS_MODIFF - UNCHANGED_MODIFIED > 8
 	  || current_buffer->clip_changed))
     {
-      ptrdiff_t cur, next, found, max = 0, threshold;
-      threshold = XFIXNUM (Vlong_line_threshold);
-      for (cur = BEGV; cur < ZV; cur = next)
+#ifdef USE_ROPE
+      if (current_buffer->text->using_rope)
 	{
-	  next = find_newline1 (cur, CHAR_TO_BYTE (cur), 0, -1, 1,
-				&found, NULL, true);
-	  if (next - cur > max) max = next - cur;
-	  if (!found || max > threshold) break;
+	  size_t max_line = rope_longest_row_chars_emacs ();
+	  if (max_line > (size_t) XFIXNUM (Vlong_line_threshold))
+	    {
+	      current_buffer->long_line_optimizations_p = true;
+	      /* Disable bidi reordering to avoid O(n) bidi cache
+		 growth on every cursor movement in long lines.  */
+	      if (!NILP (BVAR (current_buffer, bidi_display_reordering)))
+		BVAR (current_buffer, bidi_display_reordering) = Qnil;
+	    }
 	}
-      if (max > threshold)
+      else
+#endif
 	{
-	  current_buffer->long_line_optimizations_p = true;
-	  /* Disable bidi reordering to avoid O(n) bidi cache
-	     growth on every cursor movement in long lines.  */
-	  if (!NILP (BVAR (current_buffer, bidi_display_reordering)))
-	    BVAR (current_buffer, bidi_display_reordering) = Qnil;
+	  ptrdiff_t cur, next, found, max = 0, threshold;
+	  threshold = XFIXNUM (Vlong_line_threshold);
+	  for (cur = BEGV; cur < ZV; cur = next)
+	    {
+	      next = find_newline1 (cur, CHAR_TO_BYTE (cur), 0, -1, 1,
+				    &found, NULL, true);
+	      if (next - cur > max) max = next - cur;
+	      if (!found || max > threshold) break;
+	    }
+	  if (max > threshold)
+	    {
+	      current_buffer->long_line_optimizations_p = true;
+	      if (!NILP (BVAR (current_buffer, bidi_display_reordering)))
+		BVAR (current_buffer, bidi_display_reordering) = Qnil;
+	    }
 	}
     }
 
@@ -29703,6 +29813,11 @@ decode_mode_spec (struct window *w, register int c, int field_width,
 ptrdiff_t
 count_lines (ptrdiff_t start_byte, ptrdiff_t end_byte)
 {
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope
+      && start_byte == BEG_BYTE && end_byte == Z_BYTE)
+    return (ptrdiff_t) rope_line_count_emacs ();
+#endif
   ptrdiff_t ignored;
   return display_count_lines (start_byte, end_byte, ZV, &ignored);
 }
@@ -29734,6 +29849,52 @@ display_count_lines (ptrdiff_t start_byte,
   bool selective_display
     = (!NILP (BVAR (current_buffer, selective_display))
        && !FIXNUMP (BVAR (current_buffer, selective_display)));
+
+#ifdef USE_ROPE
+  /* Fast path for rope buffers: use tree-based newline counting
+     instead of scanning byte-by-byte.  O(log n) vs O(n).  */
+  if (current_buffer->text->using_rope && !selective_display)
+    {
+      if (count > 0 && start_byte < limit_byte)
+	{
+	  ptrdiff_t newlines
+	    = rope_count_newlines_emacs (start_byte, limit_byte);
+	  if (newlines < count)
+	    {
+	      *byte_pos_ptr = limit_byte;
+	      return newlines;
+	    }
+	  ptrdiff_t pos
+	    = rope_find_nth_newline_emacs (start_byte, count);
+	  *byte_pos_ptr = pos;
+	  return count;
+	}
+      else if (count < 0 && start_byte > limit_byte)
+	{
+	  ptrdiff_t newlines
+	    = rope_count_newlines_emacs (limit_byte, start_byte);
+	  if (newlines < -count)
+	    {
+	      *byte_pos_ptr = limit_byte;
+	      return newlines;
+	    }
+	  /* The -count-th newline backward from start is the
+	     (newlines + count + 1)-th newline forward from limit.
+	     rope_find_nth_newline_emacs returns position AFTER the
+	     newline, which matches the backward convention (the
+	     original gap buffer code also returns position after).
+	     Return -count - 1 because "we should not count the
+	     newline posterior to which we stop."  */
+	  ptrdiff_t target = newlines + count + 1;
+	  ptrdiff_t pos
+	    = rope_find_nth_newline_emacs (limit_byte, target);
+	  *byte_pos_ptr = pos;
+	  return -count - 1;
+	}
+      *byte_pos_ptr = limit_byte;
+      return 0;
+    }
+#endif
 
   if (count > 0)
     {
