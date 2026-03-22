@@ -75,15 +75,29 @@ jobs:
           # Commit the conflicted state
           git add -A
           git commit --no-verify -m "WIP: merge GNU master with conflicts"
-          git push origin "$BRANCH"
+          git push --force origin "$BRANCH"
 
           CONFLICTS="${{ steps.merge.outputs.conflicts }}"
-          PR_URL=$(gh pr create \
-            --base emacs-mac-gnu_master_exp \
-            --head "$BRANCH" \
-            --title "Sync GNU Emacs master (conflicts)" \
-            --draft \
-            --body "$(cat <<EOF
+
+          # Reuse existing PR or create a new one
+          EXISTING_PR=$(gh pr list --base emacs-mac-gnu_master_exp --head "$BRANCH" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING_PR" ]; then
+            PR_NUMBER="$EXISTING_PR"
+            gh pr comment "$PR_NUMBER" --body "$(cat <<EOF
+          Retrying conflict resolution. Conflicting files:
+
+          \`\`\`
+          $CONFLICTS
+          \`\`\`
+          EOF
+          )"
+          else
+            PR_URL=$(gh pr create \
+              --base emacs-mac-gnu_master_exp \
+              --head "$BRANCH" \
+              --title "Sync GNU Emacs master (conflicts)" \
+              --draft \
+              --body "$(cat <<EOF
           ## GNU master sync — merge conflicts
 
           The automatic merge of GNU Emacs master encountered conflicts in the following files:
@@ -95,8 +109,8 @@ jobs:
           Claude Code will attempt to resolve these conflicts automatically.
           EOF
           )")
-
-          PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+            PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+          fi
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
   resolve-conflicts:
