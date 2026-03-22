@@ -1380,14 +1380,17 @@ coordinates_in_window (register struct window *w, int x, int y)
   else if ((WINDOW_HAS_HORIZONTAL_SCROLL_BAR (w)
 	    && y >= (bottom_y
 		     - WINDOW_SCROLL_BAR_AREA_HEIGHT (w)
-		     - CURRENT_MODE_LINE_HEIGHT (w)
+		     - (WINDOW_MODE_LINE_AT_TOP_P (w)
+			? 0 : CURRENT_MODE_LINE_HEIGHT (w))
 		     - WINDOW_BOTTOM_DIVIDER_WIDTH (w))
 	    && y <= (bottom_y
-		     - CURRENT_MODE_LINE_HEIGHT (w)
+		     - (WINDOW_MODE_LINE_AT_TOP_P (w)
+			? 0 : CURRENT_MODE_LINE_HEIGHT (w))
 		     - WINDOW_BOTTOM_DIVIDER_WIDTH (w))))
     return ON_HORIZONTAL_SCROLL_BAR;
   /* On the mode or header/tab line?   */
   else if ((window_wants_mode_line (w)
+	    && !WINDOW_MODE_LINE_AT_TOP_P (w)
 	    && y >= (bottom_y
 		     - CURRENT_MODE_LINE_HEIGHT (w)
 		     - WINDOW_BOTTOM_DIVIDER_WIDTH (w))
@@ -1401,7 +1404,17 @@ coordinates_in_window (register struct window *w, int x, int y)
 	       + (window_wants_tab_line (w)
 		  ? CURRENT_TAB_LINE_HEIGHT (w)
 		  : 0)
-	       && (part = ON_HEADER_LINE)))
+	       && (part = ON_HEADER_LINE))
+	   || (window_wants_mode_line (w)
+	       && WINDOW_MODE_LINE_AT_TOP_P (w)
+	       && y >= (top_y
+			+ CURRENT_TAB_LINE_HEIGHT (w)
+			+ CURRENT_HEADER_LINE_HEIGHT (w))
+	       && y < (top_y
+		       + CURRENT_TAB_LINE_HEIGHT (w)
+		       + CURRENT_HEADER_LINE_HEIGHT (w)
+		       + CURRENT_MODE_LINE_HEIGHT (w))
+	       && (part = ON_MODE_LINE)))
     {
       /* If it's under/over the scroll bar portion of the mode/header
 	 line, say it's on the vertical line.  That's to be able to
@@ -2120,9 +2133,12 @@ Return nil if window display is not up-to-date.  In that case, use
       return (row->enabled_p ?
 	      list4i (row->height,
 		      0, /* not accurate */
-		      (WINDOW_TAB_LINE_HEIGHT (w)
-		       + WINDOW_HEADER_LINE_HEIGHT (w)
-		       + window_text_bottom_y (w)),
+		      (WINDOW_MODE_LINE_AT_TOP_P (w)
+		       ? (WINDOW_TAB_LINE_HEIGHT (w)
+			  + WINDOW_HEADER_LINE_HEIGHT (w))
+		       : (WINDOW_TAB_LINE_HEIGHT (w)
+			  + WINDOW_HEADER_LINE_HEIGHT (w)
+			  + window_text_bottom_y (w))),
 		      0)
 	      : Qnil);
     }
@@ -5014,7 +5030,14 @@ values.  */)
   block_input ();
   /* Necessary when deleting the top-/or leftmost window.  */
   r->left_col = 0;
-  r->top_line = FRAME_TOP_MARGIN (f);
+  if (FRAME_MINIBUF_AT_TOP_P (f)
+      && FRAME_HAS_MINIBUF_P (f) && !FRAME_MINIBUF_ONLY_P (f))
+    {
+      struct window *m = XWINDOW (f->minibuffer_window);
+      r->top_line = FRAME_TOP_MARGIN (f) + m->total_lines;
+    }
+  else
+    r->top_line = FRAME_TOP_MARGIN (f);
   window_resize_apply_total (r, !NILP (horizontal));
   /* Handle the mini window.  */
   if (FRAME_HAS_MINIBUF_P (f) && !FRAME_MINIBUF_ONLY_P (f))
@@ -5023,8 +5046,14 @@ values.  */)
 
       if (NILP (horizontal))
 	{
-	  m->top_line = r->top_line + r->total_lines;
 	  m->total_lines = XFIXNAT (m->new_total);
+	  if (FRAME_MINIBUF_AT_TOP_P (f))
+	    {
+	      m->top_line = FRAME_TOP_MARGIN (f);
+	      r->top_line = m->top_line + m->total_lines;
+	    }
+	  else
+	    m->top_line = r->top_line + r->total_lines;
 	}
       else
 	m->total_cols = XFIXNAT (m->new_total);
@@ -5056,8 +5085,12 @@ resize_frame_windows (struct frame *f, int size, bool horflag)
   new_pixel_size = max (horflag ? size : size - mini_height, unit);
   new_size = new_pixel_size / unit;
 
+  int expected_root_top
+    = (FRAME_TOP_MARGIN_HEIGHT (f)
+       + (FRAME_MINIBUF_AT_TOP_P (f) ? mini_height : 0));
+
   if (new_pixel_size == old_pixel_size
-      && (horflag || r->pixel_top == FRAME_TOP_MARGIN_HEIGHT (f)))
+      && (horflag || r->pixel_top == expected_root_top))
     ;
   else if (WINDOW_LEAF_P (r))
     {
@@ -5069,8 +5102,8 @@ resize_frame_windows (struct frame *f, int size, bool horflag)
 	}
       else
 	{
-	  r->top_line = FRAME_TOP_MARGIN (f);
-	  r->pixel_top = FRAME_TOP_MARGIN_HEIGHT (f);
+	  r->top_line = expected_root_top / unit;
+	  r->pixel_top = expected_root_top;
 
 	  r->total_lines = new_size;
 	  r->pixel_height = new_pixel_size;
@@ -5085,8 +5118,8 @@ resize_frame_windows (struct frame *f, int size, bool horflag)
 
       if (!horflag)
 	{
-	  r->top_line = FRAME_TOP_MARGIN (f);
-	  r->pixel_top = FRAME_TOP_MARGIN_HEIGHT (f);
+	  r->top_line = expected_root_top / unit;
+	  r->pixel_top = expected_root_top;
 	}
 
       XSETINT (delta, new_pixel_size - old_pixel_size);
@@ -5124,8 +5157,16 @@ resize_frame_windows (struct frame *f, int size, bool horflag)
 	{
 	  m->total_lines = mini_height / unit;
 	  m->pixel_height = mini_height;
-	  m->top_line = r->top_line + r->total_lines;
-	  m->pixel_top = r->pixel_top + r->pixel_height;
+	  if (FRAME_MINIBUF_AT_TOP_P (f))
+	    {
+	      m->top_line = FRAME_TOP_MARGIN (f);
+	      m->pixel_top = FRAME_TOP_MARGIN_HEIGHT (f);
+	    }
+	  else
+	    {
+	      m->top_line = r->top_line + r->total_lines;
+	      m->pixel_top = r->pixel_top + r->pixel_height;
+	    }
 	}
     }
 
@@ -5864,10 +5905,23 @@ resize_mini_window_apply (struct window *w, int delta)
   w->pixel_height = w->pixel_height + delta;
   w->total_lines = w->pixel_height / FRAME_LINE_HEIGHT (f);
 
+  if (FRAME_MINIBUF_AT_TOP_P (f))
+    {
+      /* Mini window stays at top; update root position BEFORE
+	 window_resize_apply so children get correct pixel_top.  */
+      w->top_line = FRAME_TOP_MARGIN (f);
+      w->pixel_top = FRAME_TOP_MARGIN_HEIGHT (f);
+      r->top_line = w->top_line + w->total_lines;
+      r->pixel_top = w->pixel_top + w->pixel_height;
+    }
+
   window_resize_apply (r, false);
 
-  w->pixel_top = r->pixel_top + r->pixel_height;
-  w->top_line = r->top_line + r->total_lines;
+  if (!FRAME_MINIBUF_AT_TOP_P (f))
+    {
+      w->pixel_top = r->pixel_top + r->pixel_height;
+      w->top_line = r->top_line + r->total_lines;
+    }
 
   /* Enforce full redisplay of the frame.  If f->redisplay is already
      set, which it generally is in the wake of a ConfigureNotify

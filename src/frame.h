@@ -274,6 +274,12 @@ struct frame
      Except with GTK, the only supported position is `top'.  */
   Lisp_Object tool_bar_position;
 
+  /* Where the minibuffer is, `top' or `bottom'.  */
+  Lisp_Object minibuffer_position;
+
+  /* Where the mode line is, `top' or `bottom'.  */
+  Lisp_Object mode_line_position;
+
 #if defined (HAVE_XFT) || defined (HAVE_FREETYPE)
   /* List of data specific to font-driver and frame, but common to faces.  */
   Lisp_Object font_data;
@@ -913,6 +919,18 @@ fset_tool_bar_position (struct frame *f, Lisp_Object val)
   f->tool_bar_position = val;
 }
 
+INLINE void
+fset_minibuffer_position (struct frame *f, Lisp_Object val)
+{
+  f->minibuffer_position = val;
+}
+
+INLINE void
+fset_mode_line_position (struct frame *f, Lisp_Object val)
+{
+  f->mode_line_position = val;
+}
+
 INLINE double
 NUMVAL (Lisp_Object x)
 {
@@ -1133,6 +1151,20 @@ default_pixels_per_inch_y (void)
 
    Qleft and Qright are not supported outside GTK+.  */
 #define FRAME_TOOL_BAR_POSITION(f) (f)->tool_bar_position
+
+/* Position of the minibuffer; Qtop or Qbottom.  */
+#define FRAME_MINIBUFFER_POSITION(f) (f)->minibuffer_position
+
+/* True if the minibuffer should be at the top of the frame.  */
+#define FRAME_MINIBUF_AT_TOP_P(f) \
+  (BASE_EQ ((f)->minibuffer_position, Qtop))
+
+/* Position of the mode line; Qtop or Qbottom.  */
+#define FRAME_MODE_LINE_POSITION(f) (f)->mode_line_position
+
+/* True if the mode line should be at the top of each window.  */
+#define FRAME_MODE_LINE_AT_TOP_P(f) \
+  (BASE_EQ ((f)->mode_line_position, Qtop))
 
 /* Size of frame F's internal tool bar in frame lines and pixels.  */
 #define FRAME_TOOL_BAR_LINES(f) (f)->tool_bar_lines
@@ -1895,6 +1927,10 @@ extern void gui_set_right_divider_width (struct frame *, Lisp_Object,
                                          Lisp_Object);
 extern void gui_set_bottom_divider_width (struct frame *, Lisp_Object,
                                           Lisp_Object);
+extern void gui_set_minibuffer_position (struct frame *, Lisp_Object,
+					 Lisp_Object);
+extern void gui_set_mode_line_position (struct frame *, Lisp_Object,
+					Lisp_Object);
 extern void gui_set_visibility (struct frame *, Lisp_Object, Lisp_Object);
 extern void gui_set_autoraise (struct frame *, Lisp_Object, Lisp_Object);
 extern void gui_set_autolower (struct frame *, Lisp_Object, Lisp_Object);

@@ -764,7 +764,7 @@ shift_glyph_matrix (struct window *w, struct glyph_matrix *matrix, int start, in
   eassert (start >= 0 && start < matrix->nrows);
   eassert (end >= 0 && end <= matrix->nrows);
 
-  min_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
+  min_y = WINDOW_TOP_LINES_HEIGHT (w);
   max_y = WINDOW_BOX_HEIGHT_NO_MODE_LINE (w);
 
   for (; start < end; ++start)
@@ -904,7 +904,7 @@ blank_row (struct window *w, struct glyph_row *row, int y)
 {
   int min_y, max_y;
 
-  min_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
+  min_y = WINDOW_TOP_LINES_HEIGHT (w);
   max_y = WINDOW_BOX_HEIGHT_NO_MODE_LINE (w);
 
   clear_glyph_row (row);
@@ -4470,7 +4470,11 @@ update_window (struct window *w)
   mode_line_row = MATRIX_MODE_LINE_ROW (desired_matrix);
   if (mode_line_row->mode_line_p && mode_line_row->enabled_p)
     {
-      mode_line_row->y = yb + WINDOW_SCROLL_BAR_AREA_HEIGHT (w);
+      if (WINDOW_MODE_LINE_AT_TOP_P (w))
+	mode_line_row->y = WINDOW_TAB_LINE_HEIGHT (w)
+			   + WINDOW_HEADER_LINE_HEIGHT (w);
+      else
+	mode_line_row->y = yb + WINDOW_SCROLL_BAR_AREA_HEIGHT (w);
       update_window_line (w, MATRIX_ROW_VPOS (mode_line_row,
 					      desired_matrix),
 			  &mouse_face_overwritten_p);

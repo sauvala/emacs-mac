@@ -1058,13 +1058,26 @@ wset_next_buffers (struct window *w, Lisp_Object val)
 #define WINDOW_TAB_LINE_LINES(W)	\
   window_wants_tab_line (W)
 
+/* True if the mode line of W is displayed at the top of the window.  */
+#define WINDOW_MODE_LINE_AT_TOP_P(W)	\
+  FRAME_MODE_LINE_AT_TOP_P (WINDOW_XFRAME (W))
+
+/* Total pixel height of top decoration lines in W (tab line, header
+   line, and mode line when at top).  */
+#define WINDOW_TOP_LINES_HEIGHT(W)				\
+  (WINDOW_TAB_LINE_HEIGHT (W) + WINDOW_HEADER_LINE_HEIGHT (W)	\
+   + (WINDOW_MODE_LINE_AT_TOP_P (W)				\
+      ? WINDOW_MODE_LINE_HEIGHT (W) : 0))
+
 /* Pixel height of window W without mode line, bottom scroll bar and
-   bottom divider.  */
-#define WINDOW_BOX_HEIGHT_NO_MODE_LINE(W)	\
-  (WINDOW_PIXEL_HEIGHT (W)			\
-   - WINDOW_BOTTOM_DIVIDER_WIDTH (W)		\
-   - WINDOW_SCROLL_BAR_AREA_HEIGHT (W)		\
-   - WINDOW_MODE_LINE_HEIGHT (W))
+   bottom divider.  When the mode line is at the top, don't subtract
+   its height from the bottom.  */
+#define WINDOW_BOX_HEIGHT_NO_MODE_LINE(W)		\
+  (WINDOW_PIXEL_HEIGHT (W)				\
+   - WINDOW_BOTTOM_DIVIDER_WIDTH (W)			\
+   - WINDOW_SCROLL_BAR_AREA_HEIGHT (W)			\
+   - (WINDOW_MODE_LINE_AT_TOP_P (W)			\
+      ? 0 : WINDOW_MODE_LINE_HEIGHT (W)))
 
 /* Pixel height of window W without mode and header/tab line and bottom
    divider.  */

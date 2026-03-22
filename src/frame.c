@@ -1018,7 +1018,11 @@ adjust_frame_size (struct frame *f, int new_text_width, int new_text_height,
 			       inhibit_horizontal, inhibit_vertical);
 
   if ((XWINDOW (FRAME_ROOT_WINDOW (f))->pixel_top
-       == FRAME_TOP_MARGIN_HEIGHT (f))
+       == (FRAME_TOP_MARGIN_HEIGHT (f)
+	   + (FRAME_MINIBUF_AT_TOP_P (f)
+	      && FRAME_HAS_MINIBUF_P (f)
+	      && !FRAME_MINIBUF_ONLY_P (f)
+	      ? XWINDOW (f->minibuffer_window)->pixel_height : 0)))
       && new_text_width == old_text_width
       && new_text_height == old_text_height
       && new_inner_width == old_inner_width
@@ -1171,6 +1175,8 @@ make_frame (bool mini_p)
   /* Initialize Lisp data.  Note that allocate_frame initializes all
      Lisp data to nil, so do it only for slots which should not be nil.  */
   fset_tool_bar_position (f, Qtop);
+  fset_minibuffer_position (f, Qbottom);
+  fset_mode_line_position (f, Qbottom);
 
   /* Initialize non-Lisp data.  Note that allocate_frame zeroes out all
      non-Lisp data, so do it only for slots which should not be zero.
@@ -4891,6 +4897,8 @@ static const struct frame_parm_table frame_parms[] =
 #ifdef HAVE_MACGUI
   {"mac-transparent-titlebar",  SYMBOL_INDEX (Qmac_transparent_titlebar)},
 #endif
+  {"minibuffer-position",	SYMBOL_INDEX (Qminibuffer_position)},
+  {"mode-line-position",	SYMBOL_INDEX (Qmode_line_position)},
 };
 
 #ifdef HAVE_WINDOW_SYSTEM
@@ -5491,6 +5499,10 @@ gui_report_frame_params (struct frame *f, Lisp_Object *alistptr)
   store_in_alist (alistptr, Qexplicit_name, (f->explicit_name ? Qt : Qnil));
   store_in_alist (alistptr, Qparent_id, tem);
   store_in_alist (alistptr, Qtool_bar_position, FRAME_TOOL_BAR_POSITION (f));
+  store_in_alist (alistptr, Qminibuffer_position,
+		  FRAME_MINIBUFFER_POSITION (f));
+  store_in_alist (alistptr, Qmode_line_position,
+		  FRAME_MODE_LINE_POSITION (f));
 }
 
 
@@ -5894,6 +5906,36 @@ gui_set_bottom_divider_width (struct frame *f, Lisp_Object arg, Lisp_Object oldv
       f->bottom_divider_width = new;
       adjust_frame_size (f, -1, -1, 4, 0, Qbottom_divider_width);
       adjust_frame_glyphs (f);
+      SET_FRAME_GARBAGED (f);
+    }
+}
+
+void
+gui_set_minibuffer_position (struct frame *f, Lisp_Object arg,
+			     Lisp_Object oldval)
+{
+  if (!EQ (arg, Qtop) && !EQ (arg, Qbottom))
+    error ("Invalid minibuffer position: must be `top' or `bottom'");
+
+  if (!EQ (arg, oldval)
+      && FRAME_HAS_MINIBUF_P (f) && !FRAME_MINIBUF_ONLY_P (f))
+    {
+      fset_minibuffer_position (f, arg);
+      resize_frame_windows (f, FRAME_INNER_HEIGHT (f), false);
+      SET_FRAME_GARBAGED (f);
+    }
+}
+
+void
+gui_set_mode_line_position (struct frame *f, Lisp_Object arg,
+			    Lisp_Object oldval)
+{
+  if (!EQ (arg, Qtop) && !EQ (arg, Qbottom))
+    error ("Invalid mode-line position: must be `top' or `bottom'");
+
+  if (!EQ (arg, oldval))
+    {
+      fset_mode_line_position (f, arg);
       SET_FRAME_GARBAGED (f);
     }
 }
@@ -7360,6 +7402,8 @@ syms_of_frame (void)
   DEFSYM (Qleft_fringe_help, "left-fringe-help");
   DEFSYM (Qline_spacing, "line-spacing");
   DEFSYM (Qmenu_bar_lines, "menu-bar-lines");
+  DEFSYM (Qminibuffer_position, "minibuffer-position");
+  DEFSYM (Qmode_line_position, "mode-line-position");
   DEFSYM (Qtab_bar_lines, "tab-bar-lines");
   DEFSYM (Qmouse_color, "mouse-color");
   DEFSYM (Qname, "name");

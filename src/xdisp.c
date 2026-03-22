@@ -1255,7 +1255,7 @@ window_text_bottom_y (struct window *w)
 
   height -= WINDOW_BOTTOM_DIVIDER_WIDTH (w);
 
-  if (window_wants_mode_line (w))
+  if (window_wants_mode_line (w) && !WINDOW_MODE_LINE_AT_TOP_P (w))
     height -= CURRENT_MODE_LINE_HEIGHT (w);
 
   height -= WINDOW_SCROLL_BAR_AREA_HEIGHT (w);
@@ -1805,7 +1805,7 @@ pos_visible_p (struct window *w, ptrdiff_t charpos, int *x, int *y,
 	 glyph.  */
       int top_x = it.current_x;
       int top_y = it.current_y;
-      int window_top_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
+      int window_top_y = WINDOW_TOP_LINES_HEIGHT (w);
       int bottom_y;
       struct it save_it;
       void *save_it_data = NULL;
@@ -2541,7 +2541,7 @@ get_glyph_string_clip_rects (struct glyph_string *s, NativeRectangle *rects, int
      intentionally draws over other lines.  */
   if (s->for_overlaps)
     {
-      r.y = WINDOW_TAB_LINE_HEIGHT (s->w) + WINDOW_HEADER_LINE_HEIGHT (s->w);
+      r.y = WINDOW_TOP_LINES_HEIGHT (s->w);
       r.height = window_text_bottom_y (s->w) - r.y;
 
       /* Alas, the above simple strategy does not work for the
@@ -2568,7 +2568,7 @@ get_glyph_string_clip_rects (struct glyph_string *s, NativeRectangle *rects, int
 	 partially visible lines at the top of a window.  */
       if (!s->row->full_width_p
 	  && MATRIX_ROW_PARTIALLY_VISIBLE_AT_TOP_P (s->w, s->row))
-	r.y = WINDOW_TAB_LINE_HEIGHT (s->w) + WINDOW_HEADER_LINE_HEIGHT (s->w);
+	r.y = WINDOW_TOP_LINES_HEIGHT (s->w);
       else
 	r.y = max (0, s->row->y);
     }
@@ -2745,7 +2745,7 @@ get_phys_cursor_geometry (struct window *w, struct glyph_row *row,
   h = min (h, row->height);
   h0 = min (h0, ascent + glyph->descent);
 
-  y0 = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
+  y0 = WINDOW_TOP_LINES_HEIGHT (w);
   if (y < y0)
     {
       h = max (h - (y0 - y) + 1, h0);
@@ -3513,7 +3513,7 @@ init_iterator (struct it *it, struct window *w,
 
       it->tab_line_p = window_wants_tab_line (w);
       it->header_line_p = window_wants_header_line (w);
-      body_height = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
+      body_height = WINDOW_TOP_LINES_HEIGHT (w);
       it->current_y =  body_height + w->vscroll;
     }
 
@@ -11955,12 +11955,11 @@ window_text_pixel_size (Lisp_Object window, Lisp_Object from, Lisp_Object to,
   if (it.current_y > start_y)
     start_x = 0;
 
-  /* Subtract height of header-line and tab-line which was counted
+  /* Subtract height of top decoration lines which was counted
      automatically by start_display.  */
   if (!NILP (ignore_line_at_end))
     y = (it.current_y + doff
-	 - WINDOW_TAB_LINE_HEIGHT (w)
-	 - WINDOW_HEADER_LINE_HEIGHT (w));
+	 - WINDOW_TOP_LINES_HEIGHT (w));
   else
     y = (it.current_y + it.max_ascent + it.max_descent + doff
 	 - WINDOW_TAB_LINE_HEIGHT (w) - WINDOW_HEADER_LINE_HEIGHT (w));
@@ -21163,7 +21162,7 @@ redisplay_window (Lisp_Object window, bool just_this_one_p)
 		centering_position -= pt_offset;
 	      centering_position -=
 		(frame_line_height * (1 + margin + last_line_misfit)
-		 + WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w));
+		 + WINDOW_TOP_LINES_HEIGHT (w));
 	      /* Don't let point enter the scroll margin near top of
 		 the window.  */
 	      if (centering_position < margin * frame_line_height)
@@ -21944,7 +21943,7 @@ try_window_reusing_current_matrix (struct window *w)
 	    (start_row + i)->enabled_p = false;
 
 	  /* Re-compute Y positions.  */
-	  min_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
+	  min_y = WINDOW_TOP_LINES_HEIGHT (w);
 	  max_y = it.last_visible_y;
 	  for (row = start_row + nrows_scrolled;
 	       row < bottom_row;
@@ -22051,7 +22050,7 @@ try_window_reusing_current_matrix (struct window *w)
       it.vpos = (MATRIX_ROW_VPOS (first_row_to_display, w->current_matrix)
 		 - nrows_scrolled);
       it.current_y = (first_row_to_display->y - first_reusable_row->y
-		      + WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w));
+		      + WINDOW_TOP_LINES_HEIGHT (w));
 
       /* Display lines beginning with first_row_to_display in the
          desired matrix.  Set last_text_row to the last row displayed
@@ -22084,7 +22083,7 @@ try_window_reusing_current_matrix (struct window *w)
 
       /* Scroll the display.  */
       run.current_y = first_reusable_row->y;
-      run.desired_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
+      run.desired_y = WINDOW_TOP_LINES_HEIGHT (w);
       run.height = it.last_visible_y - run.current_y;
       dy = run.current_y - run.desired_y;
 
@@ -22102,7 +22101,7 @@ try_window_reusing_current_matrix (struct window *w)
 
       /* Adjust Y positions of reused rows.  */
       bottom_row = MATRIX_BOTTOM_TEXT_ROW (w->current_matrix, w);
-      min_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
+      min_y = WINDOW_TOP_LINES_HEIGHT (w);
       max_y = it.last_visible_y;
       for (row = first_reusable_row; row < first_row_to_display; ++row)
 	{
@@ -24072,7 +24071,7 @@ compute_line_metrics (struct it *it)
       /* Compute how much of the line is visible.  */
       row->visible_height = row->height;
 
-      min_y = WINDOW_TAB_LINE_HEIGHT (it->w) + WINDOW_HEADER_LINE_HEIGHT (it->w);
+      min_y = WINDOW_TOP_LINES_HEIGHT (it->w);
       max_y = WINDOW_BOX_HEIGHT_NO_MODE_LINE (it->w);
 
       if (row->y < min_y)
@@ -34345,7 +34344,7 @@ gui_clear_end_of_line (struct window *w, struct glyph_row *updated_row,
       to_x += area_left;
     }
 
-  min_y = WINDOW_TAB_LINE_HEIGHT (w) + WINDOW_HEADER_LINE_HEIGHT (w);
+  min_y = WINDOW_TOP_LINES_HEIGHT (w);
   from_y = WINDOW_TO_FRAME_PIXEL_Y (w, max (min_y, w->output_cursor.y));
   to_y = WINDOW_TO_FRAME_PIXEL_Y (w, to_y);
 
@@ -36417,13 +36416,17 @@ note_line_or_margin_highlight (Lisp_Object window, int x, int y,
       /* Change the mouse pointer according to what is under it.  */
       if (FRAME_WINDOW_P (f))
 	{
+	  bool mode_line_at_top = (area == ON_MODE_LINE
+				   && WINDOW_MODE_LINE_AT_TOP_P (w));
 	  bool draggable_window_bottom_line =
-	    (area == ON_MODE_LINE && (! WINDOW_BOTTOMMOST_P (w)
-				      || minibuf_level
-				      || NILP (Vresize_mini_windows)));
+	    (area == ON_MODE_LINE && !mode_line_at_top
+	     && (! WINDOW_BOTTOMMOST_P (w)
+		 || minibuf_level
+		 || NILP (Vresize_mini_windows)));
 	  bool draggable_window_top_line =
-	    ((area == ON_HEADER_LINE || area == ON_TAB_LINE)
-	     && ! WINDOW_TOPMOST_P (w));
+	    (((area == ON_HEADER_LINE || area == ON_TAB_LINE)
+	      && ! WINDOW_TOPMOST_P (w))
+	     || (mode_line_at_top && ! WINDOW_TOPMOST_P (w)));
 
 	  if (STRINGP (string))
 	    {
