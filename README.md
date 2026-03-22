@@ -166,6 +166,14 @@ Several additional features and fixes have been added on top of upstream `emacs-
 - Correctly handle pixel-doubled images during allocation (fix regression from FSF upstream).
 - Fix various compiler warnings related to type casting. 
 
+### Nemesis branch additions
+
+The `nemesis` branch tracks GNU Emacs master and adds the following on top of the upstream `emacs-mac` port features:
+
+- **Minibuffer position**: New `minibuffer-position` frame parameter to place the minibuffer at the top or bottom of the frame. Use `M-x toggle-minibuffer-position` to switch.
+- **Mode-line position**: New `mode-line-position` frame parameter to place the mode-line at the top or bottom of windows. Use `M-x toggle-mode-line-position` to switch.
+- **Automated GNU master sync**: Weekly GitHub Actions workflow that merges upstream GNU Emacs master, with automatic Claude-assisted conflict resolution.
+
 ## Debugging
 
 If you get crashes or just want to help with debugging, it would be very useful to run emacs-mac under `lldb`, the clang debugger.  Here's how:
