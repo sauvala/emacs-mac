@@ -219,9 +219,39 @@ enum { GAP_BYTES_MIN = 20 };
 extern ptrdiff_t advance_to_char_boundary (ptrdiff_t byte_pos);
 
 /* Return the byte at byte position N.
-   Do not check that the position is in range.  */
+   Do not check that the position is in range.
 
+   WARNING: This macro should NOT be used as an lvalue (for assignment)
+   when USE_ROPE is defined, as ropes don't support in-place
+   modification.  Use rope_set_byte_emacs instead.
+   Code that needs to modify single bytes should use a helper function.  */
+
+#ifdef USE_ROPE
+/* When using rope, we need a function call to access bytes.
+   For gap buffer, we can directly dereference.
+
+   Note: This macro returns an int when using rope (so it can't
+   be an lvalue), but returns an lvalue-capable expression for gap buffer.
+   Code that assigns to FETCH_BYTE() only works with gap buffers.
+
+   The inline cache check avoids a function call on sequential access,
+   which is critical for display engine performance.  */
+#define FETCH_BYTE(n)						\
+  (current_buffer->text->using_rope				\
+   ? (int) (unsigned char) *BYTE_POS_ADDR (n)			\
+   : (int) *BYTE_POS_ADDR_GAP (n))
+/* Gap-buffer version of BYTE_POS_ADDR for use in conditional.
+   Returns unsigned char * like the original BYTE_POS_ADDR.  */
+#define BYTE_POS_ADDR_GAP(n)					\
+  (((n) < GPT_BYTE ? 0 : GAP_SIZE) + (n) + BEG_ADDR - BEG_BYTE)
+
+/* Macro for gap-buffer-only code that needs FETCH_BYTE as lvalue.
+   This will fail if called on a rope buffer.  */
+#define FETCH_BYTE_LVALUE(n) (*BYTE_POS_ADDR_GAP (n))
+#else
 #define FETCH_BYTE(n) (*BYTE_POS_ADDR (n))
+#define FETCH_BYTE_LVALUE(n) (*BYTE_POS_ADDR (n))
+#endif
 
 /* Define the actual buffer data structures.  */
 
@@ -909,17 +939,55 @@ bset_text_conversion_style (struct buffer *b, Lisp_Object val)
 /* BUFFER_CEILING_OF (resp. BUFFER_FLOOR_OF), when applied to n, return
    the max (resp. min) p such that
 
-   BYTE_POS_ADDR (p) - BYTE_POS_ADDR (n) == p - n       */
+   BYTE_POS_ADDR (p) - BYTE_POS_ADDR (n) == p - n
+
+   For gap buffers, this is the position where we hit the gap.
+   For ropes, this is the end of the current chunk.  */
+
+#ifdef USE_ROPE
+extern ptrdiff_t rope_contiguous_end_emacs (ptrdiff_t bytepos);
+extern ptrdiff_t rope_contiguous_start_emacs (ptrdiff_t bytepos);
+extern const unsigned char *rope_get_contiguous_emacs (ptrdiff_t n);
+extern int rope_char_at_emacs (ptrdiff_t n);
+extern const unsigned char *rope_get_contiguous_with_len_emacs (ptrdiff_t bytepos,
+								ptrdiff_t *out_len);
+/* Chunk cache — exposed for inline fast-path in BYTE_POS_ADDR.  */
+struct Rope;
+extern struct Rope *rope_chunk_cache_rope;
+extern ptrdiff_t rope_chunk_cache_start;
+extern ptrdiff_t rope_chunk_cache_end;
+extern const char *rope_chunk_cache_ptr;
+/* charpos↔bytepos conversion cache — exposed for inline fast-path.  */
+extern struct Rope *rope_pos_cache_rope;
+extern ptrdiff_t rope_pos_cache_charpos;
+extern ptrdiff_t rope_pos_cache_bytepos;
+#endif
 
 INLINE ptrdiff_t
 BUFFER_CEILING_OF (ptrdiff_t bytepos)
 {
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      ptrdiff_t chunk_end = rope_contiguous_end_emacs (bytepos);
+      /* Clamp to accessible region (ZV).  */
+      return chunk_end < ZV_BYTE ? chunk_end : ZV_BYTE - 1;
+    }
+#endif
   return (bytepos < GPT_BYTE && GPT < ZV ? GPT_BYTE : ZV_BYTE) - 1;
 }
 
 INLINE ptrdiff_t
 BUFFER_FLOOR_OF (ptrdiff_t bytepos)
 {
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      ptrdiff_t chunk_start = rope_contiguous_start_emacs (bytepos);
+      /* Clamp to accessible region (BEGV).  */
+      return chunk_start > BEGV_BYTE ? chunk_start : BEGV_BYTE;
+    }
+#endif
   return BEGV <= GPT && GPT_BYTE <= bytepos ? GPT_BYTE : BEGV_BYTE;
 }
 
@@ -1086,11 +1154,32 @@ SET_BUF_PT_BOTH (struct buffer *buf, ptrdiff_t charpos, ptrdiff_t byte)
 /* See the important WARNING above about using the 'char *' pointers
    returned by these functions.  */
 
-/* Return the address of byte position N in current buffer.  */
+/* Return the address of byte position N in current buffer.
+
+   WARNING: When USE_ROPE is defined and the buffer uses a rope, the
+   returned pointer is only valid for reading contiguous data up to
+   BUFFER_CEILING_OF(n).  Code that needs to read beyond that must be
+   prepared to call this function again after crossing chunk
+   boundaries.  */
 
 INLINE unsigned char *
 BYTE_POS_ADDR (ptrdiff_t n)
 {
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      /* Inline cache check to avoid function call overhead during
+	 sequential display iteration (~2000 calls per screenful).  */
+      ptrdiff_t pos = n - BEG_BYTE;
+      struct Rope *r = current_buffer->text->rope;
+      if (r == rope_chunk_cache_rope
+	  && pos >= rope_chunk_cache_start
+	  && pos < rope_chunk_cache_end)
+	return (unsigned char *) (rope_chunk_cache_ptr
+				  + (pos - rope_chunk_cache_start));
+      return (unsigned char *) rope_get_contiguous_emacs (n);
+    }
+#endif
   return (n < GPT_BYTE ? 0 : GAP_SIZE) + n + BEG_ADDR - BEG_BYTE;
 }
 
@@ -1099,10 +1188,68 @@ BYTE_POS_ADDR (ptrdiff_t n)
 INLINE unsigned char *
 CHAR_POS_ADDR (ptrdiff_t n)
 {
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      ptrdiff_t bytepos = buf_charpos_to_bytepos (current_buffer, n);
+      return (unsigned char *) rope_get_contiguous_emacs (bytepos);
+    }
+#endif
   return ((n < GPT ? 0 : GAP_SIZE)
 	  + buf_charpos_to_bytepos (current_buffer, n)
 	  + BEG_ADDR - BEG_BYTE);
 }
+
+#ifdef USE_ROPE
+/* Safely read a multibyte character from the current buffer at byte
+   position POS, handling rope chunk boundaries.  Set *LENGTH to the
+   byte length of the character.  Returns the character code.
+
+   The inline cache check avoids a function call to
+   rope_get_contiguous_with_len_emacs on cache hits, which is critical
+   since this is called ~4000 times per screenful via
+   fetch_char_advance.  */
+INLINE int
+rope_safe_char_and_length (ptrdiff_t pos, int *length)
+{
+  const unsigned char *p;
+  ptrdiff_t avail;
+
+  /* Inline cache check — avoid function call for sequential access.  */
+  ptrdiff_t pos0 = pos - BEG_BYTE;
+  struct Rope *r = current_buffer->text->rope;
+  if (r == rope_chunk_cache_rope
+      && pos0 >= rope_chunk_cache_start
+      && pos0 < rope_chunk_cache_end)
+    {
+      p = (const unsigned char *) (rope_chunk_cache_ptr
+				   + (pos0 - rope_chunk_cache_start));
+      avail = rope_chunk_cache_end - pos0;
+    }
+  else
+    p = rope_get_contiguous_with_len_emacs (pos, &avail);
+
+  if (avail >= MAX_MULTIBYTE_LENGTH)
+    return string_char_and_length (p, length);
+  /* Character may span chunk boundary — copy to stack buffer.  */
+  unsigned char mb[MAX_MULTIBYTE_LENGTH];
+  ptrdiff_t z = current_buffer->text->z_byte;
+  ptrdiff_t need = z - pos;
+  if (need <= 0)
+    {
+      /* At or past end of buffer — return a safe value.  */
+      *length = 1;
+      return 0;
+    }
+  if (need > MAX_MULTIBYTE_LENGTH)
+    need = MAX_MULTIBYTE_LENGTH;
+  ptrdiff_t from_ptr = avail < need ? avail : need;
+  memcpy (mb, p, from_ptr);
+  for (ptrdiff_t i = from_ptr; i < need; i++)
+    mb[i] = (unsigned char) rope_char_at_emacs (pos + i);
+  return string_char_and_length (mb, length);
+}
+#endif
 
 /* Convert a character position to a byte position.  */
 
@@ -1120,11 +1267,16 @@ BYTE_TO_CHAR (ptrdiff_t bytepos)
   return buf_bytepos_to_charpos (current_buffer, bytepos);
 }
 
-/* Convert PTR, the address of a byte in the buffer, into a byte position.  */
+/* Convert PTR, the address of a byte in the buffer, into a byte position.
+   This uses gap buffer arithmetic and must NOT be called on rope
+   buffers.  Callers must use explicit byte position tracking instead.  */
 
 INLINE ptrdiff_t
 PTR_BYTE_POS (unsigned char const *ptr)
 {
+#ifdef USE_ROPE
+  eassert (!current_buffer->text->using_rope);
+#endif
   ptrdiff_t byte = ptr - current_buffer->text->beg;
   return byte - (byte <= GPT_BYTE - BEG_BYTE ? 0 : GAP_SIZE) + BEG_BYTE;
 }
@@ -1380,6 +1532,13 @@ buffer_has_overlays (void)
 INLINE int
 FETCH_MULTIBYTE_CHAR (ptrdiff_t pos)
 {
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      int len;
+      return rope_safe_char_and_length (pos, &len);
+    }
+#endif
   unsigned char *p = BYTE_POS_ADDR (pos);
   return STRING_CHAR (p);
 }
@@ -1391,6 +1550,17 @@ FETCH_MULTIBYTE_CHAR (ptrdiff_t pos)
 INLINE int
 BUF_FETCH_MULTIBYTE_CHAR (struct buffer *buf, ptrdiff_t pos)
 {
+#ifdef USE_ROPE
+  if (buf->text->using_rope)
+    {
+      struct buffer *old = current_buffer;
+      current_buffer = buf;
+      int len;
+      int result = rope_safe_char_and_length (pos, &len);
+      current_buffer = old;
+      return result;
+    }
+#endif
   unsigned char *p
     = ((pos >= BUF_GPT_BYTE (buf) ? BUF_GAP_SIZE (buf) : 0)
        + pos + BUF_BEG_ADDR (buf) - BEG_BYTE);
@@ -1426,6 +1596,11 @@ FETCH_CHAR (ptrdiff_t pos)
 INLINE unsigned char *
 BUF_BYTE_ADDRESS (struct buffer *buf, ptrdiff_t pos)
 {
+#ifdef USE_ROPE
+  /* For rope buffers, we can't use gap buffer arithmetic.
+     This function is only correct for gap buffer buffers.  */
+  eassert (!buf->text->using_rope);
+#endif
   return (buf->text->beg + pos - BEG_BYTE
 	  + (pos < buf->text->gpt_byte ? 0 : buf->text->gap_size));
 }
@@ -1446,6 +1621,9 @@ BUF_CHAR_ADDRESS (struct buffer *buf, ptrdiff_t pos)
 INLINE ptrdiff_t
 BUF_PTR_BYTE_POS (struct buffer *buf, unsigned char *ptr)
 {
+#ifdef USE_ROPE
+  eassert (!buf->text->using_rope);
+#endif
   ptrdiff_t byte = ptr - buf->text->beg;
   return (byte - (byte <= BUF_GPT_BYTE (buf) - BEG_BYTE ? 0 : BUF_GAP_SIZE (buf))
 	  + BEG_BYTE);
@@ -1456,6 +1634,16 @@ BUF_PTR_BYTE_POS (struct buffer *buf, unsigned char *ptr)
 INLINE unsigned char
 BUF_FETCH_BYTE (struct buffer *buf, ptrdiff_t n)
 {
+#ifdef USE_ROPE
+  if (buf->text->using_rope)
+    {
+      struct buffer *old = current_buffer;
+      current_buffer = buf;
+      unsigned char result = (unsigned char) rope_char_at_emacs (n);
+      current_buffer = old;
+      return result;
+    }
+#endif
   return *BUF_BYTE_ADDRESS (buf, n);
 }
 
@@ -1739,16 +1927,28 @@ fetch_char_advance (ptrdiff_t *charidx, ptrdiff_t *byteidx)
   int output;
   ptrdiff_t c = *charidx, b = *byteidx;
   c++;
-  unsigned char *chp = BYTE_POS_ADDR (b);
   if (!NILP (BVAR (current_buffer, enable_multibyte_characters)))
     {
       int chlen;
-      output = string_char_and_length (chp, &chlen);
+#ifdef USE_ROPE
+      if (current_buffer->text->using_rope)
+	output = rope_safe_char_and_length (b, &chlen);
+      else
+#endif
+	{
+	  unsigned char *chp = BYTE_POS_ADDR (b);
+	  output = string_char_and_length (chp, &chlen);
+	}
       b += chlen;
     }
   else
     {
-      output = *chp;
+#ifdef USE_ROPE
+      if (current_buffer->text->using_rope)
+	output = (unsigned char) rope_char_at_emacs (b);
+      else
+#endif
+	output = *BYTE_POS_ADDR (b);
       b++;
     }
   *charidx = c;
@@ -1765,9 +1965,16 @@ fetch_char_advance_no_check (ptrdiff_t *charidx, ptrdiff_t *byteidx)
   int output;
   ptrdiff_t c = *charidx, b = *byteidx;
   c++;
-  unsigned char *chp = BYTE_POS_ADDR (b);
   int chlen;
-  output = string_char_and_length (chp, &chlen);
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    output = rope_safe_char_and_length (b, &chlen);
+  else
+#endif
+    {
+      unsigned char *chp = BYTE_POS_ADDR (b);
+      output = string_char_and_length (chp, &chlen);
+    }
   b += chlen;
   *charidx = c;
   *byteidx = b;
@@ -1782,6 +1989,10 @@ fetch_char_advance_no_check (ptrdiff_t *charidx, ptrdiff_t *byteidx)
 INLINE int
 buf_next_char_len (struct buffer *buf, ptrdiff_t pos_byte)
 {
+#ifdef USE_ROPE
+  if (buf->text->using_rope)
+    return BYTES_BY_CHAR_HEAD ((unsigned char) rope_char_at_emacs (pos_byte));
+#endif
   unsigned char *chp = BUF_BYTE_ADDRESS (buf, pos_byte);
   return BYTES_BY_CHAR_HEAD (*chp);
 }
@@ -1798,6 +2009,23 @@ next_char_len (ptrdiff_t pos_byte)
 INLINE int
 buf_prev_char_len (struct buffer *buf, ptrdiff_t pos_byte)
 {
+#ifdef USE_ROPE
+  if (buf->text->using_rope)
+    {
+      /* For rope buffers, use BYTE_POS_ADDR to get the right pointer.
+	 We need to look at bytes before pos_byte to determine char length.
+	 Read up to 4 bytes before pos_byte.  */
+      unsigned char tmp[4];
+      ptrdiff_t start = pos_byte - 4;
+      if (start < BEG_BYTE)
+	start = BEG_BYTE;
+      ptrdiff_t len = pos_byte - start;
+      /* Copy bytes from rope.  */
+      for (ptrdiff_t i = 0; i < len; i++)
+	tmp[i] = (unsigned char) rope_char_at_emacs (start + i);
+      return raw_prev_char_len (tmp + len);
+    }
+#endif
   unsigned char *chp
     = (BUF_BEG_ADDR (buf) + pos_byte - BEG_BYTE
        + (pos_byte <= BUF_GPT_BYTE (buf) ? 0 : BUF_GAP_SIZE (buf)));

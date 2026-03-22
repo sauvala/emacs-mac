@@ -52,6 +52,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "treesit.h"
 #endif
 
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
+
 /* Work around GCC bug 109847
    https://gcc.gnu.org/bugzilla/show_bug.cgi?id=109847
    which causes GCC to mistakenly complain about
@@ -637,6 +641,16 @@ even if it is dead.  The return value is never nil.  */)
   BUF_BEG_UNCHANGED (b) = 0;
   *(BUF_GPT_ADDR (b)) = *(BUF_Z_ADDR (b)) = 0; /* Put an anchor '\0'.  */
   b->text->inhibit_shrinking = false;
+#ifdef USE_ROPE
+  b->text->using_rope = false;
+  b->text->rope = NULL;
+  /* Enable rope for non-internal buffers only.
+     Internal buffers (names starting with space) are used for parsing,
+     temporary storage, etc. and the Lisp reader doesn't work with
+     rope buffers yet.  */
+  if (use_rope_by_default && SREF (buffer_or_name, 0) != ' ')
+    buffer_create_rope (b, NULL, 0);
+#endif
   b->text->redisplay = false;
 
   b->newline_cache = 0;
@@ -2770,6 +2784,68 @@ current buffer is cleared.  */)
 
   invalidate_buffer_caches (current_buffer, BEGV, ZV);
 
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      /* Rope buffers can't be modified in place.  Extract
+	 content, convert, and re-insert.  */
+      ptrdiff_t old_pt = PT;
+      Lisp_Object str = make_buffer_string_both (BEG, BEG_BYTE,
+						 Z, Z_BYTE, 0);
+
+      if (NILP (flag))
+	{
+	  /* Multibyte -> Unibyte.  */
+	  str = Fstring_to_unibyte (str);
+
+	  set_intervals_multibyte (false);
+	  set_overlays_multibyte (false);
+
+	  /* Delete all content and switch to unibyte.  */
+	  del_range_2 (BEG, BEG_BYTE, Z, Z_BYTE, 0);
+	  bset_enable_multibyte_characters (current_buffer, Qnil);
+
+	  /* Re-insert converted content.  */
+	  insert_from_string (str, 0, 0,
+			      SCHARS (str), SBYTES (str), 0);
+
+	  /* In unibyte, charpos == bytepos.  */
+	  Z = Z_BYTE;
+	  BEGV = BEGV_BYTE;
+	  ZV = ZV_BYTE;
+	  GPT = GPT_BYTE;
+	  if (old_pt <= Z)
+	    TEMP_SET_PT_BOTH (old_pt, old_pt);
+	  else
+	    TEMP_SET_PT_BOTH (Z, Z_BYTE);
+
+	  for (tail = BUF_MARKERS (current_buffer); tail; tail = tail->next)
+	    tail->charpos = tail->bytepos;
+	}
+      else
+	{
+	  /* Unibyte -> Multibyte.  */
+	  str = Fstring_to_multibyte (str);
+
+	  del_range_2 (BEG, BEG_BYTE, Z, Z_BYTE, 0);
+	  bset_enable_multibyte_characters (current_buffer, Qt);
+
+	  insert_from_string (str, 0, 0,
+			      SCHARS (str), SBYTES (str), 0);
+
+	  if (old_pt <= Z)
+	    TEMP_SET_PT_BOTH (old_pt, CHAR_TO_BYTE (old_pt));
+	  else
+	    TEMP_SET_PT_BOTH (Z, Z_BYTE);
+
+	  for (tail = BUF_MARKERS (current_buffer); tail; tail = tail->next)
+	    if (tail->bytepos > Z_BYTE)
+	      tail->bytepos = Z_BYTE;
+	}
+      goto rope_done;
+    }
+#endif
+
   if (NILP (flag))
     {
       ptrdiff_t pos, stop;
@@ -2969,6 +3045,10 @@ current buffer is cleared.  */)
       set_overlays_multibyte (true);
     }
 
+#ifdef USE_ROPE
+ rope_done:
+#endif
+
   if (!EQ (old_undo, Qt))
     {
       /* Represent all the above changes by a special undo entry.  */
@@ -3047,6 +3127,141 @@ the normal hook `change-major-mode-hook'.  */)
 
   return Qnil;
 }
+
+#ifdef USE_ROPE
+DEFUN ("buffer-using-rope-p", Fbuffer_using_rope_p,
+       Sbuffer_using_rope_p, 0, 1, 0,
+       doc: /* Return t if BUFFER is using rope storage.
+BUFFER defaults to the current buffer.  This is an experimental
+feature for testing the rope text storage implementation.  */)
+  (Lisp_Object buffer)
+{
+  struct buffer *b;
+  if (NILP (buffer))
+    b = current_buffer;
+  else
+    {
+      CHECK_BUFFER (buffer);
+      b = XBUFFER (buffer);
+    }
+
+  return b->text->using_rope ? Qt : Qnil;
+}
+
+DEFUN ("buffer-enable-rope", Fbuffer_enable_rope,
+       Sbuffer_enable_rope, 0, 1, 0,
+       doc: /* Enable rope storage for BUFFER.
+BUFFER defaults to the current buffer.  The buffer must be empty.
+This is an experimental feature for testing.
+Return t on success, nil if the buffer is not empty or already using
+rope.  */)
+  (Lisp_Object buffer)
+{
+  struct buffer *b;
+  if (NILP (buffer))
+    b = current_buffer;
+  else
+    {
+      CHECK_BUFFER (buffer);
+      b = XBUFFER (buffer);
+    }
+
+  /* Don't convert if already using rope.  */
+  if (b->text->using_rope)
+    return Qnil;
+
+  /* Buffer must be empty for now.  */
+  if (BUF_Z (b) > BUF_BEG (b))
+    error ("Cannot enable rope on non-empty buffer");
+
+  /* Create an empty rope.  */
+  buffer_create_rope (b, NULL, 0);
+
+  return b->text->using_rope ? Qt : Qnil;
+}
+
+DEFUN ("buffer-rope-debug", Fbuffer_rope_debug,
+       Sbuffer_rope_debug, 0, 1, 0,
+       doc: /* Print debug info about current buffer's rope.
+If INSERT-TEST is non-nil, directly test rope_insert.  */)
+  (Lisp_Object insert_test)
+{
+  if (!current_buffer->text->using_rope)
+    {
+      message ("Not using rope");
+      return Qnil;
+    }
+
+  struct Rope *r = current_buffer->text->rope;
+  if (!r)
+    {
+      message ("rope is NULL!");
+      return Qnil;
+    }
+
+  message ("rope: total_length=%zu, Z=%ld, Z_BYTE=%ld",
+	   rope_length_emacs (), (long)Z, (long)Z_BYTE);
+
+  if (!NILP (insert_test))
+    {
+      /* Direct test of rope_insert - "TEST" is ASCII so nchars == nbytes */
+      int result = rope_insert_emacs (BEG_BYTE, "TEST", 4, 4);
+      message ("rope_insert_emacs returned %d, new total_length=%zu",
+	       result, rope_length_emacs ());
+    }
+
+  /* Test rope_get_text */
+  char buf[256];
+  memset (buf, 0, sizeof (buf));
+  ptrdiff_t len = rope_length_emacs ();
+  if (len > 0 && len < 200)
+    {
+      rope_get_text_emacs (BEG_BYTE, len, buf);
+      message ("Buffer content: \"%s\"", buf);
+    }
+
+  return Qt;
+}
+
+DEFUN ("rope-enable-default", Frope_enable_default,
+       Srope_enable_default, 0, 0, "",
+       doc: /* Enable rope storage for all newly created buffers.
+This sets `use-rope-by-default' to t.  Existing buffers are
+not affected.  This is an experimental feature.  */)
+  (void)
+{
+  use_rope_by_default = true;
+  message ("Rope enabled for new buffers");
+  return Qt;
+}
+
+DEFUN ("rope-disable-default", Frope_disable_default,
+       Srope_disable_default, 0, 0, "",
+       doc: /* Disable rope storage for newly created buffers.
+This sets `use-rope-by-default' to nil.  Existing buffers are
+not affected.  New buffers will use the traditional gap buffer.  */)
+  (void)
+{
+  use_rope_by_default = false;
+  message ("Rope disabled for new buffers");
+  return Qnil;
+}
+
+DEFUN ("rope-toggle-default", Frope_toggle_default,
+       Srope_toggle_default, 0, 0, "",
+       doc: /* Toggle rope storage for newly created buffers.
+If `use-rope-by-default' is nil, enable it; otherwise disable it.
+Return t if rope is now enabled, nil otherwise.  */)
+  (void)
+{
+  use_rope_by_default = !use_rope_by_default;
+  if (use_rope_by_default)
+    message ("Rope enabled for new buffers");
+  else
+    message ("Rope disabled for new buffers");
+  return use_rope_by_default ? Qt : Qnil;
+}
+#endif /* USE_ROPE */
 
 
 /* Find all the overlays in the current buffer that overlap the range
@@ -4668,6 +4883,13 @@ free_buffer_text (struct buffer *b)
 {
   block_input ();
 
+#ifdef USE_ROPE
+  if (b->text->using_rope)
+    {
+      buffer_destroy_rope (b);
+    }
+  else
+#endif
   if (!pdumper_object_p (b->text->beg))
     {
 #if defined USE_MMAP_FOR_BUFFERS
@@ -5978,6 +6200,16 @@ If `delete-auto-save-files' is nil, any autosave deletion is inhibited.  */);
 This is the default.  If nil, auto-save file deletion is inhibited.  */);
   delete_auto_save_files = 1;
 
+#ifdef USE_ROPE
+  DEFVAR_BOOL ("use-rope-by-default", use_rope_by_default,
+	       doc: /* Non-nil means new buffers use rope storage by default.
+When non-nil, newly created buffers will use the rope data
+structure for text storage instead of the traditional gap buffer.
+This is an experimental feature for improved performance on random
+insertions and deletions in large files.  */);
+  use_rope_by_default = 0;
+#endif
+
   DEFVAR_LISP ("case-fold-search", Vcase_fold_search,
 	       doc: /* Non-nil if searches and matches should ignore case.  */);
   Vcase_fold_search = Qt;
@@ -6092,6 +6324,15 @@ There is no reason to change that value except for debugging purposes.  */);
   defsubr (&Sbuffer_swap_text);
   defsubr (&Sset_buffer_multibyte);
   defsubr (&Skill_all_local_variables);
+
+#ifdef USE_ROPE
+  defsubr (&Sbuffer_using_rope_p);
+  defsubr (&Sbuffer_enable_rope);
+  defsubr (&Sbuffer_rope_debug);
+  defsubr (&Srope_enable_default);
+  defsubr (&Srope_disable_default);
+  defsubr (&Srope_toggle_default);
+#endif
 
   defsubr (&Soverlayp);
   defsubr (&Smake_overlay);

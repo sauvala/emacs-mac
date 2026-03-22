@@ -28,6 +28,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "lisp.h"
 #include "character.h"
 #include "buffer.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
 #include "window.h"
 
 /* Record one cached position found recently by
@@ -55,6 +58,29 @@ byte_char_debug_check (struct buffer *b, ptrdiff_t charpos, ptrdiff_t bytepos)
   if (NILP (BVAR (b, enable_multibyte_characters)))
     return;
 
+#ifdef USE_ROPE
+  if (b->text->using_rope)
+    {
+      /* Count chars by iterating through contiguous rope chunks.  */
+      nchars = 0;
+      ptrdiff_t offset = BUF_BEG_BYTE (b);
+      ptrdiff_t end = bytepos;
+      struct buffer *old = current_buffer;
+      current_buffer = (struct buffer *) b;
+      while (offset < end)
+	{
+	  ptrdiff_t avail;
+	  const unsigned char *p
+	    = rope_get_contiguous_with_len_emacs (offset, &avail);
+	  if (avail > end - offset)
+	    avail = end - offset;
+	  nchars += multibyte_chars_in_text (p, avail);
+	  offset += avail;
+	}
+      current_buffer = old;
+    }
+  else
+#endif
   if (bytepos > BUF_GPT_BYTE (b))
     nchars
       = multibyte_chars_in_text (BUF_BEG_ADDR (b),
@@ -181,6 +207,11 @@ buf_charpos_to_bytepos (struct buffer *b, ptrdiff_t charpos)
      This takes care of the case where enable-multibyte-characters is nil.  */
   if (best_above == best_above_byte)
     return charpos;
+
+#ifdef USE_ROPE
+  if (b->text->using_rope)
+    return rope_buf_charpos_to_bytepos (b, charpos);
+#endif
 
   best_below = BEG;
   best_below_byte = BEG_BYTE;
@@ -334,6 +365,11 @@ buf_bytepos_to_charpos (struct buffer *b, ptrdiff_t bytepos)
      This takes care of the case where enable-multibyte-characters is nil.  */
   if (best_above == best_above_byte)
     return bytepos;
+
+#ifdef USE_ROPE
+  if (b->text->using_rope)
+    return rope_buf_bytepos_to_charpos (b, bytepos);
+#endif
 
   /* Check bytepos is not in the middle of a character. */
   eassert (bytepos >= BUF_Z_BYTE (b)

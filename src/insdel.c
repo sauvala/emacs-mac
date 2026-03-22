@@ -35,6 +35,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "treesit.h"
 #endif
 
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
+
 static void insert_from_string_1 (Lisp_Object, ptrdiff_t, ptrdiff_t, ptrdiff_t,
 				  ptrdiff_t, bool, bool);
 static void insert_from_buffer_1 (struct buffer *, ptrdiff_t, ptrdiff_t, bool);
@@ -910,40 +914,69 @@ insert_1_both (const char *string,
        or make it smaller.  */
     prepare_to_modify_buffer (PT, PT, NULL);
 
-  if (PT != GPT)
-    move_gap_both (PT, PT_BYTE);
-  if (GAP_SIZE < nbytes)
-    make_gap (nbytes - GAP_SIZE);
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      /* Tell display engine what changed (normally done by gap movement).  */
+      BUF_COMPUTE_UNCHANGED (current_buffer, PT, PT);
+
+      /* Record insertion for undo.  */
+      record_insert (PT, nchars);
+      modiff_incr (&MODIFF, nchars);
+      CHARS_MODIFF = MODIFF;
+
+      rope_insert_emacs (PT_BYTE, string, nbytes, nchars);
+
+      /* Update buffer positions.  */
+      ZV += nchars;
+      Z += nchars;
+      ZV_BYTE += nbytes;
+      Z_BYTE += nbytes;
+      /* Keep GPT at Z (no gap in rope mode).  */
+      GPT = Z;
+      GPT_BYTE = Z_BYTE;
+    }
+  else
+#endif
+    {
+      if (PT != GPT)
+	move_gap_both (PT, PT_BYTE);
+      if (GAP_SIZE < nbytes)
+	make_gap (nbytes - GAP_SIZE);
 
 #ifdef BYTE_COMBINING_DEBUG
-  if (count_combining_before (string, nbytes, PT, PT_BYTE)
-      || count_combining_after (string, nbytes, PT, PT_BYTE))
-    emacs_abort ();
+      if (count_combining_before (string, nbytes, PT, PT_BYTE)
+	  || count_combining_after (string, nbytes, PT, PT_BYTE))
+	emacs_abort ();
 #endif
 
-  /* Record deletion of the surrounding text that combines with
-     the insertion.  This, together with recording the insertion,
-     will add up to the right stuff in the undo list.  */
-  record_insert (PT, nchars);
-  modiff_incr (&MODIFF, nchars);
-  CHARS_MODIFF = MODIFF;
+      /* Record deletion of the surrounding text that combines with
+	 the insertion.  This, together with recording the insertion,
+	 will add up to the right stuff in the undo list.  */
+      record_insert (PT, nchars);
+      modiff_incr (&MODIFF, nchars);
+      CHARS_MODIFF = MODIFF;
 
-  memcpy (GPT_ADDR, string, nbytes);
+      memcpy (GPT_ADDR, string, nbytes);
 
-  GAP_SIZE -= nbytes;
-  GPT += nchars;
-  ZV += nchars;
-  Z += nchars;
-  GPT_BYTE += nbytes;
-  ZV_BYTE += nbytes;
-  Z_BYTE += nbytes;
-  if (GAP_SIZE > 0) *(GPT_ADDR) = 0; /* Put an anchor.  */
+      GAP_SIZE -= nbytes;
+      GPT += nchars;
+      ZV += nchars;
+      Z += nchars;
+      GPT_BYTE += nbytes;
+      ZV_BYTE += nbytes;
+      Z_BYTE += nbytes;
+      if (GAP_SIZE > 0) *(GPT_ADDR) = 0; /* Put an anchor.  */
+    }
 
   eassert (GPT <= GPT_BYTE);
 
   /* The insert may have been in the unchanged region, so check again.  */
-  if (Z - GPT < END_UNCHANGED)
-    END_UNCHANGED = Z - GPT;
+#ifdef USE_ROPE
+  if (!current_buffer->text->using_rope)
+#endif
+    if (Z - GPT < END_UNCHANGED)
+      END_UNCHANGED = Z - GPT;
 
   adjust_markers_for_insert (PT, PT_BYTE,
 			     PT + nchars, PT_BYTE + nbytes,
@@ -1043,46 +1076,105 @@ insert_from_string_1 (Lisp_Object string, ptrdiff_t pos, ptrdiff_t pos_byte,
      or make it smaller.  */
   prepare_to_modify_buffer (PT, PT, NULL);
 
-  if (PT != GPT)
-    move_gap_both (PT, PT_BYTE);
-  if (GAP_SIZE < outgoing_nbytes)
-    make_gap (outgoing_nbytes - GAP_SIZE);
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      /* Tell display engine what changed (normally done by gap movement).  */
+      BUF_COMPUTE_UNCHANGED (current_buffer, PT, PT);
 
-  /* Copy the string text into the buffer, perhaps converting
-     between single-byte and multibyte.  */
-  copy_text (SDATA (string) + pos_byte, GPT_ADDR, nbytes,
-	     STRING_MULTIBYTE (string),
-	     ! NILP (BVAR (current_buffer, enable_multibyte_characters)));
+      /* Rope path: handle multibyte conversion.  */
+      const char *insert_data;
+      ptrdiff_t insert_bytes;
+      char *temp_buffer = NULL;
+
+      bool buf_multibyte = !NILP (BVAR (current_buffer, enable_multibyte_characters));
+      bool str_multibyte = STRING_MULTIBYTE (string);
+
+      if (buf_multibyte == str_multibyte)
+	{
+	  insert_data = (const char *) SDATA (string) + pos_byte;
+	  insert_bytes = nbytes;
+	}
+      else if (buf_multibyte && !str_multibyte)
+	{
+	  /* Convert unibyte string to multibyte.  */
+	  temp_buffer = xmalloc (outgoing_nbytes);
+	  copy_text (SDATA (string) + pos_byte, (unsigned char *) temp_buffer,
+		     nbytes, 0, 1);
+	  insert_data = temp_buffer;
+	  insert_bytes = outgoing_nbytes;
+	}
+      else
+	{
+	  /* Multibyte string to unibyte buffer.  */
+	  insert_data = (const char *) SDATA (string) + pos_byte;
+	  insert_bytes = nchars;
+	}
+
+      record_insert (PT, nchars);
+      modiff_incr (&MODIFF, nchars);
+      CHARS_MODIFF = MODIFF;
+
+      rope_insert_emacs (PT_BYTE, insert_data, insert_bytes, nchars);
+
+      if (temp_buffer)
+	xfree (temp_buffer);
+
+      /* Update buffer positions.  */
+      ZV += nchars;
+      Z += nchars;
+      ZV_BYTE += outgoing_nbytes;
+      Z_BYTE += outgoing_nbytes;
+      GPT = Z;
+      GPT_BYTE = Z_BYTE;
+    }
+  else
+#endif
+    {
+      if (PT != GPT)
+	move_gap_both (PT, PT_BYTE);
+      if (GAP_SIZE < outgoing_nbytes)
+	make_gap (outgoing_nbytes - GAP_SIZE);
+
+      /* Copy the string text into the buffer, perhaps converting
+	 between single-byte and multibyte.  */
+      copy_text (SDATA (string) + pos_byte, GPT_ADDR, nbytes,
+		 STRING_MULTIBYTE (string),
+		 ! NILP (BVAR (current_buffer, enable_multibyte_characters)));
 
 #ifdef BYTE_COMBINING_DEBUG
-  /* We have copied text into the gap, but we have not altered
-     PT or PT_BYTE yet.  So we can pass PT and PT_BYTE
-     to these functions and get the same results as we would
-     have got earlier on.  Meanwhile, PT_ADDR does point to
-     the text that has been stored by copy_text.  */
-  if (count_combining_before (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE)
-      || count_combining_after (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE))
-    emacs_abort ();
+      /* We have copied text into the gap, but we have not altered
+	 PT or PT_BYTE yet.  So we can pass PT and PT_BYTE
+	 to these functions and get the same results as we would
+	 have got earlier on.  Meanwhile, PT_ADDR does point to
+	 the text that has been stored by copy_text.  */
+      if (count_combining_before (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE)
+	  || count_combining_after (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE))
+	emacs_abort ();
 #endif
 
-  record_insert (PT, nchars);
-  modiff_incr (&MODIFF, nchars);
-  CHARS_MODIFF = MODIFF;
+      record_insert (PT, nchars);
+      modiff_incr (&MODIFF, nchars);
+      CHARS_MODIFF = MODIFF;
 
-  GAP_SIZE -= outgoing_nbytes;
-  GPT += nchars;
-  ZV += nchars;
-  Z += nchars;
-  GPT_BYTE += outgoing_nbytes;
-  ZV_BYTE += outgoing_nbytes;
-  Z_BYTE += outgoing_nbytes;
-  if (GAP_SIZE > 0) *(GPT_ADDR) = 0; /* Put an anchor.  */
+      GAP_SIZE -= outgoing_nbytes;
+      GPT += nchars;
+      ZV += nchars;
+      Z += nchars;
+      GPT_BYTE += outgoing_nbytes;
+      ZV_BYTE += outgoing_nbytes;
+      Z_BYTE += outgoing_nbytes;
+      if (GAP_SIZE > 0) *(GPT_ADDR) = 0; /* Put an anchor.  */
+    }
 
   eassert (GPT <= GPT_BYTE);
 
   /* The insert may have been in the unchanged region, so check again.  */
-  if (Z - GPT < END_UNCHANGED)
-    END_UNCHANGED = Z - GPT;
+#ifdef USE_ROPE
+  if (!current_buffer->text->using_rope)
+#endif
+    if (Z - GPT < END_UNCHANGED)
+      END_UNCHANGED = Z - GPT;
 
   adjust_markers_for_insert (PT, PT_BYTE, PT + nchars,
 			     PT_BYTE + outgoing_nbytes,
@@ -1258,28 +1350,44 @@ insert_from_buffer_1 (struct buffer *buf,
     outgoing_nbytes = nchars;
   else if (NILP (BVAR (buf, enable_multibyte_characters)))
     {
-      ptrdiff_t outgoing_before_gap = 0;
-      ptrdiff_t outgoing_after_gap = 0;
-
-      if (from < BUF_GPT (buf))
+#ifdef USE_ROPE
+      if (buf->text->using_rope)
 	{
-	  chunk =  BUF_GPT_BYTE (buf) - from_byte;
-	  if (chunk > incoming_nbytes)
-	    chunk = incoming_nbytes;
-	  outgoing_before_gap
-	    = count_size_as_multibyte (BUF_BYTE_ADDRESS (buf, from_byte),
-				       chunk);
+	  /* Rope source: extract contiguous text for size computation.  */
+	  unsigned char *tmp = xmalloc (incoming_nbytes);
+	  struct buffer *old = current_buffer;
+	  current_buffer = buf;
+	  rope_get_text_emacs (from_byte, incoming_nbytes, (char *) tmp);
+	  current_buffer = old;
+	  outgoing_nbytes = count_size_as_multibyte (tmp, incoming_nbytes);
+	  xfree (tmp);
 	}
       else
-	chunk = 0;
+#endif
+	{
+	  ptrdiff_t outgoing_before_gap = 0;
+	  ptrdiff_t outgoing_after_gap = 0;
 
-      if (chunk < incoming_nbytes)
-	outgoing_after_gap
-	  = count_size_as_multibyte (BUF_BYTE_ADDRESS (buf,
-						       from_byte + chunk),
-				     incoming_nbytes - chunk);
+	  if (from < BUF_GPT (buf))
+	    {
+	      chunk =  BUF_GPT_BYTE (buf) - from_byte;
+	      if (chunk > incoming_nbytes)
+		chunk = incoming_nbytes;
+	      outgoing_before_gap
+		= count_size_as_multibyte (BUF_BYTE_ADDRESS (buf, from_byte),
+					   chunk);
+	    }
+	  else
+	    chunk = 0;
 
-      outgoing_nbytes = outgoing_before_gap + outgoing_after_gap;
+	  if (chunk < incoming_nbytes)
+	    outgoing_after_gap
+	      = count_size_as_multibyte (BUF_BYTE_ADDRESS (buf,
+							   from_byte + chunk),
+					 incoming_nbytes - chunk);
+
+	  outgoing_nbytes = outgoing_before_gap + outgoing_after_gap;
+	}
     }
 
   /* Do this before moving and increasing the gap,
@@ -1287,62 +1395,151 @@ insert_from_buffer_1 (struct buffer *buf,
      or make it smaller.  */
   prepare_to_modify_buffer (PT, PT, NULL);
 
-  if (PT != GPT)
-    move_gap_both (PT, PT_BYTE);
-  if (GAP_SIZE < outgoing_nbytes)
-    make_gap (outgoing_nbytes - GAP_SIZE);
-
-  if (from < BUF_GPT (buf))
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
     {
-      chunk = BUF_GPT_BYTE (buf) - from_byte;
-      if (chunk > incoming_nbytes)
-	chunk = incoming_nbytes;
-      /* Record number of output bytes, so we know where
-	 to put the output from the second copy_text.  */
-      chunk_expanded
-	= copy_text (BUF_BYTE_ADDRESS (buf, from_byte),
-		     GPT_ADDR, chunk,
-		     ! NILP (BVAR (buf, enable_multibyte_characters)),
-		     ! NILP (BVAR (current_buffer, enable_multibyte_characters)));
+      /* Tell display engine what changed (normally done by gap movement).  */
+      BUF_COMPUTE_UNCHANGED (current_buffer, PT, PT);
+
+      /* Extract source text into a temporary buffer, handling
+	 multibyte conversion if needed.  */
+      char *tmp = xmalloc (outgoing_nbytes);
+      bool src_multibyte = !NILP (BVAR (buf, enable_multibyte_characters));
+      bool dst_multibyte = !NILP (BVAR (current_buffer,
+				enable_multibyte_characters));
+
+      if (src_multibyte == dst_multibyte)
+	{
+	  /* No conversion needed.  Extract directly from source.  */
+	  struct buffer *old = current_buffer;
+	  current_buffer = buf;
+	  if (buf->text->using_rope)
+	    rope_get_text_emacs (from_byte, incoming_nbytes, tmp);
+	  else
+	    {
+	      /* Source uses gap buffer.  Copy around the gap.  */
+	      if (from_byte < BUF_GPT_BYTE (buf)
+		  && BUF_GPT_BYTE (buf) < from_byte + incoming_nbytes)
+		{
+		  ptrdiff_t before = BUF_GPT_BYTE (buf) - from_byte;
+		  memcpy (tmp, BUF_BYTE_ADDRESS (buf, from_byte), before);
+		  memcpy (tmp + before,
+			  BUF_BYTE_ADDRESS (buf, BUF_GPT_BYTE (buf)),
+			  incoming_nbytes - before);
+		}
+	      else
+		memcpy (tmp, BUF_BYTE_ADDRESS (buf, from_byte),
+			incoming_nbytes);
+	    }
+	  current_buffer = old;
+	}
+      else
+	{
+	  /* Need multibyte conversion.  */
+	  char *src_tmp = xmalloc (incoming_nbytes);
+	  struct buffer *old = current_buffer;
+	  current_buffer = buf;
+	  if (buf->text->using_rope)
+	    rope_get_text_emacs (from_byte, incoming_nbytes, src_tmp);
+	  else
+	    {
+	      if (from_byte < BUF_GPT_BYTE (buf)
+		  && BUF_GPT_BYTE (buf) < from_byte + incoming_nbytes)
+		{
+		  ptrdiff_t before = BUF_GPT_BYTE (buf) - from_byte;
+		  memcpy (src_tmp, BUF_BYTE_ADDRESS (buf, from_byte),
+			  before);
+		  memcpy (src_tmp + before,
+			  BUF_BYTE_ADDRESS (buf, BUF_GPT_BYTE (buf)),
+			  incoming_nbytes - before);
+		}
+	      else
+		memcpy (src_tmp, BUF_BYTE_ADDRESS (buf, from_byte),
+			incoming_nbytes);
+	    }
+	  current_buffer = old;
+	  copy_text ((unsigned char *) src_tmp, (unsigned char *) tmp,
+		     incoming_nbytes, src_multibyte, dst_multibyte);
+	  xfree (src_tmp);
+	}
+
+      record_insert (PT, nchars);
+      modiff_incr (&MODIFF, nchars);
+      CHARS_MODIFF = MODIFF;
+
+      rope_insert_emacs (PT_BYTE, tmp, outgoing_nbytes, nchars);
+      xfree (tmp);
+
+      ZV += nchars;
+      Z += nchars;
+      ZV_BYTE += outgoing_nbytes;
+      Z_BYTE += outgoing_nbytes;
+      GPT = Z;
+      GPT_BYTE = Z_BYTE;
     }
   else
-    chunk_expanded = chunk = 0;
+#endif
+    {
+      if (PT != GPT)
+	move_gap_both (PT, PT_BYTE);
+      if (GAP_SIZE < outgoing_nbytes)
+	make_gap (outgoing_nbytes - GAP_SIZE);
 
-  if (chunk < incoming_nbytes)
-    copy_text (BUF_BYTE_ADDRESS (buf, from_byte + chunk),
-	       GPT_ADDR + chunk_expanded, incoming_nbytes - chunk,
-	       ! NILP (BVAR (buf, enable_multibyte_characters)),
-	       ! NILP (BVAR (current_buffer, enable_multibyte_characters)));
+      if (from < BUF_GPT (buf))
+	{
+	  chunk = BUF_GPT_BYTE (buf) - from_byte;
+	  if (chunk > incoming_nbytes)
+	    chunk = incoming_nbytes;
+	  /* Record number of output bytes, so we know where
+	     to put the output from the second copy_text.  */
+	  chunk_expanded
+	    = copy_text (BUF_BYTE_ADDRESS (buf, from_byte),
+			 GPT_ADDR, chunk,
+			 ! NILP (BVAR (buf, enable_multibyte_characters)),
+			 ! NILP (BVAR (current_buffer, enable_multibyte_characters)));
+	}
+      else
+	chunk_expanded = chunk = 0;
+
+      if (chunk < incoming_nbytes)
+	copy_text (BUF_BYTE_ADDRESS (buf, from_byte + chunk),
+		   GPT_ADDR + chunk_expanded, incoming_nbytes - chunk,
+		   ! NILP (BVAR (buf, enable_multibyte_characters)),
+		   ! NILP (BVAR (current_buffer, enable_multibyte_characters)));
 
 #ifdef BYTE_COMBINING_DEBUG
-  /* We have copied text into the gap, but we have not altered
-     PT or PT_BYTE yet.  So we can pass PT and PT_BYTE
-     to these functions and get the same results as we would
-     have got earlier on.  Meanwhile, GPT_ADDR does point to
-     the text that has been stored by copy_text.  */
-  if (count_combining_before (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE)
-      || count_combining_after (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE))
-    emacs_abort ();
+      /* We have copied text into the gap, but we have not altered
+	 PT or PT_BYTE yet.  So we can pass PT and PT_BYTE
+	 to these functions and get the same results as we would
+	 have got earlier on.  Meanwhile, GPT_ADDR does point to
+	 the text that has been stored by copy_text.  */
+      if (count_combining_before (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE)
+	  || count_combining_after (GPT_ADDR, outgoing_nbytes, PT, PT_BYTE))
+	emacs_abort ();
 #endif
 
-  record_insert (PT, nchars);
-  modiff_incr (&MODIFF, nchars);
-  CHARS_MODIFF = MODIFF;
+      record_insert (PT, nchars);
+      modiff_incr (&MODIFF, nchars);
+      CHARS_MODIFF = MODIFF;
 
-  GAP_SIZE -= outgoing_nbytes;
-  GPT += nchars;
-  ZV += nchars;
-  Z += nchars;
-  GPT_BYTE += outgoing_nbytes;
-  ZV_BYTE += outgoing_nbytes;
-  Z_BYTE += outgoing_nbytes;
-  if (GAP_SIZE > 0) *(GPT_ADDR) = 0; /* Put an anchor.  */
+      GAP_SIZE -= outgoing_nbytes;
+      GPT += nchars;
+      ZV += nchars;
+      Z += nchars;
+      GPT_BYTE += outgoing_nbytes;
+      ZV_BYTE += outgoing_nbytes;
+      Z_BYTE += outgoing_nbytes;
+      if (GAP_SIZE > 0) *(GPT_ADDR) = 0; /* Put an anchor.  */
+    }
 
   eassert (GPT <= GPT_BYTE);
 
   /* The insert may have been in the unchanged region, so check again.  */
-  if (Z - GPT < END_UNCHANGED)
-    END_UNCHANGED = Z - GPT;
+#ifdef USE_ROPE
+  if (!current_buffer->text->using_rope)
+#endif
+    if (Z - GPT < END_UNCHANGED)
+      END_UNCHANGED = Z - GPT;
 
   adjust_markers_for_insert (PT, PT_BYTE, PT + nchars,
 			     PT_BYTE + outgoing_nbytes,
@@ -1472,6 +1669,96 @@ replace_range (ptrdiff_t from, ptrdiff_t to, Lisp_Object new,
       insbuf = NULL;
       insbeg = 0;
       inschars = SCHARS (new);
+#ifdef USE_ROPE
+      /* For rope buffers, implement replace as atomic delete + insert.  */
+      if (current_buffer->text->using_rope)
+	{
+	  ptrdiff_t nchars_del = to - from;
+	  ptrdiff_t nbytes_del, from_byte, to_byte;
+	  ptrdiff_t insbytes = SBYTES (new);
+	  Lisp_Object deletion = Qnil;
+
+	  check_markers ();
+
+	  if (run_mod_hooks)
+	    {
+	      prepare_to_modify_buffer (from, to, &from);
+	      to = from + nchars_del;
+	    }
+
+	  /* Tell display engine what changed.  */
+	  BUF_COMPUTE_UNCHANGED (current_buffer, from, to);
+
+	  if (from < BEGV)
+	    from = BEGV;
+	  if (to > ZV)
+	    to = ZV;
+
+	  from_byte = CHAR_TO_BYTE (from);
+	  to_byte = CHAR_TO_BYTE (to);
+	  nchars_del = to - from;
+	  nbytes_del = to_byte - from_byte;
+
+	  if (nbytes_del <= 0 && inschars == 0)
+	    return;
+
+	  /* Save text for undo before deleting.  */
+	  if (! EQ (BVAR (current_buffer, undo_list), Qt))
+	    deletion = make_buffer_string_both (from, from_byte,
+					to, to_byte, 1);
+
+	  /* Delete the old text.  */
+	  if (nbytes_del > 0)
+	    {
+	      rope_delete_emacs (from_byte, nbytes_del);
+	      ZV -= nchars_del;
+	      Z -= nchars_del;
+	      ZV_BYTE -= nbytes_del;
+	      Z_BYTE -= nbytes_del;
+	      GPT = Z;
+	      GPT_BYTE = Z_BYTE;
+	    }
+
+	  /* Insert the new text.  */
+	  if (inschars > 0)
+	    {
+	      rope_insert_emacs (from_byte,
+				 (const char *) SDATA (new),
+				 insbytes, inschars);
+	      ZV += inschars;
+	      Z += inschars;
+	      ZV_BYTE += insbytes;
+	      Z_BYTE += insbytes;
+	      GPT = Z;
+	      GPT_BYTE = Z_BYTE;
+	    }
+
+	  /* Record for undo.  */
+	  if (!NILP (deletion))
+	    {
+	      record_insert (from + SCHARS (deletion), inschars);
+	      record_delete (from, deletion, false);
+	    }
+
+	  /* Adjust markers.  */
+	  adjust_markers_for_replace (from, from_byte, nchars_del,
+				      nbytes_del, inschars, insbytes);
+
+	  offset_intervals (current_buffer, from, inschars - nchars_del);
+	  INTERVAL intervals = string_intervals (new);
+	  graft_intervals_into_buffer (intervals, from, inschars,
+				       current_buffer, inherit);
+
+	  if (adjust_match_data)
+	    update_search_regs (from, to, from + inschars);
+
+	  signal_after_change (from, nchars_del, inschars);
+	  update_compositions (from, from + inschars, CHECK_BORDER);
+
+	  check_markers ();
+	  return;
+	}
+#endif
     }
   else if (BUFFERP (new))
     {
@@ -1604,10 +1891,16 @@ replace_range (ptrdiff_t from, ptrdiff_t to, Lisp_Object new,
 
   eassert (GPT <= GPT_BYTE);
 
-  if (GPT - BEG < BEG_UNCHANGED)
-    BEG_UNCHANGED = GPT - BEG;
-  if (Z - GPT < END_UNCHANGED)
-    END_UNCHANGED = Z - GPT;
+#ifdef USE_ROPE
+  if (!current_buffer->text->using_rope)
+#endif
+    if (GPT - BEG < BEG_UNCHANGED)
+      BEG_UNCHANGED = GPT - BEG;
+#ifdef USE_ROPE
+  if (!current_buffer->text->using_rope)
+#endif
+    if (Z - GPT < END_UNCHANGED)
+      END_UNCHANGED = Z - GPT;
 
   if (GAP_SIZE < outgoing_insbytes)
     make_gap (outgoing_insbytes - GAP_SIZE);
@@ -1728,6 +2021,68 @@ replace_range_2 (ptrdiff_t from, ptrdiff_t from_byte,
 
   if (nbytes_del <= 0 && insbytes == 0)
     return;
+
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      /* Tell display engine what changed.  */
+      BUF_COMPUTE_UNCHANGED (current_buffer, from, to);
+
+      /* Delete old text.  */
+      if (nbytes_del > 0)
+	{
+	  rope_delete_emacs (from_byte, nbytes_del);
+	  ZV -= nchars_del;
+	  Z -= nchars_del;
+	  ZV_BYTE -= nbytes_del;
+	  Z_BYTE -= nbytes_del;
+	  GPT = Z;
+	  GPT_BYTE = Z_BYTE;
+	}
+
+      /* Insert new text.  */
+      if (insbytes > 0)
+	{
+	  rope_insert_emacs (from_byte, ins, insbytes, inschars);
+	  ZV += inschars;
+	  Z += inschars;
+	  ZV_BYTE += insbytes;
+	  Z_BYTE += insbytes;
+	  GPT = Z;
+	  GPT_BYTE = Z_BYTE;
+	}
+
+      eassert (GPT <= GPT_BYTE);
+
+      /* Adjust markers for the deletion and the insertion.  */
+      if (! (nchars_del == 1 && inschars == 1 && nbytes_del == insbytes))
+	{
+	  if (markers)
+	    adjust_markers_for_replace (from, from_byte, nchars_del,
+				       nbytes_del, inschars, insbytes);
+	  else
+	    adjust_markers_bytepos (from, from_byte, from + inschars,
+				    from_byte + insbytes, true);
+	}
+
+      offset_intervals (current_buffer, from, inschars - nchars_del);
+
+      /* Relocate point as if it were a marker.  */
+      if (from < PT && (nchars_del != inschars || nbytes_del != insbytes))
+	{
+	  if (PT < to)
+	    adjust_point (from - PT, from_byte - PT_BYTE);
+	  else
+	    adjust_point (inschars - nchars_del, insbytes - nbytes_del);
+	}
+
+      check_markers ();
+
+      modiff_incr (&MODIFF, nchars_del + inschars);
+      CHARS_MODIFF = MODIFF;
+      return;
+    }
+#endif
 
   /* Make sure the gap is somewhere in or next to what we are deleting.  */
   if (from > GPT)
@@ -2008,59 +2363,109 @@ del_range_2 (ptrdiff_t from, ptrdiff_t from_byte,
 			     BUF_TS_LINECOL_POINT (current_buffer));
 #endif
 
-  /* Make sure the gap is somewhere in or next to what we are deleting.  */
-  if (from > GPT)
-    gap_right (from, from_byte);
-  if (to < GPT)
-    gap_left (to, to_byte, 0);
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      /* Tell display engine what changed (normally done by gap movement).  */
+      BUF_COMPUTE_UNCHANGED (current_buffer, from, to);
+
+      /* Get the deleted text for undo (if needed).  */
+      if (ret_string || ! EQ (BVAR (current_buffer, undo_list), Qt))
+	deletion = make_buffer_string_both (from, from_byte, to, to_byte, 1);
+      else
+	deletion = Qnil;
+
+      /* Record marker adjustments, and text deletion into undo history.  */
+      record_delete (from, deletion, true);
+
+      /* Relocate all markers.  */
+      adjust_markers_for_delete (from, from_byte, to, to_byte);
+
+      modiff_incr (&MODIFF, nchars_del);
+      CHARS_MODIFF = MODIFF;
+
+      /* Relocate point as if it were a marker.  */
+      if (from < PT)
+	adjust_point (from - min (PT, to),
+		      from_byte - min (PT_BYTE, to_byte));
+
+      offset_intervals (current_buffer, from, - nchars_del);
+
+      /* Delete from rope.  */
+      rope_delete_emacs (from_byte, nbytes_del);
+
+      /* Update buffer positions.  */
+      ZV -= nchars_del;
+      Z -= nchars_del;
+      ZV_BYTE -= nbytes_del;
+      Z_BYTE -= nbytes_del;
+      /* Keep GPT at Z (no gap in rope mode).  */
+      GPT = Z;
+      GPT_BYTE = Z_BYTE;
+    }
+  else
+#endif
+    {
+      /* Make sure the gap is somewhere in or next to what we are deleting.  */
+      if (from > GPT)
+	gap_right (from, from_byte);
+      if (to < GPT)
+	gap_left (to, to_byte, 0);
 
 #ifdef BYTE_COMBINING_DEBUG
-  if (count_combining_before (BUF_BYTE_ADDRESS (current_buffer, to_byte),
-			      Z_BYTE - to_byte, from, from_byte))
-    emacs_abort ();
+      if (count_combining_before (BUF_BYTE_ADDRESS (current_buffer, to_byte),
+				  Z_BYTE - to_byte, from, from_byte))
+	emacs_abort ();
 #endif
 
-  if (ret_string || ! EQ (BVAR (current_buffer, undo_list), Qt))
-    deletion = make_buffer_string_both (from, from_byte, to, to_byte, 1);
-  else
-    deletion = Qnil;
+      if (ret_string || ! EQ (BVAR (current_buffer, undo_list), Qt))
+	deletion = make_buffer_string_both (from, from_byte, to, to_byte, 1);
+      else
+	deletion = Qnil;
 
-  /* Record marker adjustments, and text deletion into undo
-     history.  */
-  record_delete (from, deletion, true);
+      /* Record marker adjustments, and text deletion into undo
+	 history.  */
+      record_delete (from, deletion, true);
 
-  /* Relocate all markers pointing into the new, larger gap to point
-     at the end of the text before the gap.  */
-  adjust_markers_for_delete (from, from_byte, to, to_byte);
+      /* Relocate all markers pointing into the new, larger gap to point
+	 at the end of the text before the gap.  */
+      adjust_markers_for_delete (from, from_byte, to, to_byte);
 
-  modiff_incr (&MODIFF, nchars_del);
-  CHARS_MODIFF = MODIFF;
+      modiff_incr (&MODIFF, nchars_del);
+      CHARS_MODIFF = MODIFF;
 
-  /* Relocate point as if it were a marker.  */
-  if (from < PT)
-    adjust_point (from - min (PT, to),
-		  from_byte - min (PT_BYTE, to_byte));
+      /* Relocate point as if it were a marker.  */
+      if (from < PT)
+	adjust_point (from - min (PT, to),
+		      from_byte - min (PT_BYTE, to_byte));
 
-  offset_intervals (current_buffer, from, - nchars_del);
+      offset_intervals (current_buffer, from, - nchars_del);
 
-  GAP_SIZE += nbytes_del;
-  ZV -= nchars_del;
-  Z -= nchars_del;
-  ZV_BYTE -= nbytes_del;
-  Z_BYTE -= nbytes_del;
-  GPT = from;
-  GPT_BYTE = from_byte;
-  if (GAP_SIZE > 0 && !current_buffer->text->inhibit_shrinking)
-    /* Put an anchor, unless called from decode_coding_object which
-       needs to access the previous gap contents.  */
-    *(GPT_ADDR) = 0;
+      GAP_SIZE += nbytes_del;
+      ZV -= nchars_del;
+      Z -= nchars_del;
+      ZV_BYTE -= nbytes_del;
+      Z_BYTE -= nbytes_del;
+      GPT = from;
+      GPT_BYTE = from_byte;
+      if (GAP_SIZE > 0 && !current_buffer->text->inhibit_shrinking)
+	/* Put an anchor, unless called from decode_coding_object which
+	   needs to access the previous gap contents.  */
+	*(GPT_ADDR) = 0;
+    }
 
   eassert (GPT <= GPT_BYTE);
 
-  if (GPT - BEG < BEG_UNCHANGED)
-    BEG_UNCHANGED = GPT - BEG;
-  if (Z - GPT < END_UNCHANGED)
-    END_UNCHANGED = Z - GPT;
+#ifdef USE_ROPE
+  if (!current_buffer->text->using_rope)
+#endif
+    if (GPT - BEG < BEG_UNCHANGED)
+      BEG_UNCHANGED = GPT - BEG;
+#ifdef USE_ROPE
+  if (!current_buffer->text->using_rope)
+#endif
+    if (Z - GPT < END_UNCHANGED)
+      END_UNCHANGED = Z - GPT;
 
   check_markers ();
 
