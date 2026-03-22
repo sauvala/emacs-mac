@@ -1,0 +1,51 @@
+name: Sync GNU Emacs master
+
+on:
+  schedule:
+    # Run weekly on Mondays at 06:00 UTC
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: emacs-mac-gnu_master_exp
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add GNU remote and fetch
+        run: |
+          git remote add gnu https://git.savannah.gnu.org/git/emacs.git
+          git fetch gnu master
+
+      - name: Attempt merge
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git merge gnu/master --no-edit -m "Merge GNU Emacs master into emacs-mac-gnu_master_exp"; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push if merged
+        if: steps.merge.outputs.status == 'success'
+        run: |
+          # Only push if there are new commits from the merge
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/emacs-mac-gnu_master_exp)" ]; then
+            git push origin emacs-mac-gnu_master_exp
+          else
+            echo "Already up to date, nothing to push."
+          fi
+
+      - name: Notify on conflict
+        if: steps.merge.outputs.status == 'conflict'
+        run: |
+          echo "::warning::Merge conflict detected when merging GNU master. Manual resolution required."
+          exit 1
