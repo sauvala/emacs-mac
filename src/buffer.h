@@ -27,6 +27,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "lisp.h"
 #include "itree.h"
 
+#ifdef USE_ROPE
+/* Forward declaration for rope.  */
+struct Rope;
+#endif
+
 INLINE_HEADER_BEGIN
 
 /* Accessing the parameters of the current buffer.  */
@@ -301,6 +306,15 @@ struct buffer_text
 
     /* True if it needs to be redisplayed.  */
     bool_bf redisplay : 1;
+
+#ifdef USE_ROPE
+    /* True if this buffer uses rope instead of gap buffer.  */
+    bool_bf using_rope : 1;
+
+    /* Pointer to the rope data structure.  Only valid when
+       using_rope is true.  */
+    struct Rope *rope;
+#endif
   };
 
 /* Most code should use this macro to access Lisp fields in struct buffer.  */

@@ -571,6 +571,10 @@ AC_ARG_WITH([mac],[AS_HELP_STRING([--with-mac],
 [use GUI on macOS.
 On by default on macOS.])],[],[with_mac=maybe])
 OPTION_DEFAULT_OFF([mac-metal],[use Metal framework in application-side double buffering (experimental)])
+OPTION_DEFAULT_OFF([rope],[use rope instead of gap buffer for text storage (experimental)])
+if test "$with_rope" = yes; then
+  AC_DEFINE([USE_ROPE], [1], [Define to use rope for text storage.])
+fi
 OPTION_DEFAULT_OFF([ns],[use Nextstep (macOS Cocoa or GNUstep) windowing system.])
 OPTION_DEFAULT_OFF([w32], [use native MS Windows GUI in a Cygwin build])
 OPTION_DEFAULT_OFF([pgtk], [use GTK to support window systems other than X])
