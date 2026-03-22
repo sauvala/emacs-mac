@@ -35,6 +35,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "frame.h"
 #include "dispextern.h"
 #include "termhooks.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
 
 
 /* Emacs uses special text property `composition' to support character
@@ -1581,6 +1584,45 @@ struct position_record
     (POSITION).pos--;				\
   } while (0)
 
+#ifdef USE_ROPE
+/* Rope versions: refresh pointer via BYTE_POS_ADDR since
+   pieces are not necessarily contiguous in memory.  */
+#define FORWARD_CHAR_ROPE(POSITION)					\
+  do {									\
+    (POSITION).pos_byte += BYTES_BY_CHAR_HEAD (*((POSITION).p));	\
+    (POSITION).pos++;							\
+    (POSITION).p = BYTE_POS_ADDR ((POSITION).pos_byte);		\
+  } while (0)
+
+#define BACKWARD_CHAR_ROPE(POSITION)					\
+  do {									\
+    do {								\
+      (POSITION).pos_byte--;						\
+    } while (! CHAR_HEAD_P (FETCH_BYTE ((POSITION).pos_byte)));		\
+    (POSITION).pos--;							\
+    (POSITION).p = BYTE_POS_ADDR ((POSITION).pos_byte);		\
+  } while (0)
+
+#define FWD_CHAR(POSITION, STOP)					\
+  do {									\
+    if (use_rope)							\
+      FORWARD_CHAR_ROPE (POSITION);					\
+    else								\
+      FORWARD_CHAR (POSITION, STOP);					\
+  } while (0)
+
+#define BWD_CHAR(POSITION, STOP)					\
+  do {									\
+    if (use_rope)							\
+      BACKWARD_CHAR_ROPE (POSITION);					\
+    else								\
+      BACKWARD_CHAR (POSITION, STOP);					\
+  } while (0)
+#else
+#define FWD_CHAR(POSITION, STOP)  FORWARD_CHAR (POSITION, STOP)
+#define BWD_CHAR(POSITION, STOP)  BACKWARD_CHAR (POSITION, STOP)
+#endif
+
 /* Similar to find_composition, but find an automatic composition instead.
 
    This function looks for automatic composition at or near position
@@ -1647,6 +1689,9 @@ find_automatic_composition (ptrdiff_t pos, ptrdiff_t limit, ptrdiff_t backlim,
      looking-back count into account.  */
   ptrdiff_t fore_check_limit;
   struct position_record cur, prev;
+#ifdef USE_ROPE
+  bool use_rope = NILP (string) && current_buffer->text->using_rope;
+#endif
   int c;
   Lisp_Object window;
   struct window *w;
@@ -1736,7 +1781,7 @@ find_automatic_composition (ptrdiff_t pos, ptrdiff_t limit, ptrdiff_t backlim,
 	      do {
 		if (cur.pos <= limit)
 		  return 0;
-		BACKWARD_CHAR (cur, stop);
+		BWD_CHAR (cur, stop);
 		c = STRING_CHAR (cur.p);
 	      } while (! char_composable_p (c));
 	      fore_check_limit = cur.pos + 1;
@@ -1752,7 +1797,7 @@ find_automatic_composition (ptrdiff_t pos, ptrdiff_t limit, ptrdiff_t backlim,
       while (head < cur.pos)
 	{
 	  prev = cur;
-	  BACKWARD_CHAR (cur, stop);
+	  BWD_CHAR (cur, stop);
 	  c = STRING_CHAR (cur.p);
 	  if (! char_composable_p (c))
 	    {
@@ -1785,7 +1830,7 @@ find_automatic_composition (ptrdiff_t pos, ptrdiff_t limit, ptrdiff_t backlim,
 			  : limit <= check_pos))
 		    continue;
 		  for (check = cur; check_pos < check.pos; )
-		    BACKWARD_CHAR (check, stop);
+		    BWD_CHAR (check, stop);
 		  *gstring = autocmp_chars (elt, check.pos, check.pos_byte,
 					    tail, w, NULL, string, Qnil, c);
 		  need_adjustment = 1;
@@ -1825,7 +1870,7 @@ find_automatic_composition (ptrdiff_t pos, ptrdiff_t limit, ptrdiff_t backlim,
 	    }
 	  if (! CONSP (val))
 	    /* We found no composition here.  */
-	    FORWARD_CHAR (cur, stop);
+	    FWD_CHAR (cur, stop);
 	}
 
       if (pos < limit)		/* case (2) and (4)*/
@@ -1842,7 +1887,7 @@ find_automatic_composition (ptrdiff_t pos, ptrdiff_t limit, ptrdiff_t backlim,
 	  else
 	    cur.p = SDATA (string) + cur.pos_byte;
 	}
-      BACKWARD_CHAR (cur, stop);
+      BWD_CHAR (cur, stop);
     }
 }
 

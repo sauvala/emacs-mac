@@ -246,6 +246,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "dispextern.h"
 #include "region-cache.h"
 #include "sysstdio.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
 
 static bool bidi_initialized = 0;
 
@@ -1257,7 +1260,28 @@ bidi_char_at_pos (ptrdiff_t bytepos, const unsigned char *s, bool unibyte)
 	return *s;
     }
   else
-    s = BYTE_POS_ADDR (bytepos);
+    {
+#ifdef USE_ROPE
+      if (current_buffer->text->using_rope)
+	{
+	  /* The multibyte sequence might span two chunks.  Check
+	     available contiguous bytes and use a stack buffer if
+	     needed.  */
+	  ptrdiff_t avail
+	    = BUFFER_CEILING_OF (bytepos) - bytepos + 1;
+	  if (avail < MAX_MULTIBYTE_LENGTH)
+	    {
+	      unsigned char buf[MAX_MULTIBYTE_LENGTH];
+	      ptrdiff_t remaining
+		= min (MAX_MULTIBYTE_LENGTH, ZV_BYTE - bytepos);
+	      for (ptrdiff_t i = 0; i < remaining; i++)
+		buf[i] = FETCH_BYTE (bytepos + i);
+	      return STRING_CHAR (buf);
+	    }
+	}
+#endif
+      s = BYTE_POS_ADDR (bytepos);
+    }
   return STRING_CHAR (s);
 }
 
@@ -1392,7 +1416,27 @@ bidi_fetch_char (ptrdiff_t charpos, ptrdiff_t bytepos, ptrdiff_t *disp_pos,
       else
 	{
 	  int len;
-	  ch = string_char_and_length (BYTE_POS_ADDR (bytepos), &len);
+#ifdef USE_ROPE
+	  if (current_buffer->text->using_rope)
+	    {
+	      ptrdiff_t avail
+		= BUFFER_CEILING_OF (bytepos) - bytepos + 1;
+	      if (avail < MAX_MULTIBYTE_LENGTH)
+		{
+		  unsigned char buf[MAX_MULTIBYTE_LENGTH];
+		  ptrdiff_t remaining
+		    = min (MAX_MULTIBYTE_LENGTH, ZV_BYTE - bytepos);
+		  for (ptrdiff_t i = 0; i < remaining; i++)
+		    buf[i] = FETCH_BYTE (bytepos + i);
+		  ch = string_char_and_length (buf, &len);
+		}
+	      else
+		ch = string_char_and_length (BYTE_POS_ADDR (bytepos),
+					     &len);
+	    }
+	  else
+#endif
+	    ch = string_char_and_length (BYTE_POS_ADDR (bytepos), &len);
 	  *ch_len = len;
 	}
 

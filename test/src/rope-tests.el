@@ -185,5 +185,41 @@
       (replace-match "bird"))
     (should (string= (buffer-string) "bird dog bird"))))
 
+(ert-deftest rope-test-syntax-ppss ()
+  "Test syntax-ppss on a rope buffer with Emacs Lisp."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (emacs-lisp-mode)
+    (insert "(defun foo ()\n  \"docstring\"\n  (+ 1 2))")
+    (goto-char (point-max))
+    (let ((state (syntax-ppss)))
+      (should (= (nth 0 state) 0)))))
+
+(ert-deftest rope-test-skip-chars ()
+  "Test skip-chars-forward/backward on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "abc123def")
+    (goto-char (point-min))
+    (should (= (skip-chars-forward "a-z") 3))
+    (should (= (point) 4))
+    (should (= (skip-chars-forward "0-9") 3))
+    (should (= (point) 7))
+    (goto-char (point-max))
+    (should (= (skip-chars-backward "a-z") -3))
+    (should (= (point) 7))))
+
+(ert-deftest rope-test-skip-syntax ()
+  "Test skip-syntax-forward/backward on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "hello world")
+    (goto-char (point-min))
+    (should (= (skip-syntax-forward "w") 5))
+    (should (= (point) 6))))
+
 (provide 'rope-tests)
 ;;; rope-tests.el ends here

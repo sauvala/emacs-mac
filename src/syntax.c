@@ -27,6 +27,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "syntax.h"
 #include "intervals.h"
 #include "category.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
 
 /* Make syntax table lookup grant data in gl_state.  */
 #define SYNTAX(c) syntax_property (c, 1)
@@ -1917,6 +1920,179 @@ skip_chars (bool forwardp, Lisp_Object string, Lisp_Object lim)
 	}
     }
 
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      ptrdiff_t start_point = PT;
+      ptrdiff_t pos = PT;
+      ptrdiff_t pos_byte = PT_BYTE;
+      ptrdiff_t lim_byte = CHAR_TO_BYTE (XFIXNUM (lim));
+
+      SETUP_BUFFER_SYNTAX_TABLE ();
+      if (forwardp)
+	{
+	  if (multibyte)
+	    while (pos_byte < lim_byte)
+	      {
+		ptrdiff_t ceiling = BUFFER_CEILING_OF (pos_byte);
+		ptrdiff_t chunk_end = min (ceiling + 1, lim_byte);
+		unsigned char *p = BYTE_POS_ADDR (pos_byte);
+		unsigned char *pend = p + (chunk_end - pos_byte);
+		bool done = false;
+
+		while (p < pend)
+		  {
+		    int nbytes;
+
+		    if (pend - p < MAX_MULTIBYTE_LENGTH
+			&& chunk_end < lim_byte)
+		      {
+			unsigned char buf[MAX_MULTIBYTE_LENGTH];
+			ptrdiff_t remain
+			  = min (MAX_MULTIBYTE_LENGTH,
+				 lim_byte - pos_byte);
+			for (ptrdiff_t j = 0; j < remain; j++)
+			  buf[j] = FETCH_BYTE (pos_byte + j);
+			c = string_char_and_length (buf, &nbytes);
+		      }
+		    else
+		      c = string_char_and_length (p, &nbytes);
+
+		    if (nclasses && in_classes (c, nclasses, classes))
+		      {
+			if (negate)
+			  { done = true; break; }
+			else
+			  goto rope_fwd_ok;
+		      }
+
+		    if (! fastmap[*p])
+		      { done = true; break; }
+		    if (! ASCII_CHAR_P (c))
+		      {
+			for (i = 0; i < n_char_ranges; i += 2)
+			  if (c >= char_ranges[i] && c <= char_ranges[i + 1])
+			    break;
+			if (!(negate ^ (i < n_char_ranges)))
+			  { done = true; break; }
+		      }
+		  rope_fwd_ok:
+		    p += nbytes, pos++, pos_byte += nbytes;
+		    rarely_quit (pos);
+		  }
+		if (done)
+		  break;
+	      }
+	  else
+	    while (pos_byte < lim_byte)
+	      {
+		ptrdiff_t ceiling = BUFFER_CEILING_OF (pos_byte);
+		ptrdiff_t chunk_end = min (ceiling + 1, lim_byte);
+		unsigned char *p = BYTE_POS_ADDR (pos_byte);
+		unsigned char *pend = p + (chunk_end - pos_byte);
+		bool done = false;
+
+		while (p < pend)
+		  {
+		    if (nclasses && in_classes (*p, nclasses, classes))
+		      {
+			if (negate)
+			  { done = true; break; }
+			else
+			  goto rope_fwd_unibyte_ok;
+		      }
+
+		    if (!fastmap[*p])
+		      { done = true; break; }
+		  rope_fwd_unibyte_ok:
+		    p++, pos++, pos_byte++;
+		    rarely_quit (pos);
+		  }
+		if (done)
+		  break;
+	      }
+	}
+      else
+	{
+	  if (multibyte)
+	    while (pos_byte > lim_byte)
+	      {
+		ptrdiff_t floor = BUFFER_FLOOR_OF (pos_byte - 1);
+		ptrdiff_t chunk_start = max (floor, lim_byte);
+		unsigned char *base = BYTE_POS_ADDR (chunk_start);
+		unsigned char *p = base + (pos_byte - chunk_start);
+		bool done = false;
+
+		while (p > base)
+		  {
+		    unsigned char *prev_p = p;
+		    do
+		      p--;
+		    while (p > base && ! CHAR_HEAD_P (*p));
+
+		    c = STRING_CHAR (p);
+
+		    if (nclasses && in_classes (c, nclasses, classes))
+		      {
+			if (negate)
+			  { done = true; break; }
+			else
+			  goto rope_back_ok;
+		      }
+
+		    if (! fastmap[*p])
+		      { done = true; break; }
+		    if (! ASCII_CHAR_P (c))
+		      {
+			for (i = 0; i < n_char_ranges; i += 2)
+			  if (c >= char_ranges[i] && c <= char_ranges[i + 1])
+			    break;
+			if (!(negate ^ (i < n_char_ranges)))
+			  { done = true; break; }
+		      }
+		  rope_back_ok:
+		    pos--, pos_byte -= prev_p - p;
+		    rarely_quit (pos);
+		  }
+		if (done)
+		  break;
+	      }
+	  else
+	    while (pos_byte > lim_byte)
+	      {
+		ptrdiff_t floor = BUFFER_FLOOR_OF (pos_byte - 1);
+		ptrdiff_t chunk_start = max (floor, lim_byte);
+		unsigned char *base = BYTE_POS_ADDR (chunk_start);
+		unsigned char *p = base + (pos_byte - chunk_start);
+		bool done = false;
+
+		while (p > base)
+		  {
+		    if (nclasses && in_classes (p[-1], nclasses, classes))
+		      {
+			if (negate)
+			  { done = true; break; }
+			else
+			  goto rope_back_unibyte_ok;
+		      }
+
+		    if (!fastmap[p[-1]])
+		      { done = true; break; }
+		  rope_back_unibyte_ok:
+		    p--, pos--, pos_byte--;
+		    rarely_quit (pos);
+		  }
+		if (done)
+		  break;
+	      }
+	}
+
+      SET_PT_BOTH (pos, pos_byte);
+      SAFE_FREE ();
+      return make_fixnum (PT - start_point);
+    }
+#endif
+
   {
     ptrdiff_t start_point = PT;
     ptrdiff_t pos = PT;
@@ -2147,6 +2323,118 @@ skip_syntaxes (bool forwardp, Lisp_Object string, Lisp_Object lim)
   if (negate)
     for (i = 0; i < sizeof fastmap; i++)
       fastmap[i] ^= 1;
+
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      ptrdiff_t start_point = PT;
+      ptrdiff_t pos = PT;
+      ptrdiff_t pos_byte = PT_BYTE;
+      ptrdiff_t lim_byte = CHAR_TO_BYTE (XFIXNUM (lim));
+
+      SETUP_SYNTAX_TABLE (pos, forwardp ? 1 : -1);
+
+      if (forwardp)
+	{
+	  while (pos_byte < lim_byte)
+	    {
+	      ptrdiff_t ceiling = BUFFER_CEILING_OF (pos_byte);
+	      ptrdiff_t chunk_end = min (ceiling + 1, lim_byte);
+	      unsigned char *p = BYTE_POS_ADDR (pos_byte);
+	      unsigned char *pend = p + (chunk_end - pos_byte);
+
+	      do
+		{
+		  int nbytes;
+
+		  if (p >= pend)
+		    break;
+		  if (multibyte)
+		    {
+		      if (pend - p < MAX_MULTIBYTE_LENGTH
+			  && chunk_end < lim_byte)
+			{
+			  unsigned char buf[MAX_MULTIBYTE_LENGTH];
+			  ptrdiff_t remain
+			    = min (MAX_MULTIBYTE_LENGTH,
+				   lim_byte - pos_byte);
+			  for (ptrdiff_t j = 0; j < remain; j++)
+			    buf[j] = FETCH_BYTE (pos_byte + j);
+			  c = string_char_and_length (buf, &nbytes);
+			}
+		      else
+			c = string_char_and_length (p, &nbytes);
+		    }
+		  else
+		    c = *p, nbytes = 1;
+		  if (! fastmap[SYNTAX (c)])
+		    goto rope_done;
+		  p += nbytes, pos++, pos_byte += nbytes;
+		  rarely_quit (pos);
+		}
+	      while (!parse_sexp_lookup_properties
+		     || pos < gl_state.e_property);
+
+	      if (pos_byte < lim_byte)
+		update_syntax_table_forward (pos, false, gl_state.object);
+	    }
+	}
+      else
+	{
+	  if (multibyte)
+	    while (pos_byte > lim_byte)
+	      {
+		ptrdiff_t floor = BUFFER_FLOOR_OF (pos_byte - 1);
+		ptrdiff_t chunk_start = max (floor, lim_byte);
+		unsigned char *base = BYTE_POS_ADDR (chunk_start);
+		unsigned char *p = base + (pos_byte - chunk_start);
+		bool done = false;
+
+		while (p > base)
+		  {
+		    UPDATE_SYNTAX_TABLE_BACKWARD (pos - 1);
+
+		    unsigned char *prev_p = p;
+		    do
+		      p--;
+		    while (p > base && ! CHAR_HEAD_P (*p));
+
+		    c = STRING_CHAR (p);
+		    if (! fastmap[SYNTAX (c)])
+		      { done = true; break; }
+		    pos--, pos_byte -= prev_p - p;
+		    rarely_quit (pos);
+		  }
+		if (done)
+		  break;
+	      }
+	  else
+	    while (pos_byte > lim_byte)
+	      {
+		ptrdiff_t floor = BUFFER_FLOOR_OF (pos_byte - 1);
+		ptrdiff_t chunk_start = max (floor, lim_byte);
+		unsigned char *base = BYTE_POS_ADDR (chunk_start);
+		unsigned char *p = base + (pos_byte - chunk_start);
+		bool done = false;
+
+		while (p > base)
+		  {
+		    UPDATE_SYNTAX_TABLE_BACKWARD (pos - 1);
+		    if (! fastmap[SYNTAX (p[-1])])
+		      { done = true; break; }
+		    p--, pos--, pos_byte--;
+		    rarely_quit (pos);
+		  }
+		if (done)
+		  break;
+	      }
+	}
+
+    rope_done:
+      SET_PT_BOTH (pos, pos_byte);
+      return make_fixnum (PT - start_point);
+    }
+#endif
 
   {
     ptrdiff_t start_point = PT;
