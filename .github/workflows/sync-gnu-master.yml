@@ -24,7 +24,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: emacs-mac-gnu_master_exp
+          ref: gnu-master
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -38,7 +38,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git merge gnu/master --no-edit -m "Merge GNU Emacs master into emacs-mac-gnu_master_exp"; then
+          if git merge gnu/master --no-edit -m "Merge GNU Emacs master"; then
             echo "status=success" >> "$GITHUB_OUTPUT"
           else
             # Capture conflicting files before aborting
@@ -53,8 +53,8 @@ jobs:
       - name: Push if merged
         if: steps.merge.outputs.status == 'success'
         run: |
-          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/emacs-mac-gnu_master_exp)" ]; then
-            git push origin emacs-mac-gnu_master_exp
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/gnu-master)" ]; then
+            git push origin gnu-master
           else
             echo "Already up to date, nothing to push."
           fi
@@ -80,7 +80,7 @@ jobs:
           CONFLICTS="${{ steps.merge.outputs.conflicts }}"
 
           # Reuse existing PR or create a new one
-          EXISTING_PR=$(gh pr list --base emacs-mac-gnu_master_exp --head "$BRANCH" --json number --jq '.[0].number // empty')
+          EXISTING_PR=$(gh pr list --base gnu-master --head "$BRANCH" --json number --jq '.[0].number // empty')
           if [ -n "$EXISTING_PR" ]; then
             PR_NUMBER="$EXISTING_PR"
             gh pr comment "$PR_NUMBER" --body "$(cat <<EOF
@@ -93,7 +93,7 @@ jobs:
           )"
           else
             PR_URL=$(gh pr create \
-              --base emacs-mac-gnu_master_exp \
+              --base gnu-master \
               --head "$BRANCH" \
               --title "Sync GNU Emacs master (conflicts)" \
               --draft \
