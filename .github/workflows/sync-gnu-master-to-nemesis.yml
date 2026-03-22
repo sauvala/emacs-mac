@@ -24,7 +24,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: gnu-master
+          ref: nemesis
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -53,8 +53,8 @@ jobs:
       - name: Push if merged
         if: steps.merge.outputs.status == 'success'
         run: |
-          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/gnu-master)" ]; then
-            git push origin gnu-master
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/nemesis)" ]; then
+            git push origin nemesis
           else
             echo "Already up to date, nothing to push."
           fi
@@ -65,7 +65,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BRANCH="sync/gnu-master-$(date +%Y%m%d)"
+          BRANCH="sync/nemesis-$(date +%Y%m%d)"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           git checkout -b "$BRANCH"
 
@@ -80,7 +80,7 @@ jobs:
           CONFLICTS="${{ steps.merge.outputs.conflicts }}"
 
           # Reuse existing PR or create a new one
-          EXISTING_PR=$(gh pr list --base gnu-master --head "$BRANCH" --json number --jq '.[0].number // empty')
+          EXISTING_PR=$(gh pr list --base nemesis --head "$BRANCH" --json number --jq '.[0].number // empty')
           if [ -n "$EXISTING_PR" ]; then
             PR_NUMBER="$EXISTING_PR"
             gh pr comment "$PR_NUMBER" --body "$(cat <<EOF
@@ -93,7 +93,7 @@ jobs:
           )"
           else
             PR_URL=$(gh pr create \
-              --base gnu-master \
+              --base nemesis \
               --head "$BRANCH" \
               --title "Sync GNU Emacs master (conflicts)" \
               --draft \

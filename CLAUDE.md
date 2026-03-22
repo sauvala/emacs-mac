@@ -9,7 +9,7 @@ This is the **emacs-mac port** — a macOS-specific fork of GNU Emacs providing 
 **Key branches:**
 - `emacs-mac-30_1_exp` — main branch, tracks Emacs 30.x with mac port features
 - `emacs-mac-gnu_master_exp` — experimental, tracks GNU Emacs master (upstream)
-- `gnu-master` — automated weekly sync with GNU Emacs master via GitHub Actions
+- `nemesis` — automated weekly sync with GNU Emacs master via GitHub Actions, plus custom features
 
 ## Build Commands
 
@@ -94,4 +94,4 @@ When merging GNU master into mac port branches:
 
 ## CI/CD
 
-`.github/workflows/sync-gnu-master.yml` — weekly sync of GNU master into `gnu-master` branch. On conflict, creates a draft PR and uses Claude Code action (Opus) to auto-resolve, then merges.
+`.github/workflows/sync-gnu-master-to-nemesis.yml` — weekly sync of GNU master into `nemesis` branch. On conflict, creates a draft PR and uses Claude Code action (Opus) to auto-resolve, then merges.
