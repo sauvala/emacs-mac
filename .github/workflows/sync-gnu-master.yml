@@ -126,9 +126,10 @@ jobs:
 
       - name: Resolve conflicts with Claude
         uses: anthropics/claude-code-action@v1
+        env:
+          CLAUDE_MODEL: claude-opus-4-6
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: claude-opus-4-6
           prompt: |
             This branch has merge conflicts from merging GNU Emacs master into
             the emacs-mac port branch. The conflicting files are:
