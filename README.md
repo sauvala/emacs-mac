@@ -174,6 +174,7 @@ The `nemesis` branch tracks GNU Emacs master and adds the following on top of th
 - **Mode-line position**: New `mode-line-position` frame parameter to place the mode-line at the top or bottom of windows. Use `M-x toggle-mode-line-position` to switch.
 - **Automated GNU master sync**: Weekly GitHub Actions workflow that merges upstream GNU Emacs master, with automatic Claude-assisted conflict resolution.
 - **Scroll path optimization**: Try reusing the current glyph matrix before falling back to full window redisplay during scrolling, significantly reducing per-scroll cost for long wrapped continuation lines.
+- **Long-line bidi optimization**: Disable bidi reordering when long-line optimizations are active, preventing O(n) bidi cache degradation on large single-line files.
 
 ## Debugging
 

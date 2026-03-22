@@ -20649,7 +20649,13 @@ redisplay_window (Lisp_Object window, bool just_this_one_p)
 	  if (!found || max > threshold) break;
 	}
       if (max > threshold)
-	current_buffer->long_line_optimizations_p = true;
+	{
+	  current_buffer->long_line_optimizations_p = true;
+	  /* Disable bidi reordering to avoid O(n) bidi cache
+	     growth on every cursor movement in long lines.  */
+	  if (!NILP (BVAR (current_buffer, bidi_display_reordering)))
+	    BVAR (current_buffer, bidi_display_reordering) = Qnil;
+	}
     }
 
   /* If window-start is screwed up, choose a new one.  */
