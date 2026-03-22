@@ -286,8 +286,7 @@ void
 report_file_errno (char const *string, Lisp_Object name, int errorno)
 {
   Lisp_Object data = get_file_errno_data (string, name, errorno);
-
-  xsignal (Fcar (data), Fcdr (data));
+  xsignal (data, Qnil);
 }
 
 /* Signal a file-access failure that set errno.  STRING describes the
@@ -4520,7 +4519,7 @@ by calling `format-decode', which see.  */)
       /* Find the end position, which is end_offset if given,
 	 the file's end otherwise.  */
 
-      off_t endpos;
+      off_t endpos UNINIT;
       if (!giveup_match_end)
 	{
 	  endpos = end_offset;
