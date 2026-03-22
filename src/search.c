@@ -27,6 +27,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "lisp.h"
 #include "character.h"
 #include "buffer.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
 #include "syntax.h"
 #include "charset.h"
 #include "region-cache.h"
@@ -73,6 +76,96 @@ static EMACS_INT boyer_moore (EMACS_INT, unsigned char *, ptrdiff_t,
                               ptrdiff_t, int);
 
 Lisp_Object re_match_object;
+
+#ifdef USE_ROPE
+/* Context for temporarily linearizing a rope buffer so that regex
+   operations can work with contiguous memory.  Cleanup is registered
+   via record_unwind_protect_ptr to guarantee restore even on longjmp.  */
+struct rope_linearize_context
+{
+  struct buffer *buf;
+  unsigned char *saved_beg;
+  ptrdiff_t saved_gpt_byte;
+  ptrdiff_t saved_gap_size;
+  unsigned char *linearized;    /* malloc'd contiguous copy */
+  bool active;
+};
+
+/* Static cache to avoid repeated malloc/free in tight loops
+   (e.g., fast_looking_at called during bidi paragraph detection).  */
+static unsigned char *linearize_cache_buf = NULL;
+static ptrdiff_t linearize_cache_size = 0;
+static struct buffer *linearize_cache_owner = NULL;
+static ptrdiff_t linearize_cache_modiff = 0;
+
+static void
+rope_linearize_cleanup (void *arg)
+{
+  struct rope_linearize_context *ctx = arg;
+  if (!ctx->active)
+    return;
+  ctx->buf->text->beg = ctx->saved_beg;
+  ctx->buf->text->gpt_byte = ctx->saved_gpt_byte;
+  ctx->buf->text->gap_size = ctx->saved_gap_size;
+  ctx->buf->text->using_rope = true;
+  ctx->active = false;
+  /* Don't free linearized here — it may be the cached copy.  */
+}
+
+/* Begin linearization: copy rope content to contiguous buffer,
+   temporarily switch buffer to gap-buffer mode.  */
+static void
+rope_linearize_begin (struct rope_linearize_context *ctx)
+{
+  struct buffer *buf = current_buffer;
+  ptrdiff_t visible_bytes = ZV_BYTE - BEGV_BYTE;
+
+  ctx->buf = buf;
+  ctx->saved_beg = buf->text->beg;
+  ctx->saved_gpt_byte = buf->text->gpt_byte;
+  ctx->saved_gap_size = buf->text->gap_size;
+
+  /* Reuse cache if valid.  */
+  if (buf == linearize_cache_owner
+      && MODIFF == linearize_cache_modiff
+      && visible_bytes <= linearize_cache_size)
+    {
+      ctx->linearized = linearize_cache_buf;
+    }
+  else
+    {
+      /* Allocate new buffer (or resize cache).  */
+      if (linearize_cache_buf && visible_bytes > linearize_cache_size)
+        {
+          xfree (linearize_cache_buf);
+          linearize_cache_buf = NULL;
+        }
+      if (!linearize_cache_buf)
+        {
+          linearize_cache_buf = xmalloc (visible_bytes + 1);
+          linearize_cache_size = visible_bytes;
+        }
+      ctx->linearized = linearize_cache_buf;
+      rope_get_text_emacs (BEGV_BYTE, visible_bytes, (char *) ctx->linearized);
+      linearize_cache_owner = buf;
+      linearize_cache_modiff = MODIFF;
+    }
+
+  /* Temporarily switch to gap-buffer mode.  */
+  buf->text->beg = ctx->linearized - (BEGV_BYTE - BEG_BYTE);
+  buf->text->gpt_byte = Z_BYTE;
+  buf->text->gap_size = 0;
+  buf->text->using_rope = false;
+  ctx->active = true;
+}
+
+/* End linearization: restore rope state.  */
+static void
+rope_linearize_end (struct rope_linearize_context *ctx)
+{
+  rope_linearize_cleanup (ctx);
+}
+#endif /* USE_ROPE */
 
 static AVOID
 matcher_overflow (void)
@@ -295,23 +388,48 @@ looking_at_1 (Lisp_Object string, bool posix, bool modify_data)
   /* Get pointers and sizes of the two strings
      that make up the visible portion of the buffer. */
 
-  p1 = BEGV_ADDR;
-  s1 = GPT_BYTE - BEGV_BYTE;
-  p2 = GAP_END_ADDR;
-  s2 = ZV_BYTE - GPT_BYTE;
-  if (s1 < 0)
+  specpdl_ref count = SPECPDL_INDEX ();
+#ifdef USE_ROPE
+  struct rope_linearize_context rope_ctx;
+  if (current_buffer->text->using_rope)
     {
-      p2 = p1;
-      s2 = ZV_BYTE - BEGV_BYTE;
-      s1 = 0;
-    }
-  if (s2 < 0)
-    {
-      s1 = ZV_BYTE - BEGV_BYTE;
+      /* Linearize the visible portion for the regex engine, which
+	 assumes at most 2 contiguous regions (gap buffer model).
+	 Also adjust buffer fields so that PTR_BYTE_POS works correctly
+	 (needed for the \= / at_dot regex anchor).  */
+      ptrdiff_t visible_bytes = ZV_BYTE - BEGV_BYTE;
+      if (visible_bytes > 0)
+	{
+	  rope_linearize_begin (&rope_ctx);
+	  record_unwind_protect_ptr (rope_linearize_cleanup, &rope_ctx);
+	  p1 = rope_ctx.linearized;
+	}
+      else
+	p1 = NULL;
+      s1 = visible_bytes;
+      p2 = NULL;
       s2 = 0;
     }
+  else
+#endif
+    {
+      p1 = BEGV_ADDR;
+      s1 = GPT_BYTE - BEGV_BYTE;
+      p2 = GAP_END_ADDR;
+      s2 = ZV_BYTE - GPT_BYTE;
+      if (s1 < 0)
+	{
+	  p2 = p1;
+	  s2 = ZV_BYTE - BEGV_BYTE;
+	  s1 = 0;
+	}
+      if (s2 < 0)
+	{
+	  s1 = ZV_BYTE - BEGV_BYTE;
+	  s2 = 0;
+	}
+    }
 
-  specpdl_ref count = SPECPDL_INDEX ();
   freeze_buffer_relocation ();
   freeze_pattern (cache_entry);
   re_match_object = Qnil;
@@ -560,20 +678,69 @@ fast_looking_at (Lisp_Object regexp, ptrdiff_t pos, ptrdiff_t pos_byte,
 	limit_byte = CHAR_TO_BYTE (limit);
       pos_byte -= BEGV_BYTE;
       limit_byte -= BEGV_BYTE;
-      p1 = BEGV_ADDR;
-      s1 = GPT_BYTE - BEGV_BYTE;
-      p2 = GAP_END_ADDR;
-      s2 = ZV_BYTE - GPT_BYTE;
-      if (s1 < 0)
+#ifdef USE_ROPE
+      if (current_buffer->text->using_rope)
 	{
-	  p2 = p1;
-	  s2 = ZV_BYTE - BEGV_BYTE;
-	  s1 = 0;
-	}
-      if (s2 < 0)
-	{
-	  s1 = ZV_BYTE - BEGV_BYTE;
+	  /* Linearize visible portion for regex.  Use the static cache
+	     to avoid re-linearizing on every call — critical because
+	     bidi_find_paragraph_start calls us in a tight loop.  */
+	  ptrdiff_t visible_bytes = ZV_BYTE - BEGV_BYTE;
+	  if (visible_bytes > 0)
+	    {
+	      if (linearize_cache_owner == current_buffer
+		  && linearize_cache_modiff == MODIFF
+		  && visible_bytes <= linearize_cache_size
+		  && linearize_cache_buf)
+		{
+		  /* Cache hit — reuse linearized data.  */
+		  p1 = linearize_cache_buf;
+		}
+	      else
+		{
+		  /* Cache miss — linearize and cache.  */
+		  if (linearize_cache_buf
+		      && visible_bytes > linearize_cache_size)
+		    {
+		      xfree (linearize_cache_buf);
+		      linearize_cache_buf = NULL;
+		    }
+		  if (!linearize_cache_buf)
+		    {
+		      linearize_cache_buf = xmalloc (visible_bytes + 1);
+		      linearize_cache_size = visible_bytes;
+		    }
+		  rope_get_text_emacs (BEGV_BYTE, visible_bytes,
+				      (char *) linearize_cache_buf);
+		  linearize_cache_buf[visible_bytes] = 0;
+		  linearize_cache_owner = current_buffer;
+		  linearize_cache_modiff = MODIFF;
+		  p1 = linearize_cache_buf;
+		}
+	    }
+	  else
+	    p1 = NULL;
+	  s1 = visible_bytes;
+	  p2 = NULL;
 	  s2 = 0;
+	}
+      else
+#endif
+	{
+	  p1 = BEGV_ADDR;
+	  s1 = GPT_BYTE - BEGV_BYTE;
+	  p2 = GAP_END_ADDR;
+	  s2 = ZV_BYTE - GPT_BYTE;
+	  if (s1 < 0)
+	    {
+	      p2 = p1;
+	      s2 = ZV_BYTE - BEGV_BYTE;
+	      s1 = 0;
+	    }
+	  if (s2 < 0)
+	    {
+	      s1 = ZV_BYTE - BEGV_BYTE;
+	      s2 = 0;
+	    }
 	}
       multibyte = ! NILP (BVAR (current_buffer, enable_multibyte_characters));
     }
@@ -583,6 +750,30 @@ fast_looking_at (Lisp_Object regexp, ptrdiff_t pos, ptrdiff_t pos_byte,
   specpdl_ref count = SPECPDL_INDEX ();
   freeze_buffer_relocation ();
   freeze_pattern (cache_entry);
+#ifdef USE_ROPE
+  /* For rope: temporarily switch to gap-buffer mode so PTR_BYTE_POS
+     works correctly for the \= regex anchor.  */
+  struct rope_linearize_context rope_ctx;
+  bool rope_switched = false;
+  if (!STRINGP (string) && current_buffer->text->using_rope && p1)
+    {
+      /* p1 points to the static cache — don't free it via unwind.
+	 Just save/restore buffer fields.  */
+      rope_ctx.buf = current_buffer;
+      rope_ctx.saved_beg = current_buffer->text->beg;
+      rope_ctx.saved_gpt_byte = GPT_BYTE;
+      rope_ctx.saved_gap_size = GAP_SIZE;
+      rope_ctx.linearized = p1;
+      rope_ctx.active = true;
+      record_unwind_protect_ptr (rope_linearize_cleanup, &rope_ctx);
+      current_buffer->text->beg
+	= p1 - (BEGV_BYTE - BEG_BYTE);
+      GPT_BYTE = Z_BYTE;
+      GAP_SIZE = 0;
+      current_buffer->text->using_rope = false;
+      rope_switched = true;
+    }
+#endif
   re_match_object = STRINGP (string) ? string : Qnil;
   len = re_match_2 (&cache_entry->buf, (char *) p1, s1, (char *) p2, s2,
 		    pos_byte, NULL, limit_byte);
@@ -697,6 +888,71 @@ find_newline (ptrdiff_t start, ptrdiff_t start_byte, ptrdiff_t end,
 
   if (counted)
     *counted = count;
+
+#ifdef USE_ROPE
+  /* Fast path for rope buffers: use tree-based newline counting
+     instead of byte-by-byte scanning.  O(log n) vs O(n).  */
+  if (current_buffer->text->using_rope)
+    {
+      if (start_byte == -1)
+	start_byte = CHAR_TO_BYTE (start);
+
+      if (count > 0)
+	{
+	  ptrdiff_t available
+	    = rope_count_newlines_emacs (start_byte, end_byte);
+	  if (available < count)
+	    {
+	      if (counted)
+		*counted = available;
+	      if (bytepos)
+		*bytepos = end_byte;
+	      return end;
+	    }
+	  ptrdiff_t found_byte
+	    = rope_find_nth_newline_emacs (start_byte, count);
+	  /* Clamp to valid range.  */
+	  if (found_byte > end_byte)
+	    found_byte = end_byte;
+	  if (bytepos)
+	    *bytepos = found_byte;
+	  return BYTE_TO_CHAR (found_byte);
+	}
+      else if (count < 0)
+	{
+	  ptrdiff_t available
+	    = rope_count_newlines_emacs (end_byte, start_byte);
+	  if (available < -count)
+	    {
+	      if (counted)
+		*counted = -available;
+	      if (bytepos)
+		*bytepos = end_byte;
+	      return end;
+	    }
+	  /* The -count-th newline backward from start is the
+	     (available + count + 1)-th newline forward from end.  */
+	  ptrdiff_t target = available + count + 1;
+	  ptrdiff_t found_byte
+	    = rope_find_nth_newline_emacs (end_byte, target);
+	  /* Clamp to valid range.  */
+	  if (found_byte < end_byte)
+	    found_byte = end_byte;
+	  if (found_byte > start_byte)
+	    found_byte = start_byte;
+	  if (bytepos)
+	    *bytepos = found_byte;
+	  return BYTE_TO_CHAR (found_byte);
+	}
+      else
+	{
+	  /* count == 0: nothing to do.  */
+	  if (bytepos)
+	    *bytepos = start_byte;
+	  return start;
+	}
+    }
+#endif
 
   if (count > 0)
     while (start != end)
@@ -1179,23 +1435,49 @@ search_buffer_re (Lisp_Object string, ptrdiff_t pos, ptrdiff_t pos_byte,
   /* Get pointers and sizes of the two strings
      that make up the visible portion of the buffer. */
 
-  p1 = BEGV_ADDR;
-  s1 = GPT_BYTE - BEGV_BYTE;
-  p2 = GAP_END_ADDR;
-  s2 = ZV_BYTE - GPT_BYTE;
-  if (s1 < 0)
+  specpdl_ref count = SPECPDL_INDEX ();
+#ifdef USE_ROPE
+  /* For rope buffers, linearize the visible portion into contiguous
+     memory and temporarily switch to gap-buffer mode.  This makes
+     re_search_2 work (it assumes at most 2 contiguous regions) and
+     also makes PTR_BYTE_POS work correctly inside the regex engine
+     (needed for the \= / at_dot anchor).  */
+  struct rope_linearize_context rope_ctx;
+  if (current_buffer->text->using_rope)
     {
-      p2 = p1;
-      s2 = ZV_BYTE - BEGV_BYTE;
-      s1 = 0;
-    }
-  if (s2 < 0)
-    {
-      s1 = ZV_BYTE - BEGV_BYTE;
+      ptrdiff_t visible_bytes = ZV_BYTE - BEGV_BYTE;
+      if (visible_bytes > 0)
+	{
+	  rope_linearize_begin (&rope_ctx);
+	  record_unwind_protect_ptr (rope_linearize_cleanup, &rope_ctx);
+	  p1 = rope_ctx.linearized;
+	}
+      else
+	p1 = NULL;
+      s1 = visible_bytes;
+      p2 = NULL;
       s2 = 0;
     }
+  else
+#endif
+    {
+      p1 = BEGV_ADDR;
+      s1 = GPT_BYTE - BEGV_BYTE;
+      p2 = GAP_END_ADDR;
+      s2 = ZV_BYTE - GPT_BYTE;
+      if (s1 < 0)
+	{
+	  p2 = p1;
+	  s2 = ZV_BYTE - BEGV_BYTE;
+	  s1 = 0;
+	}
+      if (s2 < 0)
+	{
+	  s1 = ZV_BYTE - BEGV_BYTE;
+	  s2 = 0;
+	}
+    }
 
-  specpdl_ref count = SPECPDL_INDEX ();
   freeze_buffer_relocation ();
   freeze_pattern (cache_entry);
 
@@ -1484,6 +1766,53 @@ search_buffer_non_re (Lisp_Object string, ptrdiff_t pos,
 
   len_byte = pat - patbuf;
   pat = base_pat = patbuf;
+
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      /* simple_search and boyer_moore use BYTE_POS_ADDR with pointer
+	 arithmetic that assumes contiguous buffer memory.  Rope stores
+	 text in small chunks (~128 bytes), so we linearize the visible
+	 buffer portion into contiguous memory and temporarily switch to
+	 gap-buffer mode for the duration of the search.  */
+      ptrdiff_t visible_bytes = ZV_BYTE - BEGV_BYTE;
+      /* Extra byte for null sentinel, matching gap buffer's Z_ADDR.  */
+      unsigned char *linearized = xmalloc (visible_bytes + 1);
+      rope_get_text_emacs (BEGV_BYTE, visible_bytes, (char *) linearized);
+      linearized[visible_bytes] = 0;
+
+      /* Save buffer state.  */
+      unsigned char *saved_beg = current_buffer->text->beg;
+      ptrdiff_t saved_gpt = GPT;
+      ptrdiff_t saved_gpt_byte = GPT_BYTE;
+      ptrdiff_t saved_gap_size = GAP_SIZE;
+
+      /* Make buffer look like a contiguous gap buffer with no gap.  */
+      current_buffer->text->beg = linearized - (BEGV_BYTE - BEG_BYTE);
+      GPT = Z;
+      GPT_BYTE = Z_BYTE;
+      GAP_SIZE = 0;
+      current_buffer->text->using_rope = false;
+
+      EMACS_INT result
+	= (boyer_moore_ok
+	   ? boyer_moore (n, pat, len_byte, trt, inverse_trt,
+			  pos_byte, lim_byte, char_base)
+	   : simple_search (n, pat, raw_pattern_size, len_byte, trt,
+			    pos, pos_byte, lim, lim_byte));
+
+      /* Restore buffer state.  */
+      current_buffer->text->beg = saved_beg;
+      GPT = saved_gpt;
+      GPT_BYTE = saved_gpt_byte;
+      GAP_SIZE = saved_gap_size;
+      current_buffer->text->using_rope = true;
+
+      xfree (linearized);
+      SAFE_FREE ();
+      return result;
+    }
+#endif
 
   EMACS_INT result
     = (boyer_moore_ok

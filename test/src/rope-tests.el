@@ -93,5 +93,69 @@
     (set-buffer-multibyte t)
     (should (string= (buffer-string) "hello"))))
 
+(ert-deftest rope-test-search-forward ()
+  "Test search-forward on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "hello world hello")
+    (goto-char (point-min))
+    (should (search-forward "world" nil t))
+    (should (= (point) 12))))
+
+(ert-deftest rope-test-search-backward ()
+  "Test search-backward on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "hello world hello")
+    (goto-char (point-max))
+    (should (search-backward "world" nil t))
+    (should (= (point) 7))))
+
+(ert-deftest rope-test-re-search ()
+  "Test re-search-forward on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "foo123bar456")
+    (goto-char (point-min))
+    (should (re-search-forward "[0-9]+" nil t))
+    (should (string= (match-string 0) "123"))))
+
+(ert-deftest rope-test-looking-at ()
+  "Test looking-at on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "hello")
+    (goto-char (point-min))
+    (should (looking-at "hel"))
+    (should (not (looking-at "world")))))
+
+(ert-deftest rope-test-find-newline ()
+  "Test newline scanning on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "line1\nline2\nline3\n")
+    (goto-char (point-min))
+    ;; Forward search for newlines.
+    (should (search-forward "\n" nil t))
+    (should (= (point) 7))
+    ;; Count lines.
+    (should (= (count-lines (point-min) (point-max)) 3))))
+
+(ert-deftest rope-test-replace-regexp ()
+  "Test replace-regexp-in-string equivalent via re-search + replace-match."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "cat dog cat")
+    (goto-char (point-min))
+    (while (re-search-forward "cat" nil t)
+      (replace-match "bird"))
+    (should (string= (buffer-string) "bird dog bird"))))
+
 (provide 'rope-tests)
 ;;; rope-tests.el ends here
