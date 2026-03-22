@@ -107,6 +107,9 @@ static struct rlimit nofile_limit;
 #include "buffer.h"
 #include "coding.h"
 #include "process.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
 #include "frame.h"
 #include "termopts.h"
 #include "keyboard.h"
@@ -7002,6 +7005,23 @@ set up yet, this function will block until socket setup has completed.  */)
 
   start_byte = CHAR_TO_BYTE (XFIXNUM (start));
   end_byte = CHAR_TO_BYTE (XFIXNUM (end));
+
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      /* Extract region as a Lisp string so send_process uses the
+	 STRINGP path for encoding, avoiding PTR_BYTE_POS which
+	 cannot convert rope pointers.  */
+      Lisp_Object str = make_buffer_string_both (XFIXNUM (start), start_byte,
+						 XFIXNUM (end), end_byte, 0);
+
+      if (NETCONN_P (proc))
+	wait_while_connecting (proc);
+
+      send_process (proc, SSDATA (str), SBYTES (str), str);
+      return Qnil;
+    }
+#endif
 
   if (XFIXNUM (start) < GPT && XFIXNUM (end) > GPT)
     move_gap_both (XFIXNUM (start), start_byte);

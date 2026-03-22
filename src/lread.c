@@ -342,9 +342,21 @@ source_buffer_get (source_t *src)
   int c;
   if (src->multibyte)
     {
-      unsigned char *p = BUF_BYTE_ADDRESS (b, pt_byte);
       int clen;
-      c = string_char_and_length (p, &clen);
+#ifdef USE_ROPE
+      if (b->text->using_rope)
+	{
+	  struct buffer *old = current_buffer;
+	  current_buffer = b;
+	  c = rope_safe_char_and_length (pt_byte, &clen);
+	  current_buffer = old;
+	}
+      else
+#endif
+	{
+	  unsigned char *p = BUF_BYTE_ADDRESS (b, pt_byte);
+	  c = string_char_and_length (p, &clen);
+	}
       pt_byte += clen;
     }
   else
@@ -380,9 +392,21 @@ source_marker_get (source_t *src)
   int c;
   if (src->multibyte)
     {
-      unsigned char *p = BUF_BYTE_ADDRESS (b, bytepos);
       int clen;
-      c = string_char_and_length (p, &clen);
+#ifdef USE_ROPE
+      if (b->text->using_rope)
+	{
+	  struct buffer *old = current_buffer;
+	  current_buffer = b;
+	  c = rope_safe_char_and_length (bytepos, &clen);
+	  current_buffer = old;
+	}
+      else
+#endif
+	{
+	  unsigned char *p = BUF_BYTE_ADDRESS (b, bytepos);
+	  c = string_char_and_length (p, &clen);
+	}
       bytepos += clen;
     }
   else

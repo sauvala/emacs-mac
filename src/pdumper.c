@@ -32,6 +32,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "blockinput.h"
 #include "buffer.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
 #include "charset.h"
 #include "coding.h"
 #include "fingerprint.h"
@@ -3423,6 +3426,32 @@ dump_cold_buffer (struct dump_context *ctx, Lisp_Object data)
   eassert (buffer_offset > 0);
   struct buffer *b = XBUFFER (data);
   eassert (b->text == &b->own_text);
+
+#ifdef USE_ROPE
+  if (b->text->using_rope)
+    {
+      /* For rope buffers, linearize the text content.  */
+      ptrdiff_t text_bytes = BUF_Z_BYTE (b) - BUF_BEG_BYTE (b);
+      /* Allocate with +1 for the sentinel byte at end.  */
+      ptrdiff_t nbytes = text_bytes + 1;
+      if (nbytes > DUMP_OFF_MAX)
+	error ("buffer too large");
+      char *linear = xmalloc (nbytes);
+      struct buffer *old = current_buffer;
+      current_buffer = b;
+      rope_get_text_emacs (BEG_BYTE, text_bytes, linear);
+      current_buffer = old;
+      linear[text_bytes] = 0;
+      dump_remember_fixup_ptr_raw
+	(ctx,
+	 buffer_offset + dump_offsetof (struct buffer, own_text.beg),
+	 ctx->offset);
+      dump_write (ctx, linear, ptrdiff_t_to_dump_off (nbytes));
+      xfree (linear);
+      return;
+    }
+#endif
+
   /* Zero the gap so we don't dump uninitialized bytes.  */
   memset (BUF_GPT_ADDR (b), 0, BUF_GAP_SIZE (b));
   /* See buffer.c for this calculation.  */

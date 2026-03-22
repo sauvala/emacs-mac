@@ -20,6 +20,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "lisp.h"
 #include "buffer.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
 
 #ifdef HAVE_LIBXML2
 
@@ -199,16 +202,28 @@ parse_region (Lisp_Object start, Lisp_Object end, Lisp_Object base_url,
   istart_byte = CHAR_TO_BYTE (istart);
   iend_byte = CHAR_TO_BYTE (iend);
 
-  if (istart < GPT && GPT < iend)
-    move_gap_both (iend, iend_byte);
-
   if (! NILP (base_url))
     {
       CHECK_STRING (base_url);
       burl = SSDATA (base_url);
     }
 
-  buftext = BYTE_POS_ADDR (istart_byte);
+#ifdef USE_ROPE
+  char *rope_buf = NULL;
+  if (current_buffer->text->using_rope)
+    {
+      ptrdiff_t nbytes = iend_byte - istart_byte;
+      rope_buf = xmalloc (nbytes);
+      rope_get_text_emacs (istart_byte, nbytes, rope_buf);
+      buftext = (unsigned char *) rope_buf;
+    }
+  else
+#endif
+    {
+      if (istart < GPT && GPT < iend)
+	move_gap_both (iend, iend_byte);
+      buftext = BYTE_POS_ADDR (istart_byte);
+    }
 #ifdef REL_ALLOC
   /* Prevent ralloc.c from relocating the current buffer while libxml2
      functions below read its text.  */
@@ -228,6 +243,14 @@ parse_region (Lisp_Object start, Lisp_Object end, Lisp_Object base_url,
 
 #ifdef REL_ALLOC
   r_alloc_inhibit_buffer_relocation (0);
+#endif
+#ifdef USE_ROPE
+  if (rope_buf)
+    {
+      xfree (rope_buf);
+      rope_buf = NULL;
+    }
+  else
 #endif
   /* If the assertion below fails, malloc was called inside the above
      libxml2 functions, and ralloc.c caused relocation of buffer text,

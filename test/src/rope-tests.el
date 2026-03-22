@@ -250,5 +250,55 @@
             (should (string= (buffer-string) "rope output\n"))))
       (delete-file tmpfile))))
 
+(ert-deftest rope-test-upcase-region ()
+  "Test upcase-region on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "hello")
+    (upcase-region (point-min) (point-max))
+    (should (string= (buffer-string) "HELLO"))))
+
+(ert-deftest rope-test-downcase-region ()
+  "Test downcase-region on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "HELLO WORLD")
+    (downcase-region (point-min) (point-max))
+    (should (string= (buffer-string) "hello world"))))
+
+(ert-deftest rope-test-buffer-hash ()
+  "Test buffer-hash on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "test content")
+    (should (stringp (buffer-hash)))))
+
+(ert-deftest rope-test-buffer-hash-consistency ()
+  "Test that buffer-hash gives the same result for rope and gap buffers."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (let ((text "The quick brown fox jumps over the lazy dog.\n")
+        hash-gap hash-rope)
+    (with-temp-buffer
+      (insert text)
+      (setq hash-gap (buffer-hash)))
+    (with-temp-buffer
+      (buffer-enable-rope)
+      (insert text)
+      (setq hash-rope (buffer-hash)))
+    (should (string= hash-gap hash-rope))))
+
+(ert-deftest rope-test-buffer-line-statistics ()
+  "Test buffer-line-statistics on a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "line1\nline2\nline3\n")
+    (let ((stats (buffer-line-statistics)))
+      ;; Should have 3 lines (3 newlines).
+      (should (= (car stats) 3)))))
+
 (provide 'rope-tests)
 ;;; rope-tests.el ends here

@@ -36,6 +36,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "intervals.h"
 #include "window.h"
 #include "gnutls.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#include "rope.h"
+#endif
 
 #ifdef HAVE_TREE_SITTER
 #include "treesit.h"
@@ -6469,17 +6473,36 @@ It should not be used for anything security-related.  See
   b = XBUFFER (buffer);
   sha1_init_ctx (&ctx);
 
-  /* Process the first part of the buffer. */
-  sha1_process_bytes (BUF_BEG_ADDR (b),
-		      BUF_GPT_BYTE (b) - BUF_BEG_BYTE (b),
-		      &ctx);
+#ifdef USE_ROPE
+  if (b->text->using_rope && b->text->rope)
+    {
+      size_t offset = 0;
+      size_t total = rope_byte_len (b->text->rope);
+      while (offset < total)
+	{
+	  size_t avail;
+	  const unsigned char *data
+	    = (const unsigned char *) rope_get_contiguous (b->text->rope,
+							  offset, &avail);
+	  sha1_process_bytes (data, avail, &ctx);
+	  offset += avail;
+	}
+    }
+  else
+#endif
+    {
+      /* Process the first part of the buffer. */
+      sha1_process_bytes (BUF_BEG_ADDR (b),
+			  BUF_GPT_BYTE (b) - BUF_BEG_BYTE (b),
+			  &ctx);
 
-  /* If the gap is before the end of the buffer, process the last half
-     of the buffer. */
-  if (BUF_GPT_BYTE (b) < BUF_Z_BYTE (b))
-    sha1_process_bytes (BUF_GAP_END_ADDR (b),
-			BUF_Z_ADDR (b) - BUF_GAP_END_ADDR (b),
-			&ctx);
+      /* If the gap is before the end of the buffer, process the last half
+	 of the buffer. */
+      if (BUF_GPT_BYTE (b) < BUF_Z_BYTE (b))
+	sha1_process_bytes (BUF_GAP_END_ADDR (b),
+			    BUF_Z_ADDR (b) - BUF_GAP_END_ADDR (b),
+			    &ctx);
+    }
 
   Lisp_Object digest = make_uninit_string (SHA1_DIGEST_SIZE * 2);
   sha1_finish_ctx (&ctx, SSDATA (digest));
@@ -6509,62 +6532,111 @@ characters.  */ )
 
   b = XBUFFER (buffer);
 
-  unsigned char *start = BUF_BEG_ADDR (b);
-  ptrdiff_t area = BUF_GPT_BYTE (b) - BUF_BEG_BYTE (b), pre_gap = 0;
-
-  /* Process the first part of the buffer. */
-  while (area > 0)
+#ifdef USE_ROPE
+  if (b->text->using_rope && b->text->rope)
     {
-      unsigned char *n = memchr (start, '\n', area);
+      size_t offset = 0;
+      size_t total = rope_byte_len (b->text->rope);
+      ptrdiff_t pre_piece = 0;
 
-      if (n)
+      while (offset < total)
 	{
-	  ptrdiff_t this_line = n - start;
-	  if (this_line > longest)
-	    longest = this_line;
-	  lines++;
-	  /* Blame Knuth. */
-	  mean = mean + (this_line - mean) / lines;
-	  area = area - this_line - 1;
-	  start += this_line + 1;
+	  size_t avail;
+	  const unsigned char *start
+	    = (const unsigned char *) rope_get_contiguous (b->text->rope,
+							  offset, &avail);
+	  ptrdiff_t area = (ptrdiff_t) avail;
+
+	  while (area > 0)
+	    {
+	      unsigned char *n = memchr (start, '\n', area);
+	      if (n)
+		{
+		  ptrdiff_t this_line = n - start + pre_piece;
+		  if (this_line > longest)
+		    longest = this_line;
+		  lines++;
+		  mean = mean + (this_line - mean) / lines;
+		  area = area - (n - start) - 1;
+		  start = n + 1;
+		  pre_piece = 0;
+		}
+	      else
+		{
+		  pre_piece += area;
+		  area = 0;
+		}
+	    }
+	  offset += avail;
 	}
-      else
+      if (pre_piece > 0)
 	{
-	  /* Didn't have a newline here, so save the rest for the
-	     post-gap calculation. */
-	  pre_gap = area;
-	  area = 0;
+	  if (pre_piece > longest)
+	    longest = pre_piece;
+	  lines++;
+	  mean = mean + (pre_piece - mean) / lines;
 	}
     }
-
-  /* If the gap is before the end of the buffer, process the last half
-     of the buffer. */
-  if (BUF_GPT_BYTE (b) < BUF_Z_BYTE (b))
+  else
+#endif
     {
-      start = BUF_GAP_END_ADDR (b);
-      area = BUF_Z_ADDR (b) - BUF_GAP_END_ADDR (b);
+      unsigned char *start = BUF_BEG_ADDR (b);
+      ptrdiff_t area = BUF_GPT_BYTE (b) - BUF_BEG_BYTE (b), pre_gap = 0;
 
+      /* Process the first part of the buffer. */
       while (area > 0)
 	{
 	  unsigned char *n = memchr (start, '\n', area);
-	  ptrdiff_t this_line = n? n - start + pre_gap: area + pre_gap;
 
-	  if (this_line > longest)
-	    longest = this_line;
-	  lines++;
-	  /* Blame Knuth again. */
-	  mean = mean + (this_line - mean) / lines;
-	  area = area - this_line - 1;
-	  start += this_line + 1;
-	  pre_gap = 0;
+	  if (n)
+	    {
+	      ptrdiff_t this_line = n - start;
+	      if (this_line > longest)
+		longest = this_line;
+	      lines++;
+	      /* Blame Knuth. */
+	      mean = mean + (this_line - mean) / lines;
+	      area = area - this_line - 1;
+	      start += this_line + 1;
+	    }
+	  else
+	    {
+	      /* Didn't have a newline here, so save the rest for the
+		 post-gap calculation. */
+	      pre_gap = area;
+	      area = 0;
+	    }
 	}
-    }
-  else if (pre_gap > 0)
-    {
-      if (pre_gap > longest)
-	longest = pre_gap;
-      lines++;
-      mean = mean + (pre_gap - mean) / lines;
+
+      /* If the gap is before the end of the buffer, process the last half
+	 of the buffer. */
+      if (BUF_GPT_BYTE (b) < BUF_Z_BYTE (b))
+	{
+	  start = BUF_GAP_END_ADDR (b);
+	  area = BUF_Z_ADDR (b) - BUF_GAP_END_ADDR (b);
+
+	  while (area > 0)
+	    {
+	      unsigned char *n = memchr (start, '\n', area);
+	      ptrdiff_t this_line = n? n - start + pre_gap: area + pre_gap;
+
+	      if (this_line > longest)
+		longest = this_line;
+	      lines++;
+	      /* Blame Knuth again. */
+	      mean = mean + (this_line - mean) / lines;
+	      area = area - this_line - 1;
+	      start += this_line + 1;
+	      pre_gap = 0;
+	    }
+	}
+      else if (pre_gap > 0)
+	{
+	  if (pre_gap > longest)
+	    longest = pre_gap;
+	  lines++;
+	  mean = mean + (pre_gap - mean) / lines;
+	}
     }
 
   return list3 (make_int (lines), make_int (longest), make_float (mean));
@@ -6730,6 +6802,10 @@ from the absolute start of the buffer, disregarding the narrowing.  */)
     args_out_of_range_3 (make_int (BYTE_TO_CHAR (pos_byte)),
 			 make_int (BEG), make_int (Z));
 
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope && start_byte == BEG_BYTE)
+    return make_int ((ptrdiff_t) rope_offset_to_point_emacs (pos_byte).row + 1);
+#endif
   return make_int (count_lines (start_byte, pos_byte) + 1);
 }
 

@@ -28,6 +28,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "lisp.h"
 #include "buffer.h"
 #include "coding.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
 
 enum json_object_type
   {
@@ -642,20 +645,30 @@ usage: (json-insert OBJECT &rest ARGS)  */)
   json_serialize (&jo, args[0], nargs - 1, args + 1);
 
   prepare_to_modify_buffer (PT, PT, NULL);
-  move_gap_both (PT, PT_BYTE);
-  if (GAP_SIZE < jo.size)
-    make_gap (jo.size - GAP_SIZE);
-  memcpy (GPT_ADDR, jo.buf, jo.size);
-
-  /* No need to keep allocation beyond this point.  */
-  unbind_to (count, Qnil);
 
   bool ub_buffer = NILP (BVAR (current_buffer, enable_multibyte_characters));
   ptrdiff_t inserted_bytes = jo.size;
   ptrdiff_t inserted = ub_buffer ? jo.size : jo.size - jo.chars_delta;
   eassert (inserted > 0);
 
-  insert_from_gap_1 (inserted, inserted_bytes, false);
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      insert_1_both ((char *) jo.buf, inserted, inserted_bytes, 0, 1, 0);
+      /* No need to keep allocation beyond this point.  */
+      unbind_to (count, Qnil);
+    }
+  else
+#endif
+    {
+      move_gap_both (PT, PT_BYTE);
+      if (GAP_SIZE < jo.size)
+	make_gap (jo.size - GAP_SIZE);
+      memcpy (GPT_ADDR, jo.buf, jo.size);
+      /* No need to keep allocation beyond this point.  */
+      unbind_to (count, Qnil);
+      insert_from_gap_1 (inserted, inserted_bytes, false);
+    }
   invalidate_buffer_caches (current_buffer, PT, PT + inserted);
   adjust_after_insert (PT, PT_BYTE, PT + inserted, PT_BYTE + inserted_bytes,
 		       inserted);
@@ -1752,6 +1765,24 @@ buffer_byte_to_pos (Lisp_Object obj, ptrdiff_t byte)
 static ptrdiff_t
 buffer_byte_to_line (Lisp_Object obj, ptrdiff_t byte)
 {
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      /* No gap; iterate through pieces from rope.  */
+      ptrdiff_t nls = 0;
+      ptrdiff_t pos_byte = PT_BYTE;
+      ptrdiff_t end_byte = PT_BYTE + byte;
+      while (pos_byte < end_byte)
+	{
+	  ptrdiff_t ceiling = BUFFER_CEILING_OF (pos_byte);
+	  ptrdiff_t chunk_end = min (ceiling + 1, end_byte);
+	  nls += count_newlines (BYTE_POS_ADDR (pos_byte),
+				 chunk_end - pos_byte);
+	  pos_byte = chunk_end;
+	}
+      return nls;
+    }
+#endif
   /* Line from start of the parse (for compatibility). */
   ptrdiff_t to_gap = GPT_BYTE - PT_BYTE;
   return (to_gap > 0 && to_gap < byte
@@ -1804,8 +1835,23 @@ usage: (json-parse-buffer &rest args) */)
   unsigned char *end = (GPT == ZV) ? GPT_ADDR : ZV_ADDR;
   unsigned char *secondary_begin = NULL;
   unsigned char *secondary_end = NULL;
+#ifdef USE_ROPE
+  char *rope_buf = NULL;
+#endif
   if (PT == ZV)
     begin = end = NULL;
+#ifdef USE_ROPE
+  else if (current_buffer->text->using_rope)
+    {
+      /* Linearize the visible region for the JSON parser.  */
+      ptrdiff_t nbytes = ZV_BYTE - PT_BYTE;
+      rope_buf = xmalloc (nbytes);
+      rope_get_text_emacs (PT_BYTE, nbytes, rope_buf);
+      begin = (unsigned char *) rope_buf;
+      end = (unsigned char *) rope_buf + nbytes;
+      /* No secondary segment needed.  */
+    }
+#endif
   else if (GPT > PT && GPT < ZV && GAP_SIZE > 0)
     {
       end = GPT_ADDR;
@@ -1826,6 +1872,9 @@ usage: (json-parse-buffer &rest args) */)
 			: BYTE_TO_CHAR (byte));
   SET_PT_BOTH (position, byte);
 
+#ifdef USE_ROPE
+  xfree (rope_buf);
+#endif
   return unbind_to (count, result);
 }
 

@@ -47,6 +47,9 @@ along with GNU Emacs Mac port.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "atimer.h"
 #include "font.h"
 #include "menu.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
 
 
 
@@ -5017,17 +5020,39 @@ buf_fetch_char_advance (struct buffer *buf, ptrdiff_t *charidx,
   int output;
   ptrdiff_t c = *charidx, b = *byteidx;
   c++;
-  unsigned char *chp = BUF_BYTE_ADDRESS (buf, b);
-  if (!NILP (BVAR (buf, enable_multibyte_characters)))
+#ifdef USE_ROPE
+  if (buf->text->using_rope)
     {
-      int chlen;
-      output = string_char_and_length (chp, &chlen);
-      b += chlen;
+      struct buffer *old = current_buffer;
+      current_buffer = buf;
+      if (!NILP (BVAR (buf, enable_multibyte_characters)))
+	{
+	  int chlen;
+	  output = rope_safe_char_and_length (b, &chlen);
+	  b += chlen;
+	}
+      else
+	{
+	  output = (unsigned char) rope_char_at_emacs (b);
+	  b++;
+	}
+      current_buffer = old;
     }
   else
+#endif
     {
-      output = *chp;
-      b++;
+      unsigned char *chp = BUF_BYTE_ADDRESS (buf, b);
+      if (!NILP (BVAR (buf, enable_multibyte_characters)))
+	{
+	  int chlen;
+	  output = string_char_and_length (chp, &chlen);
+	  b += chlen;
+	}
+      else
+	{
+	  output = *chp;
+	  b++;
+	}
     }
   *charidx = c;
   *byteidx = b;
@@ -5308,6 +5333,28 @@ mac_ax_line_for_index (struct frame *f, EMACS_INT index)
 {
   struct buffer *b = XBUFFER (XWINDOW (f->selected_window)->contents);
   EMACS_INT line;
+
+#ifdef USE_ROPE
+  if (b->text->using_rope)
+    {
+      ptrdiff_t limit_byte;
+      if (index >= 0)
+	limit_byte = buf_charpos_to_bytepos (b, BUF_BEGV (b) + index);
+      else
+	limit_byte = BUF_PT_BYTE (b);
+      ptrdiff_t begv_byte = BUF_BEGV_BYTE (b);
+
+      if (limit_byte < begv_byte || limit_byte > BUF_ZV_BYTE (b))
+	return -1;
+
+      struct buffer *old = current_buffer;
+      current_buffer = b;
+      line = rope_count_newlines_emacs (begv_byte, limit_byte);
+      current_buffer = old;
+      return line;
+    }
+#endif
+
   const unsigned char *limit, *begv, *zv, *gap_end, *p;
 
   if (index >= 0)
@@ -5371,15 +5418,70 @@ mac_ax_buffer_skip_lines (struct buffer *buf, EMACS_INT n,
   return p;
 }
 
+#ifdef USE_ROPE
+/* Skip N newlines starting from byte position START_BYTE up to
+   END_BYTE in buffer BUF using rope.  Return the byte position
+   after the Nth newline, or 0 if not found.  */
+static ptrdiff_t
+mac_ax_buffer_skip_lines_rope (struct buffer *buf, EMACS_INT n,
+			       ptrdiff_t start_byte, ptrdiff_t end_byte)
+{
+  struct buffer *old = current_buffer;
+  current_buffer = buf;
+
+  ptrdiff_t pos = start_byte;
+  while (n > 0 && pos < end_byte)
+    {
+      ptrdiff_t found = rope_find_nth_newline_emacs (pos, 1);
+      if (found > end_byte)
+	{
+	  current_buffer = old;
+	  return 0;
+	}
+      pos = found;
+      n--;
+    }
+
+  current_buffer = old;
+  return n == 0 ? pos : 0;
+}
+#endif
+
 int
 mac_ax_range_for_line (struct frame *f, EMACS_INT line, CFRange *range)
 {
   struct buffer *b = XBUFFER (XWINDOW (f->selected_window)->contents);
-  unsigned char *begv, *zv, *p;
   EMACS_INT start, end;
 
   if (line < 0)
     return 0;
+
+#ifdef USE_ROPE
+  if (b->text->using_rope)
+    {
+      ptrdiff_t begv_byte = BUF_BEGV_BYTE (b);
+      ptrdiff_t zv_byte = BUF_ZV_BYTE (b);
+
+      ptrdiff_t p_byte = mac_ax_buffer_skip_lines_rope (b, line,
+						        begv_byte, zv_byte);
+      if (p_byte == 0)
+	return 0;
+
+      start = buf_bytepos_to_charpos (b, p_byte);
+      ptrdiff_t p2_byte = mac_ax_buffer_skip_lines_rope (b, 1,
+						         p_byte, zv_byte);
+      if (p2_byte)
+	end = buf_bytepos_to_charpos (b, p2_byte);
+      else
+	end = BUF_ZV (b);
+
+      range->location = start - BUF_BEGV (b);
+      range->length = end - start;
+      return 1;
+    }
+#endif
+
+  unsigned char *begv, *zv, *p;
 
   begv = BUF_BYTE_ADDRESS (b, BUF_BEGV_BYTE (b));
   zv = BUF_BYTE_ADDRESS (b, BUF_ZV_BYTE (b));

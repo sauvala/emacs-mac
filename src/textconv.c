@@ -34,6 +34,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "textconv.h"
 #include "buffer.h"
+#ifdef USE_ROPE
+#include "ropebuf.h"
+#endif
 #include "syntax.h"
 #include "blockinput.h"
 #include "keyboard.h"
@@ -87,6 +90,14 @@ copy_buffer_text (ptrdiff_t beg, ptrdiff_t beg_byte,
 		  ptrdiff_t end, ptrdiff_t end_byte,
 		  char *buffer)
 {
+#ifdef USE_ROPE
+  if (current_buffer->text->using_rope)
+    {
+      rope_get_text_emacs (beg_byte, end_byte - beg_byte, buffer);
+      return;
+    }
+#endif
+
   ptrdiff_t beg0, end0, beg1, end1, size;
 
   if (beg_byte < GPT_BYTE && GPT_BYTE < end_byte)
