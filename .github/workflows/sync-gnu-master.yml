@@ -151,3 +151,11 @@ jobs:
           claude_args: |
             --max-turns 30
             --allowedTools Bash,Read,Edit,Write,Grep,Glob
+
+      - name: Mark PR ready and merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ needs.sync.outputs.pr_number }}"
+          gh pr ready "$PR_NUMBER" --repo sauvala/emacs-mac
+          gh pr merge "$PR_NUMBER" --repo sauvala/emacs-mac --merge --delete-branch
