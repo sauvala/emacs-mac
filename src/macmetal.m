@@ -1174,4 +1174,89 @@ emacs_metal_scroll (emacs_metal_context_t *ctx,
   [cmd waitUntilCompleted];
 }
 
+/* --- Image texture upload and drawing --- */
+
+void *
+emacs_metal_upload_cg_image (emacs_metal_context_t *ctx,
+                             void *cg_image_ptr,
+                             int width, int height)
+{
+  CGImageRef cg_image = (CGImageRef)cg_image_ptr;
+  if (!cg_image || width <= 0 || height <= 0)
+    return NULL;
+
+  MTLTextureDescriptor *desc =
+    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                      width:width
+                                                     height:height
+                                                  mipmapped:NO];
+  desc.usage = MTLTextureUsageShaderRead;
+  desc.storageMode = MTLStorageModeShared;
+
+  id<MTLTexture> texture = [shared_device newTextureWithDescriptor:desc];
+  if (!texture)
+    return NULL;
+
+  size_t bpr = width * 4;
+  uint8_t *pixels = calloc (height, bpr);
+  CGColorSpaceRef cs = CGColorSpaceCreateWithName (kCGColorSpaceSRGB);
+  CGContextRef cg = CGBitmapContextCreate (pixels, width, height, 8, bpr, cs,
+                                           kCGImageAlphaPremultipliedFirst
+                                           | kCGBitmapByteOrder32Host);
+  CGColorSpaceRelease (cs);
+  if (cg)
+    {
+      CGContextDrawImage (cg, CGRectMake (0, 0, width, height), cg_image);
+      CGContextRelease (cg);
+    }
+
+  [texture replaceRegion:MTLRegionMake2D (0, 0, width, height)
+             mipmapLevel:0
+               withBytes:pixels
+             bytesPerRow:bpr];
+  free (pixels);
+
+  return (__bridge_retained void *)texture;
+}
+
+void
+emacs_metal_draw_image_texture (emacs_metal_context_t *ctx,
+                                void *texture_ptr,
+                                int src_x, int src_y, int src_w, int src_h,
+                                int dst_x, int dst_y, int dst_w, int dst_h)
+{
+  if (!ctx->in_frame || !texture_ptr)
+    return;
+
+  id<MTLTexture> texture = (__bridge id<MTLTexture>)texture_ptr;
+  int s = ctx->scale;
+  float x0 = dst_x * s, y0 = dst_y * s;
+  float x1 = (dst_x + dst_w) * s, y1 = (dst_y + dst_h) * s;
+
+  int tw = (int)texture.width, th = (int)texture.height;
+  float u0 = (float)src_x / tw, v0 = (float)src_y / th;
+  float u1 = (float)(src_x + src_w) / tw, v1 = (float)(src_y + src_h) / th;
+
+  uint32_t white = 0xFFFFFFFF;
+  metal_vertex_t *v = emit_vertices (ctx, 6, texture, false);
+  if (!v) return;
+
+  set_vertex (&v[0], x0, y0, u0, v0, white, 2);
+  set_vertex (&v[1], x1, y0, u1, v0, white, 2);
+  set_vertex (&v[2], x0, y1, u0, v1, white, 2);
+  set_vertex (&v[3], x1, y0, u1, v0, white, 2);
+  set_vertex (&v[4], x1, y1, u1, v1, white, 2);
+  set_vertex (&v[5], x0, y1, u0, v1, white, 2);
+}
+
+void
+emacs_metal_destroy_texture (void *texture_ptr)
+{
+  if (texture_ptr)
+    {
+      /* Transfer ownership to ARC so it releases the texture.  */
+      (void)(__bridge_transfer id<MTLTexture>)texture_ptr;
+    }
+}
+
 #endif /* USE_METAL_RENDERING */

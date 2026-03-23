@@ -50,5 +50,17 @@ extern void emacs_metal_scroll (emacs_metal_context_t *ctx,
                                 int x, int y, int w, int h,
                                 int dx, int dy);
 
+/* Image rendering */
+extern void *emacs_metal_upload_cg_image (emacs_metal_context_t *ctx,
+                                          void *cg_image,
+                                          int width, int height);
+extern void emacs_metal_draw_image_texture (emacs_metal_context_t *ctx,
+                                            void *texture,
+                                            int src_x, int src_y,
+                                            int src_w, int src_h,
+                                            int dst_x, int dst_y,
+                                            int dst_w, int dst_h);
+extern void emacs_metal_destroy_texture (void *texture);
+
 #endif /* USE_METAL_RENDERING */
 #endif /* EMACS_MACMETAL_H */

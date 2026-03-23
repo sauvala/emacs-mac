@@ -189,7 +189,20 @@ mac_draw_cg_image (struct frame *f, GC gc,
 		   int dest_x, int dest_y, int flags)
 {
 #ifdef USE_METAL_RENDERING
-  /* TODO: Implement CG image drawing via Metal in Task 11/12.  */
+  {
+    int img_w = CGImageGetWidth (image);
+    int img_h = CGImageGetHeight (image);
+    void *texture = emacs_metal_upload_cg_image (FRAME_METAL_CTX (f),
+                                                 (void *)image,
+                                                 img_w, img_h);
+    if (texture)
+      {
+        emacs_metal_draw_image_texture (FRAME_METAL_CTX (f), texture,
+                                        src_x, src_y, width, height,
+                                        dest_x, dest_y, width, height);
+        emacs_metal_destroy_texture (texture);
+      }
+  }
 #else
   CGRect dest_rect = CGRectMake (dest_x, dest_y, width, height);
 
@@ -1977,11 +1990,21 @@ mac_draw_image_foreground (struct glyph_string *s)
       mac_set_glyph_string_clipping (s);
 
 #ifdef USE_METAL_RENDERING
-      /* Placeholder: draw image area as a light-gray rect until Task 11
-	 adds proper Metal texture rendering.  */
-      emacs_metal_fill_rect (FRAME_METAL_CTX (s->f),
-			     x, y, s->slice.width, s->slice.height,
-			     0x00CCCCCC);  /* light gray placeholder */
+      if (s->img->cg_image)
+	{
+	  if (!s->img->metal_texture)
+	    s->img->metal_texture =
+	      emacs_metal_upload_cg_image (FRAME_METAL_CTX (s->f),
+					   (void *)s->img->cg_image,
+					   s->img->width, s->img->height);
+	  if (s->img->metal_texture)
+	    emacs_metal_draw_image_texture (FRAME_METAL_CTX (s->f),
+					    s->img->metal_texture,
+					    s->slice.x, s->slice.y,
+					    s->slice.width, s->slice.height,
+					    x, y,
+					    s->slice.width, s->slice.height);
+	}
 #else
       int flags = MAC_DRAW_CG_IMAGE_OVERLAY;
 

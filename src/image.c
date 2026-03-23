@@ -63,6 +63,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include TERM_HEADER
 #endif /* HAVE_WINDOW_SYSTEM */
 
+#ifdef USE_METAL_RENDERING
+#include "macmetal.h"
+#endif
+
 /* Work around GCC bug 54561.  */
 #if GNUC_PREREQ (4, 3, 0)
 # pragma GCC diagnostic ignored "-Wclobbered"
@@ -2391,6 +2395,13 @@ image_clear_image_1 (struct frame *f, struct image *img, int flags)
       CGImageRelease (img->cg_image);
       img->cg_image = NULL;
     }
+#ifdef USE_METAL_RENDERING
+  if (img->metal_texture)
+    {
+      emacs_metal_destroy_texture (img->metal_texture);
+      img->metal_texture = NULL;
+    }
+#endif
   xfree (img->cg_transform);
   img->cg_transform = NULL;
 #endif	/* HAVE_MACGUI */
