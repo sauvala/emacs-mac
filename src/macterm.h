@@ -682,6 +682,7 @@ extern void mac_flush (struct frame *);
 extern void mac_create_frame_window (struct frame *);
 extern void mac_dispose_frame_window (struct frame *);
 extern void mac_change_frame_window_wm_state (struct frame *, WMState, WMState);
+#ifndef USE_METAL_RENDERING
 #if DRAWING_USE_GCD
 extern void mac_draw_to_frame (struct frame *, GC, CGRect,
 			       void (^) (CGContextRef, GC));
@@ -690,6 +691,7 @@ extern CGContextRef mac_begin_cg_clip (struct frame *, GC, CGRect);
 extern void mac_end_cg_clip (struct frame *);
 #endif
 extern void mac_scroll_area (struct frame *, GC, int, int, int, int, int, int);
+#endif /* !USE_METAL_RENDERING */
 extern Lisp_Object mac_color_lookup (const char *);
 extern Lisp_Object mac_color_list_alist (void);
 extern Lisp_Object mac_display_monitor_attributes_list (struct mac_display_info *);

@@ -4488,6 +4488,14 @@ mac_free_frame_resources (struct frame *f)
   if (f == hlinfo->mouse_face_mouse_frame)
     reset_mouse_highlight (hlinfo);
 
+#ifdef USE_METAL_RENDERING
+  if (FRAME_METAL_CTX (f))
+    {
+      emacs_metal_context_destroy (FRAME_METAL_CTX (f));
+      FRAME_METAL_CTX (f) = NULL;
+    }
+#endif
+
   if (FRAME_MAC_WINDOW (f))
     mac_dispose_frame_window (f);
 

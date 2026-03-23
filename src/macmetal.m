@@ -329,6 +329,18 @@ emacs_metal_context_create (void *view, int width, int height, int scale)
       return NULL;
     }
 
+  /* Set up the CAMetalLayer from the view.  */
+  if (view)
+    {
+      NSView *nsview = (__bridge NSView *)view;
+      ctx->layer = (CAMetalLayer *)[nsview layer];
+      if (ctx->layer)
+        {
+          ctx->layer.contentsScale = scale;
+          ctx->layer.drawableSize = CGSizeMake (width * scale, height * scale);
+        }
+    }
+
   ctx->width = width;
   ctx->height = height;
   ctx->scale = scale;

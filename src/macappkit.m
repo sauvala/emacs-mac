@@ -41,6 +41,12 @@ along with GNU Emacs Mac port.  If not, see <https://www.gnu.org/licenses/>.  */
 #import "macappkit.h"
 #import <objc/runtime.h>
 
+#ifdef USE_METAL_RENDERING
+#include "macmetal.h"
+#import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
+#endif
+
 #if USE_ARC
 #define MRC_RETAIN(receiver)		((id) (receiver))
 #define MRC_RELEASE(receiver)
@@ -2038,8 +2044,10 @@ mac_application_state (void)
 			       Windows
  ************************************************************************/
 
+#ifndef USE_METAL_RENDERING
 static void set_global_focus_view_frame (struct frame *);
 static void unset_global_focus_view_frame (void);
+#endif
 static void mac_move_frame_window_structure_1 (struct frame *, int, int);
 
 #define DEFAULT_NUM_COLS (80)
@@ -2444,6 +2452,19 @@ static void mac_move_frame_window_structure_1 (struct frame *, int, int);
   emacsView.layerContentsPlacement = NSViewLayerContentsPlacementTopLeft;
 #ifdef HAVE_XWIDGETS
   FRAME_MAC_VIEW (f) = (__bridge void *) emacsView;
+#endif
+
+#ifdef USE_METAL_RENDERING
+  /* Make the view layer-backed so makeBackingLayer creates the
+     CAMetalLayer, then create the Metal context.  */
+  [emacsView setWantsLayer:YES];
+  {
+    NSRect bounds = [emacsView bounds];
+    int scale = 1;
+    FRAME_METAL_CTX (f) = emacs_metal_context_create (
+      (__bridge void *)emacsView,
+      (int)NSWidth (bounds), (int)NSHeight (bounds), scale);
+  }
 #endif
 }
 
@@ -3097,6 +3118,21 @@ static void mac_move_frame_window_structure_1 (struct frame *, int, int);
   struct frame *f = emacsFrame;
 
   FRAME_BACKING_SCALE_FACTOR (f) = emacsWindow.backingScaleFactor;
+
+#ifdef USE_METAL_RENDERING
+  if (FRAME_METAL_CTX (f))
+    {
+      CAMetalLayer *metalLayer = (CAMetalLayer *)emacsView.layer;
+      int scale = (int)emacsWindow.backingScaleFactor;
+      if (scale < 1) scale = 1;
+      NSRect bounds = [emacsView bounds];
+      int width = (int)NSWidth (bounds);
+      int height = (int)NSHeight (bounds);
+      metalLayer.contentsScale = scale;
+      metalLayer.drawableSize = CGSizeMake (width * scale, height * scale);
+      emacs_metal_context_resize (FRAME_METAL_CTX (f), width, height);
+    }
+#endif
 }
 
 - (BOOL)emacsViewIsHiddenOrHasHiddenAncestor
@@ -3126,6 +3162,7 @@ static void mac_move_frame_window_structure_1 (struct frame *, int, int);
   [emacsView unlockFocusOnBacking];
 }
 
+#ifndef USE_METAL_RENDERING
 - (void)scrollEmacsViewRect:(NSRect)rect by:(NSSize)delta
 {
   [emacsView scrollBackingRect:rect by:delta];
@@ -3146,6 +3183,7 @@ static void mac_move_frame_window_structure_1 (struct frame *, int, int);
   [emacsView updateMTLObjects];
 }
 #endif
+#endif /* !USE_METAL_RENDERING */
 
 - (NSPoint)convertEmacsViewPointToScreen:(NSPoint)point
 {
@@ -5354,23 +5392,27 @@ mac_flush (struct frame *f)
 void
 mac_update_frame_begin (struct frame *f)
 {
+#ifndef USE_METAL_RENDERING
   EmacsFrameController *frameController = FRAME_CONTROLLER (f);
 
   mac_within_gui (^{
       [frameController lockFocusOnEmacsView];
       set_global_focus_view_frame (f);
     });
+#endif
 }
 
 void
 mac_update_frame_end (struct frame *f)
 {
+#ifndef USE_METAL_RENDERING
   EmacsFrameController *frameController = FRAME_CONTROLLER (f);
 
   mac_within_gui (^{
       unset_global_focus_view_frame ();
       [frameController unlockFocusOnEmacsView];
     });
+#endif
 }
 
 /* Create a new Mac window for the frame F and store its delegate in
@@ -5727,6 +5769,7 @@ static int mac_event_to_emacs_modifiers (NSEvent *);
 static bool mac_try_buffer_and_glyph_matrix_access (void);
 static void mac_end_buffer_and_glyph_matrix_access (void);
 
+#ifndef USE_METAL_RENDERING
 @implementation EmacsBacking
 
 static vImage_Error
@@ -6252,6 +6295,7 @@ mac_texture_create_with_surface (id <MTLDevice> device, IOSurfaceRef surface)
 }
 
 @end				// EmacsBacking
+#endif /* !USE_METAL_RENDERING */
 
 /* View for Emacs frame.  */
 
@@ -6278,7 +6322,9 @@ static BOOL emacsViewUpdateLayerDisabled;
 {
   [[NSNotificationCenter defaultCenter] removeObserver:self];
 #if !USE_ARC
+#ifndef USE_METAL_RENDERING
   [backing release];
+#endif
   [super dealloc];
 #endif
 }
@@ -6298,6 +6344,23 @@ static BOOL emacsViewUpdateLayerDisabled;
 
 - (void)drawRect:(NSRect)aRect
 {
+#ifdef USE_METAL_RENDERING
+  /* Under Metal, drawing is handled by the Metal rendering pipeline.
+     Expose events trigger redisplay through the normal
+     expose_frame path.  */
+  struct frame *f = self.emacsFrame;
+  int x = NSMinX (aRect), y = NSMinY (aRect);
+  int width = NSWidth (aRect), height = NSHeight (aRect);
+
+  if (FRAME_METAL_CTX (f))
+    {
+      emacs_metal_frame_begin (FRAME_METAL_CTX (f));
+      mac_clear_area (f, x, y, width, height);
+      expose_frame (f, x, y, width, height);
+      mac_clear_under_internal_border (f);
+      emacs_metal_frame_end (FRAME_METAL_CTX (f));
+    }
+#else
   struct frame *f = self.emacsFrame;
   int x = NSMinX (aRect), y = NSMinY (aRect);
   int width = NSWidth (aRect), height = NSHeight (aRect);
@@ -6312,6 +6375,7 @@ static BOOL emacsViewUpdateLayerDisabled;
   if (!backing)
     mac_invert_flash_rectangles (f);
   unset_global_focus_view_frame ();
+#endif
 }
 
 - (BOOL)isFlipped
@@ -6321,8 +6385,39 @@ static BOOL emacsViewUpdateLayerDisabled;
 
 - (BOOL)isOpaque
 {
+#ifdef USE_METAL_RENDERING
+  return YES;
+#else
   return !self.wantsUpdateLayer;
+#endif
 }
+
+#ifdef USE_METAL_RENDERING
+- (CALayer *)makeBackingLayer
+{
+  CAMetalLayer *layer = [CAMetalLayer layer];
+  layer.device = MTLCreateSystemDefaultDevice ();
+  layer.pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
+  layer.framebufferOnly = YES;
+  return layer;
+}
+
+- (BOOL)wantsLayer
+{
+  return YES;
+}
+
+- (BOOL)wantsUpdateLayer
+{
+  return YES;
+}
+
+- (void)updateLayer
+{
+  /* Under Metal, presentation is handled by emacs_metal_frame_end.
+     Nothing to do here.  */
+}
+#else  /* !USE_METAL_RENDERING */
 
 #if HAVE_MAC_METAL
 - (void)updateMTLObjects
@@ -6346,7 +6441,9 @@ static BOOL emacsViewUpdateLayerDisabled;
 #endif
   return !emacsViewUpdateLayerDisabled;
 }
+#endif /* !USE_METAL_RENDERING */
 
+#ifndef USE_METAL_RENDERING
 - (void)updateLayer
 {
   struct frame *f = self.emacsFrame;
@@ -6389,9 +6486,13 @@ static BOOL emacsViewUpdateLayerDisabled;
     [backing restoreImageBuffersData:savedImageBuffersData
 		   forRectanglesData:rectanglesData];
 }
+#endif /* !USE_METAL_RENDERING */
 
 - (void)lockFocusOnBacking
 {
+#ifdef USE_METAL_RENDERING
+  /* No-op under Metal — no backing store to lock.  */
+#else
   eassert (pthread_main_np ());
 
 #if MAC_OS_X_VERSION_MIN_REQUIRED < 101400
@@ -6414,10 +6515,14 @@ static BOOL emacsViewUpdateLayerDisabled;
   if (!backing)
     backing = [[EmacsBacking alloc] initWithView:self];
   [backing lockFocus];
+#endif /* !USE_METAL_RENDERING */
 }
 
 - (void)unlockFocusOnBacking
 {
+#ifdef USE_METAL_RENDERING
+  /* No-op under Metal — no backing store to unlock.  */
+#else
   eassert (pthread_main_np ());
 
 #if MAC_OS_X_VERSION_MIN_REQUIRED < 101400
@@ -6429,8 +6534,10 @@ static BOOL emacsViewUpdateLayerDisabled;
     }
 #endif
   [backing unlockFocus];
+#endif /* !USE_METAL_RENDERING */
 }
 
+#ifndef USE_METAL_RENDERING
 - (void)scrollBackingRect:(NSRect)rect by:(NSSize)delta
 {
 #if MAC_OS_X_VERSION_MIN_REQUIRED < 101400
@@ -6459,17 +6566,36 @@ static BOOL emacsViewUpdateLayerDisabled;
 	invalidateRect:(NSIntersectionRect (NSRectFromCGRect (invalidRect),
 					    NSRectFromCGRect (clipRects[i])))];
 }
+#endif /* !USE_METAL_RENDERING */
 
 - (void)viewDidChangeBackingProperties
 {
+#ifndef USE_METAL_RENDERING
   MRC_RELEASE (backing);
   backing = nil;
+#endif
   self.needsDisplay = YES;
 }
 
 - (void)viewFrameDidChange:(NSNotification *)notification
 {
+#ifdef USE_METAL_RENDERING
+  struct frame *f = self.emacsFrame;
+  if (f && FRAME_METAL_CTX (f))
+    {
+      CAMetalLayer *metalLayer = (CAMetalLayer *)self.layer;
+      int scale = (int)self.window.backingScaleFactor;
+      if (scale < 1) scale = 1;
+      NSRect bounds = [self bounds];
+      int width = (int)NSWidth (bounds);
+      int height = (int)NSHeight (bounds);
+      metalLayer.contentsScale = scale;
+      metalLayer.drawableSize = CGSizeMake (width * scale, height * scale);
+      emacs_metal_context_resize (FRAME_METAL_CTX (f), width, height);
+    }
+#else
   backingSizeOutOfSync = YES;
+#endif
 }
 
 @end				// EmacsView
@@ -6598,7 +6724,9 @@ static BOOL emacsViewUpdateLayerDisabled;
     if (tab_bar_p || tool_bar_p)
       {
 	[self lockFocusOnBacking];
+#ifndef USE_METAL_RENDERING
 	set_global_focus_view_frame (f);
+#endif
 	if (tab_bar_p)
 	  {
 	    Lisp_Object tab_bar_arg;
@@ -6622,7 +6750,9 @@ static BOOL emacsViewUpdateLayerDisabled;
 	    else
 	      handle_tool_bar_click (f, x, y, 0, inputEvent.modifiers);
 	  }
+#ifndef USE_METAL_RENDERING
 	unset_global_focus_view_frame ();
+#endif
 	[self unlockFocusOnBacking];
       }
     else
@@ -7561,7 +7691,9 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
 
   [super viewDidEndLiveResize];
   [self synchronizeChildFrameOrigins];
+#ifndef USE_METAL_RENDERING
   backingSizeOutOfSync = YES;
+#endif
   mac_handle_size_change (f, NSWidth (frameRect), NSHeight (frameRect));
   /* Exit from mac_select so as to react to the frame size change,
      especially in a full screen tile on OS X 10.11.  */
@@ -7635,6 +7767,19 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
 }
 
 @end				// EmacsMainView
+
+#ifdef USE_METAL_RENDERING
+/* Under Metal rendering, the CG drawing pipeline is not used.
+   mac_draw_queue_sync is kept as a no-op because it is called from
+   event handling code that runs under both paths.  */
+
+static void
+mac_draw_queue_sync (void)
+{
+  /* No-op under Metal.  */
+}
+
+#else  /* !USE_METAL_RENDERING */
 
 #define FRAME_CG_CONTEXT(f)	((f)->output_data.mac->cg_context)
 
@@ -7890,6 +8035,8 @@ mac_scroll_area (struct frame *f, GC gc, int src_x, int src_y,
     });
   global_focus_view_modified_p = true;
 }
+
+#endif /* !USE_METAL_RENDERING */
 
 @implementation EmacsOverlayView
 
@@ -10046,13 +10193,16 @@ static void update_dragged_types (void);
 
 - (BOOL)clearMouseFace:(Mouse_HLInfo *)hlinfo
 {
-  struct frame *f = emacsFrame;
   BOOL result;
 
   [emacsView lockFocusOnBacking];
-  set_global_focus_view_frame (f);
+#ifndef USE_METAL_RENDERING
+  set_global_focus_view_frame (emacsFrame);
+#endif
   result = clear_mouse_face (hlinfo);
+#ifndef USE_METAL_RENDERING
   unset_global_focus_view_frame ();
+#endif
   [emacsView unlockFocusOnBacking];
 
   return result;
@@ -10064,9 +10214,13 @@ static void update_dragged_types (void);
 
   f->mouse_moved = true;
   [emacsView lockFocusOnBacking];
+#ifndef USE_METAL_RENDERING
   set_global_focus_view_frame (f);
+#endif
   note_mouse_highlight (f, x, y);
+#ifndef USE_METAL_RENDERING
   unset_global_focus_view_frame ();
+#endif
   [emacsView unlockFocusOnBacking];
 }
 
