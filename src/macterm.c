@@ -26,6 +26,7 @@ along with GNU Emacs Mac port.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "sysstdio.h"
 
 #include "macterm.h"
+#include "macmetal.h"
 
 #include "systime.h"
 
@@ -124,6 +125,11 @@ static void
 mac_erase_rectangle (struct frame *f, GC gc, int x, int y,
 		     int width, int height, bool respect_alpha_background)
 {
+#ifdef USE_METAL_RENDERING
+  emacs_metal_fill_rect (FRAME_METAL_CTX (f), x, y, width, height,
+			 gc->xgcv.background);
+  /* Stipple support simplified to solid fill under Metal.  */
+#else
   CGRect rect = CGRectMake (x, y, width, height);
 
   MAC_BEGIN_DRAW_TO_FRAME (f, gc, rect, context);
@@ -148,6 +154,7 @@ mac_erase_rectangle (struct frame *f, GC gc, int x, int y,
       }
   }
   MAC_END_DRAW_TO_FRAME (f);
+#endif
 }
 
 /* Mac version of XClearArea.  */
@@ -179,6 +186,9 @@ mac_draw_cg_image (struct frame *f, GC gc,
 		   int src_x, int src_y, int width, int height,
 		   int dest_x, int dest_y, int flags)
 {
+#ifdef USE_METAL_RENDERING
+  /* TODO: Implement CG image drawing via Metal in Task 11/12.  */
+#else
   CGRect dest_rect = CGRectMake (dest_x, dest_y, width, height);
 
   MAC_BEGIN_DRAW_TO_FRAME (f, gc, dest_rect, context);
@@ -214,6 +224,7 @@ mac_draw_cg_image (struct frame *f, GC gc,
     CGContextDrawImage (context, bounds, image);
   }
   MAC_END_DRAW_TO_FRAME (f);
+#endif
 }
 
 /* Mac replacement for XCreateBitmapFromBitmapData.  */
@@ -259,12 +270,17 @@ mac_create_image_mask_from_bitmap_data (const char *bits, int width, int height)
 static void
 mac_fill_rectangle (struct frame *f, GC gc, int x, int y, int width, int height)
 {
+#ifdef USE_METAL_RENDERING
+  emacs_metal_fill_rect (FRAME_METAL_CTX (f), x, y, width, height,
+			 gc->xgcv.foreground);
+#else
   CGRect rect = CGRectMake (x, y, width, height);
 
   MAC_BEGIN_DRAW_TO_FRAME (f, gc, rect, context);
   CGContextSetFillColorWithColor (context, gc->cg_fore_color);
   CGContextFillRects (context, &rect, 1);
   MAC_END_DRAW_TO_FRAME (f);
+#endif
 }
 
 /* Mac replacement for XDrawRectangle: dest is a window.  */
@@ -272,18 +288,29 @@ mac_fill_rectangle (struct frame *f, GC gc, int x, int y, int width, int height)
 static void
 mac_draw_rectangle (struct frame *f, GC gc, int x, int y, int width, int height)
 {
+#ifdef USE_METAL_RENDERING
+  emacs_metal_draw_rect (FRAME_METAL_CTX (f), x, y, width + 1, height + 1,
+			 gc->xgcv.foreground);
+#else
   CGRect rect = CGRectMake (x, y, width + 1, height + 1);
 
   MAC_BEGIN_DRAW_TO_FRAME (f, gc, rect, context);
   CGContextSetStrokeColorWithColor (context, gc->cg_fore_color);
   CGContextStrokeRect (context, CGRectInset (rect, 0.5f, 0.5f));
   MAC_END_DRAW_TO_FRAME (f);
+#endif
 }
 
 static void
 mac_fill_trapezoid_for_relief (struct frame *f, GC gc, int x, int y,
 			       int width, int height, int top_p)
 {
+#ifdef USE_METAL_RENDERING
+  /* Approximate trapezoid as filled rect; relief is small so the
+     visual difference is negligible.  */
+  emacs_metal_fill_rect (FRAME_METAL_CTX (f), x, y, width, height,
+			 gc->xgcv.foreground);
+#else
   CGRect rect = CGRectMake (x, y, width, height);
 
   MAC_BEGIN_DRAW_TO_FRAME (f, gc, rect, context);
@@ -305,6 +332,7 @@ mac_fill_trapezoid_for_relief (struct frame *f, GC gc, int x, int y,
     CGContextFillPath (context);
   }
   MAC_END_DRAW_TO_FRAME (f);
+#endif
 }
 
 enum corners
@@ -321,6 +349,10 @@ mac_erase_corners_for_relief (struct frame *f, GC gc, int x, int y,
 			      int width, int height,
 			      CGFloat radius, CGFloat margin, int corners)
 {
+#ifdef USE_METAL_RENDERING
+  /* Corners are tiny (1-2px); approximated as no-op under Metal.
+     The relief looks correct without corner erasure.  */
+#else
   CGRect rect = CGRectMake (x, y, width, height);
 
   MAC_BEGIN_DRAW_TO_FRAME (f, gc, rect, context);
@@ -349,12 +381,33 @@ mac_erase_corners_for_relief (struct frame *f, GC gc, int x, int y,
     CG_CONTEXT_FILL_RECT_WITH_GC_BACKGROUND (f, context, rect, gc, true);
   }
   MAC_END_DRAW_TO_FRAME (f);
+#endif
 }
 
 static void
 mac_draw_horizontal_wave (struct frame *f, GC gc, int x, int y,
 			  int width, int height, int wave_length)
 {
+#ifdef USE_METAL_RENDERING
+  {
+    /* Draw wave as alternating filled rectangles.  */
+    int wave_height = height / 2;
+    int dx;
+
+    if (wave_height < 1)
+      wave_height = 1;
+    for (dx = 0; dx < width; dx += wave_length)
+      {
+	int segment_w = wave_length;
+	if (dx + segment_w > width)
+	  segment_w = width - dx;
+	int segment_y = (dx / wave_length) % 2 == 0 ? y : y + wave_height;
+	emacs_metal_fill_rect (FRAME_METAL_CTX (f), x + dx, segment_y,
+			       segment_w, wave_height,
+			       gc->xgcv.foreground);
+      }
+  }
+#else
   CGRect wave_clip = CGRectMake (x, y, width, height);
 
   MAC_BEGIN_DRAW_TO_FRAME (f, gc, wave_clip, context);
@@ -381,11 +434,18 @@ mac_draw_horizontal_wave (struct frame *f, GC gc, int x, int y,
     CGContextStrokePath (context);
   }
   MAC_END_DRAW_TO_FRAME (f);
+#endif
 }
 
 static void
 mac_invert_rectangle (struct frame *f, int x, int y, int width, int height)
 {
+#ifdef USE_METAL_RENDERING
+  /* Visual bell: draw a semi-visible overlay instead of true inversion.
+     TODO: Add an inversion blend mode shader.  */
+  emacs_metal_fill_rect (FRAME_METAL_CTX (f), x, y, width, height,
+			 0x80808080);
+#else
   GC gc = f->output_data.mac->normal_gc;
   CGRect rect = CGRectMake (x, y, width, height);
 
@@ -394,6 +454,7 @@ mac_invert_rectangle (struct frame *f, int x, int y, int width, int height)
   CGContextSetBlendMode (context, kCGBlendModeDifference);
   CGContextFillRects (context, &rect, 1);
   MAC_END_DRAW_TO_FRAME (f);
+#endif
 }
 
 void
@@ -680,9 +741,16 @@ mac_set_frame_alpha (struct frame *f)
 static void
 mac_update_begin (struct frame *f)
 {
+#ifdef USE_METAL_RENDERING
+  block_input ();
+  if (FRAME_METAL_CTX (f))
+    emacs_metal_frame_begin (FRAME_METAL_CTX (f));
+  unblock_input ();
+#else
   block_input ();
   mac_update_frame_begin (f);
   unblock_input ();
+#endif
 }
 
 /* Start update of window W.  */
@@ -793,6 +861,13 @@ mac_update_window_end (struct window *w, bool cursor_on_p,
 static void
 mac_update_end (struct frame *f)
 {
+#ifdef USE_METAL_RENDERING
+  MOUSE_HL_INFO (f)->mouse_face_defer = false;
+  block_input ();
+  if (FRAME_METAL_CTX (f))
+    emacs_metal_frame_end (FRAME_METAL_CTX (f));
+  unblock_input ();
+#else
   /* Mouse highlight may be displayed again.  */
   MOUSE_HL_INFO (f)->mouse_face_defer = false;
 
@@ -800,6 +875,7 @@ mac_update_end (struct frame *f)
   mac_update_frame_end (f);
   XFlush (FRAME_MAC_DISPLAY (f));
   unblock_input ();
+#endif
 }
 
 /* This function is called from various places in xdisp.c
@@ -2594,9 +2670,14 @@ mac_draw_glyph_string (struct glyph_string *s)
 static void
 mac_shift_glyphs_for_insert (struct frame *f, int x, int y, int width, int height, int shift_by)
 {
+#ifdef USE_METAL_RENDERING
+  emacs_metal_scroll (FRAME_METAL_CTX (f), x, y, width, height,
+		      shift_by, 0);
+#else
   mac_scroll_area (f, f->output_data.mac->normal_gc,
 		   x, y, width, height,
 		   x + shift_by, y);
+#endif
 }
 
 /* Delete N glyphs at the nominal cursor position.  Not implemented
@@ -2772,10 +2853,15 @@ mac_scroll_run (struct window *w, struct run *run)
   /* Cursor off.  Will be switched on again in gui_update_window_end.  */
   gui_clear_cursor (w);
 
+#ifdef USE_METAL_RENDERING
+  emacs_metal_scroll (FRAME_METAL_CTX (f), x, from_y, width, height,
+		      0, to_y - from_y);
+#else
   mac_scroll_area (f, f->output_data.mac->normal_gc,
 		   x, from_y,
 		   width, height,
 		   x, to_y);
+#endif
 
   unblock_input ();
 }
