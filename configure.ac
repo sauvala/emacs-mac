@@ -7618,8 +7618,7 @@ fail;
        fi
        AC_DEFINE(USE_METAL_RENDERING, 1,
          [Define to 1 if using Metal for all rendering.])
-       LIBS_METAL="-framework Metal -framework MetalKit -framework QuartzCore"
-       LIBS="$LIBS $LIBS_METAL"
+       libs_metal="-framework Metal -framework MetalKit"
        MAC_OBJC_OBJ="$MAC_OBJC_OBJ macmetal.o"
      fi
 
