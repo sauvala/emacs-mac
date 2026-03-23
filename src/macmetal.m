@@ -147,6 +147,9 @@ struct emacs_metal_context
   int width, height, scale;
   bool in_frame;
 
+  id<MTLTexture> scroll_staging;
+  int scroll_staging_w, scroll_staging_h;
+
   dispatch_semaphore_t buffer_semaphore;
 
   struct emacs_metal_glyph_cache *glyph_cache;
@@ -405,6 +408,7 @@ emacs_metal_context_destroy (emacs_metal_context_t *ctx)
     ctx->vertex_buffers[i] = nil;
 
   ctx->backbuffer = nil;
+  ctx->scroll_staging = nil;
   ctx->command_queue = nil;
   ctx->layer = nil;
 
@@ -441,6 +445,70 @@ emacs_metal_frame_begin (emacs_metal_context_t *ctx)
   ctx->in_frame = true;
 }
 
+/* Render all pending batches into the backbuffer and reset batch state.
+   Uses LoadActionLoad so existing backbuffer content is preserved.  */
+static void
+flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
+{
+  if (ctx->batch_count == 0)
+    return;
+
+  MTLRenderPassDescriptor *pass
+    = [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.colorAttachments[0].texture = ctx->backbuffer;
+  pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+  id<MTLRenderCommandEncoder> encoder
+    = [cmd renderCommandEncoderWithDescriptor:pass];
+
+  float viewport_size[2] = {
+    (float)(ctx->width * ctx->scale),
+    (float)(ctx->height * ctx->scale)
+  };
+
+  for (int i = 0; i < ctx->batch_count; i++)
+    {
+      metal_batch_t *batch = &ctx->batches[i];
+
+      /* Set scissor rect.  */
+      MTLScissorRect scissor = {
+        .x = (NSUInteger)batch->scissor.x,
+        .y = (NSUInteger)batch->scissor.y,
+        .width = (NSUInteger)batch->scissor.w,
+        .height = (NSUInteger)batch->scissor.h
+      };
+      [encoder setScissorRect:scissor];
+
+      /* Select pipeline state.  */
+      if (batch->texture)
+        [encoder setRenderPipelineState:shared_textured_pipeline];
+      else
+        [encoder setRenderPipelineState:shared_solid_pipeline];
+
+      /* Set vertex buffer and uniforms.  */
+      [encoder setVertexBuffer:ctx->vertex_buffers[ctx->current_buffer]
+                        offset:0
+                       atIndex:0];
+      [encoder setVertexBytes:viewport_size
+                       length:sizeof (viewport_size)
+                      atIndex:1];
+
+      /* Set texture if needed.  */
+      if (batch->texture)
+        [encoder setFragmentTexture:batch->texture atIndex:0];
+
+      [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                  vertexStart:(NSUInteger)batch->vertex_offset
+                  vertexCount:(NSUInteger)batch->vertex_count];
+    }
+
+  [encoder endEncoding];
+
+  ctx->batch_count = 0;
+  ctx->vertex_count = 0;
+}
+
 void
 emacs_metal_frame_end (emacs_metal_context_t *ctx)
 {
@@ -462,61 +530,8 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
 
   id<MTLCommandBuffer> cmd = [ctx->command_queue commandBuffer];
 
-  /* Render all batches into the backbuffer.  */
-  if (ctx->batch_count > 0)
-    {
-      MTLRenderPassDescriptor *pass
-        = [MTLRenderPassDescriptor renderPassDescriptor];
-      pass.colorAttachments[0].texture = ctx->backbuffer;
-      pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
-      pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-
-      id<MTLRenderCommandEncoder> encoder
-        = [cmd renderCommandEncoderWithDescriptor:pass];
-
-      float viewport_size[2] = {
-        (float)(ctx->width * ctx->scale),
-        (float)(ctx->height * ctx->scale)
-      };
-
-      for (int i = 0; i < ctx->batch_count; i++)
-        {
-          metal_batch_t *batch = &ctx->batches[i];
-
-          /* Set scissor rect.  */
-          MTLScissorRect scissor = {
-            .x = (NSUInteger)batch->scissor.x,
-            .y = (NSUInteger)batch->scissor.y,
-            .width = (NSUInteger)batch->scissor.w,
-            .height = (NSUInteger)batch->scissor.h
-          };
-          [encoder setScissorRect:scissor];
-
-          /* Select pipeline state.  */
-          if (batch->texture)
-            [encoder setRenderPipelineState:shared_textured_pipeline];
-          else
-            [encoder setRenderPipelineState:shared_solid_pipeline];
-
-          /* Set vertex buffer and uniforms.  */
-          [encoder setVertexBuffer:ctx->vertex_buffers[ctx->current_buffer]
-                            offset:0
-                           atIndex:0];
-          [encoder setVertexBytes:viewport_size
-                           length:sizeof (viewport_size)
-                          atIndex:1];
-
-          /* Set texture if needed.  */
-          if (batch->texture)
-            [encoder setFragmentTexture:batch->texture atIndex:0];
-
-          [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                      vertexStart:(NSUInteger)batch->vertex_offset
-                      vertexCount:(NSUInteger)batch->vertex_count];
-        }
-
-      [encoder endEncoding];
-    }
+  /* Render all pending batches into the backbuffer.  */
+  flush_render_batches (ctx, cmd);
 
   /* Blit backbuffer to drawable texture.  */
   {
@@ -1095,6 +1110,56 @@ emacs_metal_scroll (emacs_metal_context_t *ctx,
                     int x, int y, int w, int h,
                     int dx, int dy)
 {
+  if (!ctx->in_frame || (dx == 0 && dy == 0))
+    return;
+
+  int s = ctx->scale;
+  int sx = x * s, sy = y * s, sw = w * s, sh = h * s;
+  int sdx = dx * s, sdy = dy * s;
+
+  /* Flush pending draws before blit.  */
+  id<MTLCommandBuffer> cmd = [ctx->command_queue commandBuffer];
+  flush_render_batches (ctx, cmd);
+
+  /* Ensure staging texture is large enough.  */
+  if (!ctx->scroll_staging
+      || ctx->scroll_staging_w < sw
+      || ctx->scroll_staging_h < sh)
+    {
+      MTLTextureDescriptor *desc =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:ctx->backbuffer.pixelFormat
+                                                          width:sw height:sh
+                                                      mipmapped:NO];
+      desc.storageMode = MTLStorageModePrivate;
+      desc.usage = MTLTextureUsageShaderRead;
+      ctx->scroll_staging = [shared_device newTextureWithDescriptor:desc];
+      ctx->scroll_staging_w = sw;
+      ctx->scroll_staging_h = sh;
+    }
+
+  id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+  /* Copy source region to staging.  */
+  [blit copyFromTexture:ctx->backbuffer
+            sourceSlice:0 sourceLevel:0
+           sourceOrigin:MTLOriginMake (sx, sy, 0)
+             sourceSize:MTLSizeMake (sw, sh, 1)
+              toTexture:ctx->scroll_staging
+       destinationSlice:0 destinationLevel:0
+      destinationOrigin:MTLOriginMake (0, 0, 0)];
+  /* Copy staging to destination.  */
+  [blit copyFromTexture:ctx->scroll_staging
+            sourceSlice:0 sourceLevel:0
+           sourceOrigin:MTLOriginMake (0, 0, 0)
+             sourceSize:MTLSizeMake (sw, sh, 1)
+              toTexture:ctx->backbuffer
+       destinationSlice:0 destinationLevel:0
+      destinationOrigin:MTLOriginMake (sx + sdx, sy + sdy, 0)];
+  [blit endEncoding];
+  [cmd commit];
+  /* waitUntilCompleted needed: ensures blit finishes before subsequent
+     vertex buffer writes overwrite data the GPU might still be reading
+     from the flushed batches.  */
+  [cmd waitUntilCompleted];
 }
 
 #endif /* USE_METAL_RENDERING */
