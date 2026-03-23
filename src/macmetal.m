@@ -6,12 +6,45 @@
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <CoreText/CoreText.h>
 
 /* Shared Metal state, initialized once on first context creation.  */
 static id<MTLDevice> shared_device;
 static id<MTLLibrary> shared_library;
 static id<MTLRenderPipelineState> shared_solid_pipeline;
 static id<MTLRenderPipelineState> shared_textured_pipeline;
+
+/* Glyph atlas constants and data structures.  */
+
+#define GLYPH_ATLAS_SIZE (2048)
+#define GLYPH_ATLAS_MAX_PAGES (8)
+#define GLYPH_CACHE_SIZE (16384)  /* MUST be power of 2 for hash table */
+#define SUBPIXEL_POSITIONS (4)
+
+typedef struct {
+    CTFontRef font;
+    uint16_t glyph_id;
+    uint8_t subpixel;
+    uint16_t atlas_page;
+    uint16_t atlas_x, atlas_y;
+    uint16_t atlas_w, atlas_h;
+    float bearing_x, bearing_y;
+    float advance;
+} glyph_cache_entry_t;
+
+typedef struct {
+    id<MTLTexture> texture;
+    int shelf_y;
+    int shelf_height;
+    int cursor_x;
+} glyph_atlas_page_t;
+
+struct emacs_metal_glyph_cache {
+    glyph_atlas_page_t pages[GLYPH_ATLAS_MAX_PAGES];
+    int page_count;
+    glyph_cache_entry_t entries[GLYPH_CACHE_SIZE];
+    int entry_count;
+};
 
 /* MSL shader source.  */
 static NSString *const metal_shader_source = @
@@ -115,6 +148,8 @@ struct emacs_metal_context
   bool in_frame;
 
   dispatch_semaphore_t buffer_semaphore;
+
+  struct emacs_metal_glyph_cache *glyph_cache;
 };
 
 /* Create render pipeline states from the embedded shader source.  */
@@ -307,6 +342,13 @@ emacs_metal_context_create (void *view, int width, int height, int scale)
       return NULL;
     }
 
+  ctx->glyph_cache = calloc (1, sizeof (struct emacs_metal_glyph_cache));
+  if (!ctx->glyph_cache)
+    {
+      free (ctx);
+      return NULL;
+    }
+
   return ctx;
 }
 
@@ -365,6 +407,13 @@ emacs_metal_context_destroy (emacs_metal_context_t *ctx)
   ctx->backbuffer = nil;
   ctx->command_queue = nil;
   ctx->layer = nil;
+
+  if (ctx->glyph_cache)
+    {
+      for (int i = 0; i < ctx->glyph_cache->page_count; i++)
+        ctx->glyph_cache->pages[i].texture = nil;
+      free (ctx->glyph_cache);
+    }
 
   free (ctx);
 }
@@ -579,6 +628,328 @@ set_vertex (metal_vertex_t *v,
   v->color[2]    = (uint8_t)( color        & 0xFF); /* B */
   v->color[3]    = (uint8_t)((color >> 24) & 0xFF); /* A */
   v->texture_id  = texture_id;
+}
+
+/* --- Glyph atlas --- */
+
+/* Allocate a rectangle (required_w x required_h) in the glyph atlas using
+   shelf packing.  Returns the page index, and stores the allocated position
+   in *out_x, *out_y.  Returns -1 on failure.  */
+static int
+glyph_cache_get_page (emacs_metal_context_t *ctx,
+                      int required_w, int required_h,
+                      int *out_x, int *out_y)
+{
+  struct emacs_metal_glyph_cache *gc = ctx->glyph_cache;
+
+  /* Try to fit in the current page's current shelf.  */
+  if (gc->page_count > 0)
+    {
+      glyph_atlas_page_t *p = &gc->pages[gc->page_count - 1];
+      if (p->cursor_x + required_w <= GLYPH_ATLAS_SIZE
+          && p->shelf_y + METAL_MAX (p->shelf_height, required_h)
+             <= GLYPH_ATLAS_SIZE)
+        {
+          if (required_h > p->shelf_height)
+            p->shelf_height = required_h;
+          *out_x = p->cursor_x;
+          *out_y = p->shelf_y;
+          p->cursor_x += required_w;
+          return gc->page_count - 1;
+        }
+
+      /* Try starting a new shelf on the current page.  */
+      int new_shelf_y = p->shelf_y + p->shelf_height;
+      if (required_w <= GLYPH_ATLAS_SIZE
+          && new_shelf_y + required_h <= GLYPH_ATLAS_SIZE)
+        {
+          p->shelf_y = new_shelf_y;
+          p->shelf_height = required_h;
+          p->cursor_x = required_w;
+          *out_x = 0;
+          *out_y = new_shelf_y;
+          return gc->page_count - 1;
+        }
+    }
+
+  /* Need a new page.  Evict oldest if at max.  */
+  if (gc->page_count >= GLYPH_ATLAS_MAX_PAGES)
+    {
+      /* Evict page 0 (oldest): shift pages down, invalidate cache entries
+         referencing page 0, and adjust page indices for remaining entries.  */
+      gc->pages[0].texture = nil;
+      for (int i = 1; i < gc->page_count; i++)
+        gc->pages[i - 1] = gc->pages[i];
+      gc->page_count--;
+
+      /* Invalidate entries on evicted page and adjust page indices.  */
+      for (int i = 0; i < GLYPH_CACHE_SIZE; i++)
+        {
+          if (gc->entries[i].font == NULL)
+            continue;
+          if (gc->entries[i].atlas_page == 0)
+            {
+              gc->entries[i].font = NULL;
+              gc->entry_count--;
+            }
+          else
+            gc->entries[i].atlas_page--;
+        }
+    }
+
+  /* Allocate a new atlas page texture.  */
+  MTLTextureDescriptor *desc
+    = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+                                     width:GLYPH_ATLAS_SIZE
+                                    height:GLYPH_ATLAS_SIZE
+                                 mipmapped:NO];
+  desc.usage = MTLTextureUsageShaderRead;
+  desc.storageMode = MTLStorageModeShared;
+
+  id<MTLTexture> texture = [shared_device newTextureWithDescriptor:desc];
+  if (!texture)
+    {
+      NSLog (@"Metal: failed to create glyph atlas page");
+      return -1;
+    }
+
+  int page_idx = gc->page_count;
+  gc->pages[page_idx].texture = texture;
+  gc->pages[page_idx].shelf_y = 0;
+  gc->pages[page_idx].shelf_height = required_h;
+  gc->pages[page_idx].cursor_x = required_w;
+  gc->page_count++;
+
+  *out_x = 0;
+  *out_y = 0;
+  return page_idx;
+}
+
+/* FNV-1a hash for glyph cache lookup.  */
+static uint32_t
+glyph_cache_hash (CTFontRef font, uint16_t glyph_id, uint8_t subpixel)
+{
+  uint64_t h = 14695981039346656037ULL;
+  h ^= (uintptr_t)font;  h *= 1099511628211ULL;
+  h ^= glyph_id;          h *= 1099511628211ULL;
+  h ^= subpixel;          h *= 1099511628211ULL;
+  return (uint32_t)(h & (GLYPH_CACHE_SIZE - 1));
+}
+
+/* Look up a cached glyph entry.  Returns NULL on miss.  */
+static glyph_cache_entry_t *
+glyph_cache_lookup (emacs_metal_context_t *ctx,
+                    CTFontRef font, uint16_t glyph_id, uint8_t subpixel)
+{
+  struct emacs_metal_glyph_cache *gc = ctx->glyph_cache;
+  uint32_t idx = glyph_cache_hash (font, glyph_id, subpixel);
+
+  for (int probe = 0; probe < 16; probe++)
+    {
+      uint32_t slot = (idx + probe) & (GLYPH_CACHE_SIZE - 1);
+      glyph_cache_entry_t *e = &gc->entries[slot];
+      if (e->font == NULL)
+        return NULL;
+      if (e->font == font && e->glyph_id == glyph_id
+          && e->subpixel == subpixel)
+        return e;
+    }
+
+  return NULL;
+}
+
+/* Rasterize a glyph via CoreText and upload to the atlas.  Returns the
+   new cache entry, or NULL on failure.  */
+static glyph_cache_entry_t *
+glyph_cache_rasterize (emacs_metal_context_t *ctx,
+                       CTFontRef font, uint16_t glyph_id, uint8_t subpixel)
+{
+  struct emacs_metal_glyph_cache *gc = ctx->glyph_cache;
+
+  /* If the cache is nearly full, clear everything and start fresh.  */
+  if (gc->entry_count >= GLYPH_CACHE_SIZE - 64)
+    {
+      memset (gc->entries, 0, sizeof (gc->entries));
+      gc->entry_count = 0;
+      /* Reset all atlas pages too.  */
+      for (int i = 0; i < gc->page_count; i++)
+        gc->pages[i].texture = nil;
+      gc->page_count = 0;
+    }
+
+  /* Get glyph bounding box.  */
+  CGGlyph cg_glyph = (CGGlyph)glyph_id;
+  CGRect bbox;
+  CTFontGetBoundingRectsForGlyphs (font, kCTFontOrientationHorizontal,
+                                   &cg_glyph, &bbox, 1);
+
+  CGSize advance_size;
+  CTFontGetAdvancesForGlyphs (font, kCTFontOrientationHorizontal,
+                              &cg_glyph, &advance_size, 1);
+
+  /* Subpixel offset.  */
+  float subpixel_offset = (float)subpixel / (float)SUBPIXEL_POSITIONS;
+
+  /* Compute integer pixel bounds with 1px padding.  */
+  int gw = (int)ceilf (bbox.size.width + fabsf (bbox.origin.x)
+                        + subpixel_offset) + 2;
+  int gh = (int)ceilf (bbox.size.height + fabsf (bbox.origin.y)) + 2;
+
+  if (gw <= 0) gw = 1;
+  if (gh <= 0) gh = 1;
+  if (gw > GLYPH_ATLAS_SIZE || gh > GLYPH_ATLAS_SIZE)
+    return NULL;
+
+  /* Allocate space in the atlas.  */
+  int atlas_x, atlas_y;
+  int page = glyph_cache_get_page (ctx, gw, gh, &atlas_x, &atlas_y);
+  if (page < 0)
+    return NULL;
+
+  /* Rasterize into an alpha-only bitmap.  */
+  uint8_t *pixels = calloc ((size_t)gw * (size_t)gh, 1);
+  if (!pixels)
+    return NULL;
+
+  CGContextRef cg_ctx
+    = CGBitmapContextCreate (pixels, gw, gh, 8, gw,
+                             NULL, kCGImageAlphaOnly);
+  if (!cg_ctx)
+    {
+      free (pixels);
+      return NULL;
+    }
+
+  /* Set up drawing position: the glyph origin is at (-bbox.origin.x + 1,
+     -bbox.origin.y + 1) with subpixel offset applied to x.  The +1 is
+     for the padding pixel.  CoreGraphics has y-up, but for alpha-only
+     bitmaps we draw directly.  */
+  CGContextSetGrayFillColor (cg_ctx, 1.0, 1.0);
+
+  CGPoint draw_point = CGPointMake (-bbox.origin.x + 1.0 + subpixel_offset,
+                                    -bbox.origin.y + 1.0);
+  /* Flip y for CoreGraphics coordinate system.  The bitmap is gh pixels
+     tall; CG origin is bottom-left.  */
+  /* Actually for alpha-only contexts, CG y=0 is at bottom.  We want the
+     glyph baseline at a known position.  */
+  draw_point.y = (CGFloat)gh - draw_point.y;
+  /* Adjust: baseline should be at gh - (1 - bbox.origin.y).  */
+  draw_point.y = (CGFloat)gh + bbox.origin.y - 1.0;
+
+  CTFontDrawGlyphs (font, &cg_glyph, &draw_point, 1, cg_ctx);
+
+  CGContextRelease (cg_ctx);
+
+  /* Upload to the atlas texture.  */
+  MTLRegion region = MTLRegionMake2D (atlas_x, atlas_y, gw, gh);
+  [gc->pages[page].texture replaceRegion:region
+                             mipmapLevel:0
+                               withBytes:pixels
+                             bytesPerRow:(NSUInteger)gw];
+
+  free (pixels);
+
+  /* Insert into the hash table using open addressing.  */
+  uint32_t idx = glyph_cache_hash (font, glyph_id, subpixel);
+  glyph_cache_entry_t *entry = NULL;
+  for (int probe = 0; probe < GLYPH_CACHE_SIZE; probe++)
+    {
+      uint32_t slot = (idx + probe) & (GLYPH_CACHE_SIZE - 1);
+      if (gc->entries[slot].font == NULL)
+        {
+          entry = &gc->entries[slot];
+          break;
+        }
+    }
+
+  if (!entry)
+    return NULL;
+
+  entry->font = font;
+  entry->glyph_id = glyph_id;
+  entry->subpixel = subpixel;
+  entry->atlas_page = (uint16_t)page;
+  entry->atlas_x = (uint16_t)atlas_x;
+  entry->atlas_y = (uint16_t)atlas_y;
+  entry->atlas_w = (uint16_t)gw;
+  entry->atlas_h = (uint16_t)gh;
+  entry->bearing_x = bbox.origin.x - 1.0f;
+  entry->bearing_y = bbox.origin.y - 1.0f;
+  entry->advance = (float)advance_size.width;
+  gc->entry_count++;
+
+  return entry;
+}
+
+/* Draw an array of glyphs at given positions with the specified font and
+   color.  */
+void
+emacs_metal_draw_glyphs (emacs_metal_context_t *ctx,
+                         uint16_t *glyphs,
+                         float *positions,
+                         int count,
+                         void *font_ptr,
+                         uint32_t color,
+                         float baseline_y)
+{
+  if (!ctx->in_frame || count <= 0)
+    return;
+
+  CTFontRef font = (CTFontRef)font_ptr;
+  int s = ctx->scale;
+  /* Emacs Mac port colors are 0x00RRGGBB — force alpha to 0xFF.  */
+  uint32_t c = color | 0xFF000000u;
+  float atlas_size_inv = 1.0f / (float)GLYPH_ATLAS_SIZE;
+
+  for (int i = 0; i < count; i++)
+    {
+      float x_pos = positions[i] * s;
+      float y_pos = baseline_y * s;
+
+      /* Compute subpixel quantization.  */
+      float frac = x_pos - floorf (x_pos);
+      uint8_t subpixel
+        = (uint8_t)(frac * SUBPIXEL_POSITIONS) % SUBPIXEL_POSITIONS;
+
+      /* Look up or rasterize the glyph.  */
+      glyph_cache_entry_t *entry
+        = glyph_cache_lookup (ctx, font, glyphs[i], subpixel);
+      if (!entry)
+        entry = glyph_cache_rasterize (ctx, font, glyphs[i], subpixel);
+      if (!entry)
+        continue;
+
+      /* Get the atlas page texture for this glyph.  */
+      id<MTLTexture> atlas_tex
+        = ctx->glyph_cache->pages[entry->atlas_page].texture;
+      if (!atlas_tex)
+        continue;
+
+      /* Compute quad corners in pixel coordinates.  */
+      float gx = floorf (x_pos) + entry->bearing_x;
+      float gy = y_pos - (entry->atlas_h + entry->bearing_y);
+      float gx1 = gx + entry->atlas_w;
+      float gy1 = gy + entry->atlas_h;
+
+      /* Compute UV coordinates in the atlas.  */
+      float u0 = (float)entry->atlas_x * atlas_size_inv;
+      float v0 = (float)entry->atlas_y * atlas_size_inv;
+      float u1 = (float)(entry->atlas_x + entry->atlas_w) * atlas_size_inv;
+      float v1 = (float)(entry->atlas_y + entry->atlas_h) * atlas_size_inv;
+
+      /* Emit 6 vertices (two triangles) for the glyph quad.
+         texture_id = 1 signals alpha-tinted glyph rendering.  */
+      metal_vertex_t *v = emit_vertices (ctx, 6, atlas_tex, true);
+      if (!v) return;
+
+      set_vertex (&v[0], gx,  gy,  u0, v0, c, 1);
+      set_vertex (&v[1], gx1, gy,  u1, v0, c, 1);
+      set_vertex (&v[2], gx,  gy1, u0, v1, c, 1);
+      set_vertex (&v[3], gx1, gy,  u1, v0, c, 1);
+      set_vertex (&v[4], gx1, gy1, u1, v1, c, 1);
+      set_vertex (&v[5], gx,  gy1, u0, v1, c, 1);
+    }
 }
 
 /* --- Drawing primitives --- */
