@@ -107,11 +107,13 @@ mac_begin_scale_mismatch_detection (struct frame *f)
   FRAME_SCALE_MISMATCH_STATE (f) = FRAME_BACKING_SCALE_FACTOR (f);
 }
 
+#ifndef USE_METAL_RENDERING
 static void
 mac_detect_scale_mismatch (struct frame *f, int target_backing_scale)
 {
   FRAME_SCALE_MISMATCH_STATE (f) |= target_backing_scale;
 }
+#endif
 
 bool
 mac_end_scale_mismatch_detection (struct frame *f)
@@ -1972,9 +1974,16 @@ mac_draw_image_foreground (struct glyph_string *s)
 
   if (s->img->pixmap)
     {
-      int flags = MAC_DRAW_CG_IMAGE_OVERLAY;
-
       mac_set_glyph_string_clipping (s);
+
+#ifdef USE_METAL_RENDERING
+      /* Placeholder: draw image area as a light-gray rect until Task 11
+	 adds proper Metal texture rendering.  */
+      emacs_metal_fill_rect (FRAME_METAL_CTX (s->f),
+			     x, y, s->slice.width, s->slice.height,
+			     0x00CCCCCC);  /* light gray placeholder */
+#else
+      int flags = MAC_DRAW_CG_IMAGE_OVERLAY;
 
       mac_detect_scale_mismatch (s->f, s->img->target_backing_scale);
       if (s->img->target_backing_scale == 2)
@@ -1984,6 +1993,7 @@ mac_draw_image_foreground (struct glyph_string *s)
       mac_draw_cg_image (s->f, s->gc, s->img->cg_image, s->img->cg_transform,
 			 s->slice.x, s->slice.y,
 			 s->slice.width, s->slice.height, x, y, flags);
+#endif
       if (!s->img->mask)
 	{
 	  /* When the image has a mask, we can expect that at
