@@ -502,13 +502,110 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
   [cmd commit];
 }
 
-/* Drawing stubs — to be implemented in Task 3.  */
+/* Local MIN/MAX for integer arithmetic if not already defined.  */
+#ifndef METAL_MIN
+# define METAL_MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+#ifndef METAL_MAX
+# define METAL_MAX(a, b) ((a) > (b) ? (a) : (b))
+#endif
+
+/* --- Batch management helpers --- */
+
+/* Return the current batch if it is compatible with (texture, is_glyph) and
+   the current scissor rect, otherwise open a new one.  Returns NULL when the
+   batch array is full.  */
+static metal_batch_t *
+ensure_batch (emacs_metal_context_t *ctx,
+              id<MTLTexture> texture, bool is_glyph)
+{
+  metal_clip_rect_t *clip = &ctx->clip_stack[ctx->clip_depth - 1];
+
+  if (ctx->batch_count > 0)
+    {
+      metal_batch_t *b = &ctx->batches[ctx->batch_count - 1];
+      if (b->texture == texture
+          && b->is_glyph == is_glyph
+          && b->scissor.x == clip->x
+          && b->scissor.y == clip->y
+          && b->scissor.w == clip->w
+          && b->scissor.h == clip->h)
+        return b;
+    }
+
+  if (ctx->batch_count >= METAL_MAX_BATCHES)
+    return NULL;
+
+  metal_batch_t *b = &ctx->batches[ctx->batch_count++];
+  b->vertex_offset = ctx->vertex_count;
+  b->vertex_count  = 0;
+  b->scissor       = *clip;
+  b->texture       = texture;
+  b->is_glyph      = is_glyph;
+  return b;
+}
+
+/* Reserve space for count vertices, ensure a compatible batch, and return a
+   pointer to the first reserved vertex.  Returns NULL on overflow.  */
+static metal_vertex_t *
+emit_vertices (emacs_metal_context_t *ctx, int count,
+               id<MTLTexture> texture, bool is_glyph)
+{
+  if (ctx->vertex_count + count > METAL_MAX_VERTICES)
+    return NULL;
+
+  metal_batch_t *b = ensure_batch (ctx, texture, is_glyph);
+  if (!b)
+    return NULL;
+
+  metal_vertex_t *v = &ctx->vertices[ctx->vertex_count];
+  ctx->vertex_count += count;
+  b->vertex_count   += count;
+  return v;
+}
+
+/* Fill a single vertex.  color is 0xAARRGGBB.  */
+static void
+set_vertex (metal_vertex_t *v,
+            float x, float y, float u, float v_coord,
+            uint32_t color, uint32_t texture_id)
+{
+  v->position[0] = x;
+  v->position[1] = y;
+  v->texcoord[0] = u;
+  v->texcoord[1] = v_coord;
+  v->color[0]    = (uint8_t)((color >> 16) & 0xFF); /* R */
+  v->color[1]    = (uint8_t)((color >>  8) & 0xFF); /* G */
+  v->color[2]    = (uint8_t)( color        & 0xFF); /* B */
+  v->color[3]    = (uint8_t)((color >> 24) & 0xFF); /* A */
+  v->texture_id  = texture_id;
+}
+
+/* --- Drawing primitives --- */
 
 void
 emacs_metal_fill_rect (emacs_metal_context_t *ctx,
                        int x, int y, int w, int h,
                        uint32_t color)
 {
+  if (!ctx->in_frame || w <= 0 || h <= 0)
+    return;
+
+  int s = ctx->scale;
+  float x0 = (float)(x * s), y0 = (float)(y * s);
+  float x1 = (float)((x + w) * s), y1 = (float)((y + h) * s);
+  /* Emacs Mac port colors are 0x00RRGGBB — force alpha to 0xFF.  */
+  uint32_t c = color | 0xFF000000u;
+
+  metal_vertex_t *v = emit_vertices (ctx, 6, nil, false);
+  if (!v) return;
+
+  set_vertex (&v[0], x0, y0, 0, 0, c, 0);
+  set_vertex (&v[1], x1, y0, 0, 0, c, 0);
+  set_vertex (&v[2], x0, y1, 0, 0, c, 0);
+  set_vertex (&v[3], x1, y0, 0, 0, c, 0);
+  set_vertex (&v[4], x1, y1, 0, 0, c, 0);
+  set_vertex (&v[5], x0, y1, 0, 0, c, 0);
 }
 
 void
@@ -516,6 +613,13 @@ emacs_metal_draw_rect (emacs_metal_context_t *ctx,
                        int x, int y, int w, int h,
                        uint32_t color)
 {
+  if (!ctx->in_frame || w <= 0 || h <= 0)
+    return;
+
+  emacs_metal_fill_rect (ctx, x, y, w, 1, color);           /* top    */
+  emacs_metal_fill_rect (ctx, x, y + h - 1, w, 1, color);   /* bottom */
+  emacs_metal_fill_rect (ctx, x, y, 1, h, color);            /* left   */
+  emacs_metal_fill_rect (ctx, x + w - 1, y, 1, h, color);   /* right  */
 }
 
 void
@@ -523,17 +627,96 @@ emacs_metal_draw_line (emacs_metal_context_t *ctx,
                        int x1, int y1, int x2, int y2,
                        uint32_t color)
 {
+  if (!ctx->in_frame)
+    return;
+
+  int dx = x2 - x1;
+  int dy = y2 - y1;
+
+  if (dy == 0)
+    {
+      /* Horizontal line.  */
+      int lx = METAL_MIN (x1, x2);
+      int len = dx < 0 ? -dx : dx;
+      emacs_metal_fill_rect (ctx, lx, y1, len, 1, color);
+    }
+  else if (dx == 0)
+    {
+      /* Vertical line.  */
+      int ly = METAL_MIN (y1, y2);
+      int len = dy < 0 ? -dy : dy;
+      emacs_metal_fill_rect (ctx, x1, ly, 1, len, color);
+    }
+  else
+    {
+      /* Diagonal: emit a 1-px-wide quad along the line direction using
+         perpendicular normals (half-pixel outset on each side).  */
+      int s = ctx->scale;
+      float ax = (float)(x1 * s), ay = (float)(y1 * s);
+      float bx = (float)(x2 * s), by = (float)(y2 * s);
+
+      float ldx = bx - ax, ldy = by - ay;
+      float len = sqrtf (ldx * ldx + ldy * ldy);
+      if (len == 0.0f) return;
+
+      /* Unit perpendicular scaled to 0.5 px.  */
+      float nx = (-ldy / len) * 0.5f;
+      float ny = ( ldx / len) * 0.5f;
+
+      uint32_t c = color | 0xFF000000u;
+
+      metal_vertex_t *v = emit_vertices (ctx, 6, nil, false);
+      if (!v) return;
+
+      /* Four corners of the 1-px-wide quad.  */
+      float p0x = ax + nx, p0y = ay + ny; /* A left  */
+      float p1x = ax - nx, p1y = ay - ny; /* A right */
+      float p2x = bx + nx, p2y = by + ny; /* B left  */
+      float p3x = bx - nx, p3y = by - ny; /* B right */
+
+      set_vertex (&v[0], p0x, p0y, 0, 0, c, 0);
+      set_vertex (&v[1], p2x, p2y, 0, 0, c, 0);
+      set_vertex (&v[2], p1x, p1y, 0, 0, c, 0);
+      set_vertex (&v[3], p2x, p2y, 0, 0, c, 0);
+      set_vertex (&v[4], p3x, p3y, 0, 0, c, 0);
+      set_vertex (&v[5], p1x, p1y, 0, 0, c, 0);
+    }
 }
 
 void
 emacs_metal_push_clip (emacs_metal_context_t *ctx,
                        int x, int y, int w, int h)
 {
+  if (ctx->clip_depth >= METAL_MAX_CLIP_STACK)
+    return;
+
+  int s = ctx->scale;
+  metal_clip_rect_t *parent = &ctx->clip_stack[ctx->clip_depth - 1];
+
+  /* New rect in physical pixels.  */
+  int nx = x * s;
+  int ny = y * s;
+  int nw = w * s;
+  int nh = h * s;
+
+  /* Intersect with parent.  */
+  int ix = METAL_MAX (nx, parent->x);
+  int iy = METAL_MAX (ny, parent->y);
+  int ix2 = METAL_MIN (nx + nw, parent->x + parent->w);
+  int iy2 = METAL_MIN (ny + nh, parent->y + parent->h);
+
+  ctx->clip_stack[ctx->clip_depth].x = ix;
+  ctx->clip_stack[ctx->clip_depth].y = iy;
+  ctx->clip_stack[ctx->clip_depth].w = METAL_MAX (0, ix2 - ix);
+  ctx->clip_stack[ctx->clip_depth].h = METAL_MAX (0, iy2 - iy);
+  ctx->clip_depth++;
 }
 
 void
 emacs_metal_pop_clip (emacs_metal_context_t *ctx)
 {
+  if (ctx->clip_depth > 1)
+    ctx->clip_depth--;
 }
 
 void
