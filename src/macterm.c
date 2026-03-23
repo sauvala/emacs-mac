@@ -192,9 +192,14 @@ mac_draw_cg_image (struct frame *f, GC gc,
   {
     int img_w = CGImageGetWidth (image);
     int img_h = CGImageGetHeight (image);
+    /* Pass the GC foreground color for image masks (e.g. fringe bitmaps)
+       so the CGBitmapContext fills masked pixels with the correct color,
+       matching what the CoreGraphics path does via CGImageIsMask check.  */
+    void *fill_color = CGImageIsMask (image) ? (void *)gc->cg_fore_color : NULL;
     void *texture = emacs_metal_upload_cg_image (FRAME_METAL_CTX (f),
                                                  (void *)image,
-                                                 img_w, img_h);
+                                                 img_w, img_h,
+                                                 fill_color);
     if (texture)
       {
         emacs_metal_draw_image_texture (FRAME_METAL_CTX (f), texture,
@@ -1996,7 +2001,8 @@ mac_draw_image_foreground (struct glyph_string *s)
 	    s->img->metal_texture =
 	      emacs_metal_upload_cg_image (FRAME_METAL_CTX (s->f),
 					   (void *)s->img->cg_image,
-					   s->img->width, s->img->height);
+					   s->img->width, s->img->height,
+					   NULL);
 	  if (s->img->metal_texture)
 	    emacs_metal_draw_image_texture (FRAME_METAL_CTX (s->f),
 					    s->img->metal_texture,

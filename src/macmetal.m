@@ -1179,7 +1179,8 @@ emacs_metal_scroll (emacs_metal_context_t *ctx,
 void *
 emacs_metal_upload_cg_image (emacs_metal_context_t *ctx,
                              void *cg_image_ptr,
-                             int width, int height)
+                             int width, int height,
+                             void *fill_color)
 {
   CGImageRef cg_image = (CGImageRef)cg_image_ptr;
   if (!cg_image || width <= 0 || height <= 0)
@@ -1206,6 +1207,11 @@ emacs_metal_upload_cg_image (emacs_metal_context_t *ctx,
   CGColorSpaceRelease (cs);
   if (cg)
     {
+      /* For image masks (e.g. fringe bitmaps), the fill color determines
+         what color masked pixels take.  Set it before drawing so the
+         foreground color is applied, matching the CoreGraphics path.  */
+      if (fill_color)
+        CGContextSetFillColorWithColor (cg, (CGColorRef)fill_color);
       CGContextDrawImage (cg, CGRectMake (0, 0, width, height), cg_image);
       CGContextRelease (cg);
     }
