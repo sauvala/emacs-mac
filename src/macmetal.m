@@ -30,6 +30,7 @@ typedef struct {
     uint16_t atlas_w, atlas_h;
     float bearing_x, bearing_y;
     float advance;
+    bool is_color;
 } glyph_cache_entry_t;
 
 typedef struct {
@@ -37,6 +38,7 @@ typedef struct {
     int shelf_y;
     int shelf_height;
     int cursor_x;
+    bool is_rgba;
 } glyph_atlas_page_t;
 
 struct emacs_metal_glyph_cache {
@@ -665,14 +667,19 @@ set_vertex (metal_vertex_t *v,
 static int
 glyph_cache_get_page (emacs_metal_context_t *ctx,
                       int required_w, int required_h,
+                      bool is_rgba,
                       int *out_x, int *out_y)
 {
   struct emacs_metal_glyph_cache *gc = ctx->glyph_cache;
 
-  /* Try to fit in the current page's current shelf.  */
-  if (gc->page_count > 0)
+  /* Try to fit in the most-recently-used page of the matching type.  */
+  for (int pi = gc->page_count - 1; pi >= 0; pi--)
     {
-      glyph_atlas_page_t *p = &gc->pages[gc->page_count - 1];
+      glyph_atlas_page_t *p = &gc->pages[pi];
+      if (p->is_rgba != is_rgba)
+        continue;
+
+      /* Try current shelf.  */
       if (p->cursor_x + required_w <= GLYPH_ATLAS_SIZE
           && p->shelf_y + METAL_MAX (p->shelf_height, required_h)
              <= GLYPH_ATLAS_SIZE)
@@ -682,10 +689,10 @@ glyph_cache_get_page (emacs_metal_context_t *ctx,
           *out_x = p->cursor_x;
           *out_y = p->shelf_y;
           p->cursor_x += required_w;
-          return gc->page_count - 1;
+          return pi;
         }
 
-      /* Try starting a new shelf on the current page.  */
+      /* Try starting a new shelf on this page.  */
       int new_shelf_y = p->shelf_y + p->shelf_height;
       if (required_w <= GLYPH_ATLAS_SIZE
           && new_shelf_y + required_h <= GLYPH_ATLAS_SIZE)
@@ -695,8 +702,11 @@ glyph_cache_get_page (emacs_metal_context_t *ctx,
           p->cursor_x = required_w;
           *out_x = 0;
           *out_y = new_shelf_y;
-          return gc->page_count - 1;
+          return pi;
         }
+
+      /* This page is full — don't search further.  */
+      break;
     }
 
   /* Need a new page.  Evict oldest if at max.  */
@@ -725,9 +735,10 @@ glyph_cache_get_page (emacs_metal_context_t *ctx,
     }
 
   /* Allocate a new atlas page texture.  */
+  MTLPixelFormat fmt = is_rgba ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatR8Unorm;
   MTLTextureDescriptor *desc
     = [MTLTextureDescriptor
-        texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+        texture2DDescriptorWithPixelFormat:fmt
                                      width:GLYPH_ATLAS_SIZE
                                     height:GLYPH_ATLAS_SIZE
                                  mipmapped:NO];
@@ -746,6 +757,7 @@ glyph_cache_get_page (emacs_metal_context_t *ctx,
   gc->pages[page_idx].shelf_y = 0;
   gc->pages[page_idx].shelf_height = required_h;
   gc->pages[page_idx].cursor_x = required_w;
+  gc->pages[page_idx].is_rgba = is_rgba;
   gc->page_count++;
 
   *out_x = 0;
@@ -828,52 +840,91 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   if (gw > GLYPH_ATLAS_SIZE || gh > GLYPH_ATLAS_SIZE)
     return NULL;
 
+  /* Detect color (emoji) fonts.  */
+  CTFontSymbolicTraits traits = CTFontGetSymbolicTraits (font);
+  bool is_color = (traits & kCTFontTraitColorGlyphs) != 0;
+
   /* Allocate space in the atlas.  */
   int atlas_x, atlas_y;
-  int page = glyph_cache_get_page (ctx, gw, gh, &atlas_x, &atlas_y);
+  int page = glyph_cache_get_page (ctx, gw, gh, is_color, &atlas_x, &atlas_y);
   if (page < 0)
     return NULL;
 
-  /* Rasterize into an alpha-only bitmap.  */
-  uint8_t *pixels = calloc ((size_t)gw * (size_t)gh, 1);
-  if (!pixels)
-    return NULL;
+  uint8_t *pixels;
+  CGContextRef cg_ctx;
 
-  CGContextRef cg_ctx
-    = CGBitmapContextCreate (pixels, gw, gh, 8, gw,
-                             NULL, kCGImageAlphaOnly);
-  if (!cg_ctx)
+  if (is_color)
     {
-      free (pixels);
-      return NULL;
+      /* RGBA bitmap for color emoji.  */
+      size_t bpr = (size_t)gw * 4;
+      pixels = calloc (gh, bpr);
+      if (!pixels)
+        return NULL;
+
+      CGColorSpaceRef cs = CGColorSpaceCreateWithName (kCGColorSpaceSRGB);
+      cg_ctx = CGBitmapContextCreate (pixels, gw, gh, 8, bpr, cs,
+                                      kCGImageAlphaPremultipliedFirst
+                                      | kCGBitmapByteOrder32Host);
+      CGColorSpaceRelease (cs);
+      if (!cg_ctx)
+        {
+          free (pixels);
+          return NULL;
+        }
+
+      CGPoint draw_point = CGPointMake (-bbox.origin.x + 1.0 + subpixel_offset,
+                                        (CGFloat)gh + bbox.origin.y - 1.0);
+      CTFontDrawGlyphs (font, &cg_glyph, &draw_point, 1, cg_ctx);
+      CGContextRelease (cg_ctx);
+
+      /* Upload RGBA pixels to the atlas texture.  */
+      MTLRegion region = MTLRegionMake2D (atlas_x, atlas_y, gw, gh);
+      [gc->pages[page].texture replaceRegion:region
+                                 mipmapLevel:0
+                                   withBytes:pixels
+                                 bytesPerRow:(NSUInteger)(gw * 4)];
     }
+  else
+    {
+      /* Alpha-only bitmap for monochrome glyphs.  */
+      pixels = calloc ((size_t)gw * (size_t)gh, 1);
+      if (!pixels)
+        return NULL;
 
-  /* Set up drawing position: the glyph origin is at (-bbox.origin.x + 1,
-     -bbox.origin.y + 1) with subpixel offset applied to x.  The +1 is
-     for the padding pixel.  CoreGraphics has y-up, but for alpha-only
-     bitmaps we draw directly.  */
-  CGContextSetGrayFillColor (cg_ctx, 1.0, 1.0);
+      cg_ctx = CGBitmapContextCreate (pixels, gw, gh, 8, gw,
+                                      NULL, kCGImageAlphaOnly);
+      if (!cg_ctx)
+        {
+          free (pixels);
+          return NULL;
+        }
 
-  CGPoint draw_point = CGPointMake (-bbox.origin.x + 1.0 + subpixel_offset,
-                                    -bbox.origin.y + 1.0);
-  /* Flip y for CoreGraphics coordinate system.  The bitmap is gh pixels
-     tall; CG origin is bottom-left.  */
-  /* Actually for alpha-only contexts, CG y=0 is at bottom.  We want the
-     glyph baseline at a known position.  */
-  draw_point.y = (CGFloat)gh - draw_point.y;
-  /* Adjust: baseline should be at gh - (1 - bbox.origin.y).  */
-  draw_point.y = (CGFloat)gh + bbox.origin.y - 1.0;
+      /* Set up drawing position: the glyph origin is at (-bbox.origin.x + 1,
+         -bbox.origin.y + 1) with subpixel offset applied to x.  The +1 is
+         for the padding pixel.  CoreGraphics has y-up, but for alpha-only
+         bitmaps we draw directly.  */
+      CGContextSetGrayFillColor (cg_ctx, 1.0, 1.0);
 
-  CTFontDrawGlyphs (font, &cg_glyph, &draw_point, 1, cg_ctx);
+      CGPoint draw_point = CGPointMake (-bbox.origin.x + 1.0 + subpixel_offset,
+                                        -bbox.origin.y + 1.0);
+      /* Flip y for CoreGraphics coordinate system.  The bitmap is gh pixels
+         tall; CG origin is bottom-left.  */
+      /* Actually for alpha-only contexts, CG y=0 is at bottom.  We want the
+         glyph baseline at a known position.  */
+      draw_point.y = (CGFloat)gh - draw_point.y;
+      /* Adjust: baseline should be at gh - (1 - bbox.origin.y).  */
+      draw_point.y = (CGFloat)gh + bbox.origin.y - 1.0;
 
-  CGContextRelease (cg_ctx);
+      CTFontDrawGlyphs (font, &cg_glyph, &draw_point, 1, cg_ctx);
+      CGContextRelease (cg_ctx);
 
-  /* Upload to the atlas texture.  */
-  MTLRegion region = MTLRegionMake2D (atlas_x, atlas_y, gw, gh);
-  [gc->pages[page].texture replaceRegion:region
-                             mipmapLevel:0
-                               withBytes:pixels
-                             bytesPerRow:(NSUInteger)gw];
+      /* Upload to the atlas texture.  */
+      MTLRegion region = MTLRegionMake2D (atlas_x, atlas_y, gw, gh);
+      [gc->pages[page].texture replaceRegion:region
+                                 mipmapLevel:0
+                                   withBytes:pixels
+                                 bytesPerRow:(NSUInteger)gw];
+    }
 
   free (pixels);
 
@@ -904,6 +955,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   entry->bearing_x = bbox.origin.x - 1.0f;
   entry->bearing_y = bbox.origin.y - 1.0f;
   entry->advance = (float)advance_size.width;
+  entry->is_color = is_color;
   gc->entry_count++;
 
   return entry;
@@ -966,16 +1018,20 @@ emacs_metal_draw_glyphs (emacs_metal_context_t *ctx,
       float v1 = (float)(entry->atlas_y + entry->atlas_h) * atlas_size_inv;
 
       /* Emit 6 vertices (two triangles) for the glyph quad.
-         texture_id = 1 signals alpha-tinted glyph rendering.  */
+         texture_id = 1: alpha-tinted (monochrome); 2: direct RGBA (color emoji).  */
+      uint32_t tid = entry->is_color ? 2 : 1;
+      /* For color emoji, pass white so the fragment shader uses the texture
+         color directly (tex * color = tex * 1).  */
+      uint32_t vc = entry->is_color ? 0xFFFFFFFFu : c;
       metal_vertex_t *v = emit_vertices (ctx, 6, atlas_tex, true);
       if (!v) return;
 
-      set_vertex (&v[0], gx,  gy,  u0, v0, c, 1);
-      set_vertex (&v[1], gx1, gy,  u1, v0, c, 1);
-      set_vertex (&v[2], gx,  gy1, u0, v1, c, 1);
-      set_vertex (&v[3], gx1, gy,  u1, v0, c, 1);
-      set_vertex (&v[4], gx1, gy1, u1, v1, c, 1);
-      set_vertex (&v[5], gx,  gy1, u0, v1, c, 1);
+      set_vertex (&v[0], gx,  gy,  u0, v0, vc, tid);
+      set_vertex (&v[1], gx1, gy,  u1, v0, vc, tid);
+      set_vertex (&v[2], gx,  gy1, u0, v1, vc, tid);
+      set_vertex (&v[3], gx1, gy,  u1, v0, vc, tid);
+      set_vertex (&v[4], gx1, gy1, u1, v1, vc, tid);
+      set_vertex (&v[5], gx,  gy1, u0, v1, vc, tid);
     }
 }
 
