@@ -2460,7 +2460,11 @@ static void mac_move_frame_window_structure_1 (struct frame *, int, int);
   [emacsView setWantsLayer:YES];
   {
     NSRect bounds = [emacsView bounds];
-    int scale = 1;
+    /* Try to get scale from the window; falls back to 2 on Retina if
+       the window isn't visible yet (updateBackingScaleFactor will
+       correct this once the window appears on screen).  */
+    int scale = (int)(emacsWindow ? [emacsWindow backingScaleFactor] : 2);
+    if (scale < 1) scale = 1;
     FRAME_METAL_CTX (f) = emacs_metal_context_create (
       (__bridge void *)emacsView,
       (int)NSWidth (bounds), (int)NSHeight (bounds), scale);
@@ -3130,7 +3134,7 @@ static void mac_move_frame_window_structure_1 (struct frame *, int, int);
       int height = (int)NSHeight (bounds);
       metalLayer.contentsScale = scale;
       metalLayer.drawableSize = CGSizeMake (width * scale, height * scale);
-      emacs_metal_context_resize (FRAME_METAL_CTX (f), width, height);
+      emacs_metal_context_resize (FRAME_METAL_CTX (f), width, height, scale);
     }
 #endif
 }
@@ -6591,7 +6595,7 @@ static BOOL emacsViewUpdateLayerDisabled;
       int height = (int)NSHeight (bounds);
       metalLayer.contentsScale = scale;
       metalLayer.drawableSize = CGSizeMake (width * scale, height * scale);
-      emacs_metal_context_resize (FRAME_METAL_CTX (f), width, height);
+      emacs_metal_context_resize (FRAME_METAL_CTX (f), width, height, scale);
     }
 #else
   backingSizeOutOfSync = YES;

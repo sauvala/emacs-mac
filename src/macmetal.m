@@ -370,9 +370,11 @@ emacs_metal_context_create (void *view, int width, int height, int scale)
 }
 
 void
-emacs_metal_context_resize (emacs_metal_context_t *ctx, int width, int height)
+emacs_metal_context_resize (emacs_metal_context_t *ctx, int width, int height,
+                           int scale)
 {
-  if (ctx->width == width && ctx->height == height)
+  if (scale < 1) scale = 1;
+  if (ctx->width == width && ctx->height == height && ctx->scale == scale)
     return;
 
   id<MTLTexture> old_backbuffer = ctx->backbuffer;
@@ -381,6 +383,7 @@ emacs_metal_context_resize (emacs_metal_context_t *ctx, int width, int height)
 
   ctx->width = width;
   ctx->height = height;
+  ctx->scale = scale;
 
   if (!create_backbuffer (ctx))
     {

@@ -13,7 +13,8 @@ extern emacs_metal_context_t *emacs_metal_context_create (void *view,
                                                            int height,
                                                            int scale);
 extern void emacs_metal_context_resize (emacs_metal_context_t *ctx,
-                                        int width, int height);
+                                        int width, int height,
+                                        int scale);
 extern void emacs_metal_context_destroy (emacs_metal_context_t *ctx);
 
 /* Frame begin/end */
