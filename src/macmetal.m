@@ -820,7 +820,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
       gc->page_count = 0;
     }
 
-  /* Get glyph bounding box (in points).  */
+  /* Get glyph bounding box (in points, relative to pen position).  */
   CGGlyph cg_glyph = (CGGlyph)glyph_id;
   CGRect bbox;
   CTFontGetBoundingRectsForGlyphs (font, kCTFontOrientationHorizontal,
@@ -832,13 +832,17 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
 
   int s = ctx->scale;
 
-  /* Subpixel offset in pixels.  */
-  float subpixel_offset = (float)subpixel / (float)SUBPIXEL_POSITIONS;
+  /* Compute the glyph's pixel bounding box (relative to pen position).
+     bbox.origin is the offset from pen to the bottom-left of the glyph
+     in CG coordinates (y-up).  bbox.origin.y < 0 means descender.  */
+  float px_left = floorf (bbox.origin.x * s);
+  float px_bottom = floorf (bbox.origin.y * s);
+  float px_right = ceilf ((bbox.origin.x + bbox.size.width) * s);
+  float px_top = ceilf ((bbox.origin.y + bbox.size.height) * s);
 
-  /* Compute integer pixel bounds at scale, with 1px padding.  */
-  int gw = (int)ceilf ((bbox.size.width + fabsf (bbox.origin.x)) * s
-                        + subpixel_offset) + 2;
-  int gh = (int)ceilf ((bbox.size.height + fabsf (bbox.origin.y)) * s) + 2;
+  /* Bitmap dimensions: exact pixel bbox + 2px padding.  */
+  int gw = (int)(px_right - px_left) + 2;
+  int gh = (int)(px_top - px_bottom) + 2;
 
   if (gw <= 0) gw = 1;
   if (gh <= 0) gh = 1;
@@ -855,12 +859,22 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   if (page < 0)
     return NULL;
 
+  /* Pen position in bitmap pixel coordinates.
+     Place the pen so the glyph's bounding box starts at pixel (1, 1).
+     CG origin is bottom-left (y-up).  */
+  float pen_px_x = 1.0f - px_left;
+  float pen_px_y = 1.0f - px_bottom;
+
+  /* Pen position in points (after CTM scaling by s).  */
+  CGFloat pen_pt_x = (CGFloat)pen_px_x / s;
+  CGFloat pen_pt_y = (CGFloat)pen_px_y / s;
+
   uint8_t *pixels;
   CGContextRef cg_ctx;
 
   if (is_color)
     {
-      /* RGBA bitmap for color emoji at display scale.  */
+      /* RGBA bitmap for color emoji.  */
       size_t bpr = (size_t)gw * 4;
       pixels = calloc (gh, bpr);
       if (!pixels)
@@ -877,18 +891,11 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
           return NULL;
         }
 
-      /* Scale the context so CTFontDrawGlyphs renders at display scale.
-         After scaling, coordinates are in points (not pixels).  */
       CGContextScaleCTM (cg_ctx, s, s);
-
-      /* Draw position in points: baseline at correct y position.
-         CG origin is bottom-left.  */
-      CGPoint draw_point = CGPointMake ((-bbox.origin.x + subpixel_offset) + 1.0 / s,
-                                        (CGFloat)gh / s + bbox.origin.y - 1.0 / s);
+      CGPoint draw_point = CGPointMake (pen_pt_x, pen_pt_y);
       CTFontDrawGlyphs (font, &cg_glyph, &draw_point, 1, cg_ctx);
       CGContextRelease (cg_ctx);
 
-      /* Upload RGBA pixels to the atlas texture.  */
       MTLRegion region = MTLRegionMake2D (atlas_x, atlas_y, gw, gh);
       [gc->pages[page].texture replaceRegion:region
                                  mipmapLevel:0
@@ -897,7 +904,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
     }
   else
     {
-      /* Alpha-only bitmap for monochrome glyphs at display scale.  */
+      /* Alpha-only bitmap for monochrome glyphs.  */
       pixels = calloc ((size_t)gw * (size_t)gh, 1);
       if (!pixels)
         return NULL;
@@ -911,20 +918,11 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
         }
 
       CGContextSetGrayFillColor (cg_ctx, 1.0, 1.0);
-
-      /* Scale the context so CTFontDrawGlyphs renders at display scale.
-         After scaling, coordinates are in points (not pixels).  */
       CGContextScaleCTM (cg_ctx, s, s);
-
-      /* Draw position in points.  CG origin is bottom-left.
-         Baseline y: place so the glyph descender starts 1px (in pixels)
-         from the bottom of the bitmap.  */
-      CGPoint draw_point = CGPointMake ((-bbox.origin.x + subpixel_offset) + 1.0 / s,
-                                        (CGFloat)gh / s + bbox.origin.y - 1.0 / s);
+      CGPoint draw_point = CGPointMake (pen_pt_x, pen_pt_y);
       CTFontDrawGlyphs (font, &cg_glyph, &draw_point, 1, cg_ctx);
       CGContextRelease (cg_ctx);
 
-      /* Upload to the atlas texture.  */
       MTLRegion region = MTLRegionMake2D (atlas_x, atlas_y, gw, gh);
       [gc->pages[page].texture replaceRegion:region
                                  mipmapLevel:0
@@ -958,8 +956,15 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   entry->atlas_y = (uint16_t)atlas_y;
   entry->atlas_w = (uint16_t)gw;
   entry->atlas_h = (uint16_t)gh;
-  entry->bearing_x = bbox.origin.x * s - 1.0f;
-  entry->bearing_y = bbox.origin.y * s - 1.0f;
+  /* Bearing values in pixels: offset from pen position to quad edges.
+     bearing_x = px_left - 1 (left edge of quad relative to pen x)
+     bearing_y = px_bottom - 1 (bottom edge relative to pen, CG y-up)
+     In Metal (y-down), the quad top edge is:
+       baseline_y - (px_top + 1) = baseline_y - (gh + bearing_y)
+     because gh = px_top - px_bottom + 2 and bearing_y = px_bottom - 1
+     so gh + bearing_y = px_top - px_bottom + 2 + px_bottom - 1 = px_top + 1. */
+  entry->bearing_x = px_left - 1.0f;
+  entry->bearing_y = px_bottom - 1.0f;
   entry->advance = (float)advance_size.width * s;
   entry->is_color = is_color;
   gc->entry_count++;
