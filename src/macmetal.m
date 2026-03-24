@@ -820,7 +820,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
       gc->page_count = 0;
     }
 
-  /* Get glyph bounding box.  */
+  /* Get glyph bounding box (in points).  */
   CGGlyph cg_glyph = (CGGlyph)glyph_id;
   CGRect bbox;
   CTFontGetBoundingRectsForGlyphs (font, kCTFontOrientationHorizontal,
@@ -830,13 +830,15 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   CTFontGetAdvancesForGlyphs (font, kCTFontOrientationHorizontal,
                               &cg_glyph, &advance_size, 1);
 
-  /* Subpixel offset.  */
+  int s = ctx->scale;
+
+  /* Subpixel offset in pixels.  */
   float subpixel_offset = (float)subpixel / (float)SUBPIXEL_POSITIONS;
 
-  /* Compute integer pixel bounds with 1px padding.  */
-  int gw = (int)ceilf (bbox.size.width + fabsf (bbox.origin.x)
+  /* Compute integer pixel bounds at scale, with 1px padding.  */
+  int gw = (int)ceilf ((bbox.size.width + fabsf (bbox.origin.x)) * s
                         + subpixel_offset) + 2;
-  int gh = (int)ceilf (bbox.size.height + fabsf (bbox.origin.y)) + 2;
+  int gh = (int)ceilf ((bbox.size.height + fabsf (bbox.origin.y)) * s) + 2;
 
   if (gw <= 0) gw = 1;
   if (gh <= 0) gh = 1;
@@ -858,7 +860,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
 
   if (is_color)
     {
-      /* RGBA bitmap for color emoji.  */
+      /* RGBA bitmap for color emoji at display scale.  */
       size_t bpr = (size_t)gw * 4;
       pixels = calloc (gh, bpr);
       if (!pixels)
@@ -875,8 +877,14 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
           return NULL;
         }
 
-      CGPoint draw_point = CGPointMake (-bbox.origin.x + 1.0 + subpixel_offset,
-                                        (CGFloat)gh + bbox.origin.y - 1.0);
+      /* Scale the context so CTFontDrawGlyphs renders at display scale.
+         After scaling, coordinates are in points (not pixels).  */
+      CGContextScaleCTM (cg_ctx, s, s);
+
+      /* Draw position in points: baseline at correct y position.
+         CG origin is bottom-left.  */
+      CGPoint draw_point = CGPointMake ((-bbox.origin.x + subpixel_offset) + 1.0 / s,
+                                        (CGFloat)gh / s + bbox.origin.y - 1.0 / s);
       CTFontDrawGlyphs (font, &cg_glyph, &draw_point, 1, cg_ctx);
       CGContextRelease (cg_ctx);
 
@@ -889,7 +897,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
     }
   else
     {
-      /* Alpha-only bitmap for monochrome glyphs.  */
+      /* Alpha-only bitmap for monochrome glyphs at display scale.  */
       pixels = calloc ((size_t)gw * (size_t)gh, 1);
       if (!pixels)
         return NULL;
@@ -902,22 +910,17 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
           return NULL;
         }
 
-      /* Set up drawing position: the glyph origin is at (-bbox.origin.x + 1,
-         -bbox.origin.y + 1) with subpixel offset applied to x.  The +1 is
-         for the padding pixel.  CoreGraphics has y-up, but for alpha-only
-         bitmaps we draw directly.  */
       CGContextSetGrayFillColor (cg_ctx, 1.0, 1.0);
 
-      CGPoint draw_point = CGPointMake (-bbox.origin.x + 1.0 + subpixel_offset,
-                                        -bbox.origin.y + 1.0);
-      /* Flip y for CoreGraphics coordinate system.  The bitmap is gh pixels
-         tall; CG origin is bottom-left.  */
-      /* Actually for alpha-only contexts, CG y=0 is at bottom.  We want the
-         glyph baseline at a known position.  */
-      draw_point.y = (CGFloat)gh - draw_point.y;
-      /* Adjust: baseline should be at gh - (1 - bbox.origin.y).  */
-      draw_point.y = (CGFloat)gh + bbox.origin.y - 1.0;
+      /* Scale the context so CTFontDrawGlyphs renders at display scale.
+         After scaling, coordinates are in points (not pixels).  */
+      CGContextScaleCTM (cg_ctx, s, s);
 
+      /* Draw position in points.  CG origin is bottom-left.
+         Baseline y: place so the glyph descender starts 1px (in pixels)
+         from the bottom of the bitmap.  */
+      CGPoint draw_point = CGPointMake ((-bbox.origin.x + subpixel_offset) + 1.0 / s,
+                                        (CGFloat)gh / s + bbox.origin.y - 1.0 / s);
       CTFontDrawGlyphs (font, &cg_glyph, &draw_point, 1, cg_ctx);
       CGContextRelease (cg_ctx);
 
@@ -955,9 +958,9 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   entry->atlas_y = (uint16_t)atlas_y;
   entry->atlas_w = (uint16_t)gw;
   entry->atlas_h = (uint16_t)gh;
-  entry->bearing_x = bbox.origin.x - 1.0f;
-  entry->bearing_y = bbox.origin.y - 1.0f;
-  entry->advance = (float)advance_size.width;
+  entry->bearing_x = bbox.origin.x * s - 1.0f;
+  entry->bearing_y = bbox.origin.y * s - 1.0f;
+  entry->advance = (float)advance_size.width * s;
   entry->is_color = is_color;
   gc->entry_count++;
 
