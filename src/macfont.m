@@ -2946,14 +2946,13 @@ macfont_draw (struct glyph_string *s, int from, int to, int x, int y,
                            gc->xgcv.background);
 
   {
-    /* Build position arrays for Metal (x, y pairs).  */
-    float *metal_positions = alloca (sizeof (float) * len * 2);
+    /* Build flat x-position array for Metal (one float per glyph).  */
+    float *metal_positions = alloca (sizeof (float) * len);
     uint16_t *metal_glyphs = alloca (sizeof (uint16_t) * len);
     for (int i = 0; i < len; i++)
       {
         metal_glyphs[i] = glyphs[i];
-        metal_positions[i * 2] = x + positions[i].x;
-        metal_positions[i * 2 + 1] = 0;  /* y offset from baseline */
+        metal_positions[i] = x + positions[i].x;
       }
 
     emacs_metal_draw_glyphs (FRAME_METAL_CTX (f),
@@ -2966,7 +2965,7 @@ macfont_draw (struct glyph_string *s, int from, int to, int x, int y,
     if (macfont_info->synthetic_bold_p)
       {
         for (int i = 0; i < len; i++)
-          metal_positions[i * 2] += 1.0f;
+          metal_positions[i] += 1.0f;
         emacs_metal_draw_glyphs (FRAME_METAL_CTX (f),
                                  metal_glyphs, metal_positions, len,
                                  (void *) macfont_info->macfont,
