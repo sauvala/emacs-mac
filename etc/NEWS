@@ -2355,6 +2355,15 @@ If 'page-delimiters' is set in 'whitespace-style', or the new minor mode
 width of the window.  The new 'whitespace-page-delimiter' face can be
 used to customize the appearance.
 
+---
+*** New user option 'whitespace-global-mode-buffers'.
+Normally, 'global-whitespace-mode' skips special buffers whose name
+starts with an asterisk '*'.  This user option provides an override: it
+contains a list of regular expressions used to match the names of
+special buffers in which 'global-whitespace-mode' should turn on.  The
+default value preserves the existing exception for the "*scratch*"
+buffer.
+
 ** Bookmark
 
 ---
@@ -3125,6 +3134,12 @@ redisplays the directory in Dired to show '\n' in the file name instead
 of a literal newline.  This prevents executing many Dired operations on
 such a file from failing and signaling an error.  The default value of
 this user option is nil.
+
+---
+*** New Dired handling of errors from 'ls'.
+When invoking a Dired command causes 'ls' to emit an error message,
+Emacs now displays the message in a popped up buffer instead of
+outputting it in the Dired buffer and signaling an error.
 
 ** Grep
 
@@ -4686,6 +4701,14 @@ Actually passing it a function is now deprecated.
 to display its char argument on a given frame.  This new function,
 unlike 'char-displayable-p', does not check whether the character can be
 encoded by the underlying terminal.
+
++++
+** New function 'frame-initial-p'.
+This predicate returns non-nil if a given frame or terminal is or holds,
+respectively, the initial text frame that is used internally during
+daemon mode, batch mode, and the early stages of startup.  Interactive
+and graphical programs, for instance, can use this predicate to avoid
+operating on the initial frame, which is never displayed.
 
 +++
 ** New macros 'static-when' and 'static-unless'.
