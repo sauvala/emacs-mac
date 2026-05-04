@@ -5,7 +5,7 @@
 ;; Author: Jonas Bernoulli <jonas@bernoul.li>
 ;; URL: https://github.com/magit/transient
 ;; Keywords: extensions
-;; Version: 0.13.0
+;; Version: 0.13.2
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -39,7 +39,7 @@
 ;;; Code:
 ;;;; Frontmatter
 
-(defconst transient-version "v0.13.0-10-g5b2ff26f-builtin")
+(defconst transient-version "v0.13.2-10-gf7894ca4-builtin")
 
 (require 'cl-lib)
 (require 'eieio)
@@ -5524,15 +5524,16 @@ search instead."
             lisp-imenu-generic-expression :test #'equal)
 
 (defun transient--suspend-text-conversion-style ()
-  ;; Added in Emacs 30.1, but not defined on all platforms.
-  (static-when (boundp 'overriding-text-conversion-style)
-    (when text-conversion-style
-      (letrec ((suspended overriding-text-conversion-style)
-               (fn (lambda ()
-                     (setq overriding-text-conversion-style nil)
-                     (remove-hook 'transient-exit-hook fn))))
-        (setq overriding-text-conversion-style suspended)
-        (add-hook 'transient-exit-hook fn)))))
+  (when (and (bound-and-true-p text-conversion-style)
+             (bound-and-true-p overriding-text-conversion-style)
+             ;; Somehow the above does not silence the compiler.
+             (boundp 'overriding-text-conversion-style))
+    (letrec ((suspended overriding-text-conversion-style)
+             (fn (lambda ()
+                   (setq overriding-text-conversion-style nil)
+                   (remove-hook 'transient-exit-hook fn))))
+      (setq overriding-text-conversion-style suspended)
+      (add-hook 'transient-exit-hook fn))))
 
 (declare-function which-key-mode "ext:which-key" (&optional arg))
 

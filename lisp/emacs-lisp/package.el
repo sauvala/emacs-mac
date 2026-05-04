@@ -468,12 +468,15 @@ BI-DESC should be a `package--bi-desc' object."
                        :summary (package--bi-desc-summary bi-desc)
                        :dir 'builtin))
 
-(defconst package--builtin-alist
-  (cl-loop for bi-desc in package--builtins
-           unless (eq (car bi-desc) 'emacs)
-           collect (list (car bi-desc) (package--from-builtin bi-desc)))
-  "Alist of built-in packages in the form of `package-alist'.
-The alist doesn't include the pseudo-package for Emacs.")
+(defvar package--builtin-alist nil)
+(defun package--builtin-alist ()
+  "Return a alist of built-in packages in the form of `package-alist'.
+The alist doesn't include the pseudo-package for Emacs."
+  (with-memoization package--builtin-alist
+    (require 'finder-inf nil t)         ;for `package--builtins'
+    (cl-loop for bi-desc in package--builtins
+             unless (eq (car bi-desc) 'emacs)
+             collect (list (car bi-desc) (package--from-builtin bi-desc)))))
 
 (defun package-desc-suffix (pkg-desc)
   "Return file-name extension of package-desc object PKG-DESC.
@@ -1866,7 +1869,8 @@ These are packages which are neither contained in
 `package-selected-packages' nor a dependency of one that is."
   (let ((needed (package--dependencies package-selected-packages)))
     (cl-loop for (name . descs) in (package--alist)
-             unless (or (memq name needed)
+             unless (or (assq name needed)
+                        (memq name package-selected-packages)
                         ;; Do not auto-remove external packages.
                         (not (package--user-installed-p name)))
              append descs)))
@@ -2166,7 +2170,7 @@ NAME should be a symbol."
                   (package-desc-version (cadr elt))
                   (package-desc-version available)))
              (not (package-vc-p (cadr elt))))))
-    (nconc (and include-builtins package--builtin-alist)
+    (nconc (and include-builtins (package--builtin-alist))
            (package--alist)))))
 
 ;;;###autoload
@@ -2562,7 +2566,7 @@ intended for testing Emacs and/or the packages in a clean environment."
   (interactive
    (cl-loop for p in (append
                       (cl-loop for p in (package--alist) append (cdr p))
-                      (cl-loop for p in package-archive-contents append (cdr p)))
+                      (cl-loop for p in (package--archive-contents) append (cdr p)))
 	    unless (package-built-in-p p)
 	    collect (cons (package-desc-full-name p) p) into table
 	    finally return
@@ -2887,9 +2891,9 @@ Helper function for `describe-package'."
         (when (bolp)
           (insert (make-string 13 ?\s)))
         (package--print-email-button author)))
-    (let* ((all-pkgs (append (cdr (assq name package-alist))
-                             (cdr (assq name package-archive-contents))
-                             (cdr (assq name package--builtin-alist))))
+    (let* ((all-pkgs (append (cdr (assq name (package--alist)))
+                             (cdr (assq name (package--archive-contents)))
+                             (cdr (assq name (package--builtin-alist)))))
            (other-pkgs (delete desc all-pkgs)))
       (when other-pkgs
         (package--print-help-section "Other versions"
@@ -3455,7 +3459,7 @@ KEYWORDS should be nil or a list of keywords."
               (push pkg info-list))))))
 
     ;; Built-in packages:
-    (dolist (elt package--builtin-alist)
+    (dolist (elt (package--builtin-alist))
       (let ((name (car elt)) (pkg (cadr elt)))
         (when (and (package--has-keyword-p pkg keywords)
                    (or package-list-unversioned
@@ -3499,7 +3503,7 @@ PACKAGES can be nil or t, which means to display all known
 packages, or a list of packages."
   (dolist (pkg (if (memq packages '(t nil))
                    (flatten-tree
-                    (list (mapcar #'cdr package--builtin-alist)
+                    (list (mapcar #'cdr (package--builtin-alist))
                           (mapcar #'cdr (package--archive-contents))
                           (mapcar #'cdr (package--alist))))
                  (mapcar #'package-get-descriptor packages)))
@@ -4589,7 +4593,7 @@ SUG should be of the form as described in `package--suggestion-applies-p'."
           (with-current-buffer buf
             (funcall-interactively (or (cadddr sug) (car sug)))))))))
 
-(defun package--autosugest-prompt (packages)
+(defun package--autosuggest-prompt (packages)
   "Query the user whether to install PACKAGES or not.
 PACKAGES is a list of package suggestions in the form described in
 `package--suggestion-applies-p'.  The function returns a non-nil value
@@ -4672,7 +4676,7 @@ The optional argument CANDIDATES may be a list of package suggestions
 in the form described in `package--suggestion-applies-p'.  If omitted
 or nil, the list of candidates will be computed from the database."
   (interactive)
-  (package--autosugest-prompt
+  (package--autosuggest-prompt
    (or candidates
        (package--autosuggest-find-candidates)
        (user-error "No package suggestions found"))))
@@ -4974,7 +4978,7 @@ and prevents the object from being returned if the predicate returns nil."
                        ((delete-dups (ensure-list sources)))))
         (dolist (desc (alist-get pkg (pcase-exhaustive source
                                        ('installed (package--alist))
-                                       ('builtin package--builtin-alist)
+                                       ('builtin (package--builtin-alist))
                                        ('archive (package--archive-contents)))))
           (when (or (null pred) (funcall pred desc))
             (throw 'found desc))))))

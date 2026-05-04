@@ -32325,7 +32325,10 @@ glyph_string_containing_background_width (struct glyph_string *s)
 {
   if (s->cmp)
     while (s->cmp_from)
-      s = s->prev;
+      {
+	s = s->prev;
+	eassume (s);
+      }
 
   return s;
 }

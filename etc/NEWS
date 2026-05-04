@@ -1363,7 +1363,7 @@ more terminals and applications than the old capabilities, 'setf24' and
 +++
 ** New user option 'xterm-update-cursor' to update cursor display on TTYs.
 When enabled, Emacs sends Xterm escape sequences on Xterm-compatible
-terminals to update the cursor's appearacse.  Emacs can update the
+terminals to update the cursor's appearance.  Emacs can update the
 cursor's shape and color.  For example, if you use a purple bar cursor
 on graphical displays then when this option is enabled Emacs will use a
 purple bar cursor on compatible terminals as well.  See the Info node
@@ -1573,11 +1573,10 @@ It is equivalent to running 'project-any-command' with
 The prompt now displays the chosen project on which to invoke a command.
 
 ---
-*** 'project-prompter' values may be called with up to four arguments.
+*** 'project-prompter' values may be called with up to three arguments.
 These allow callers of the value of 'project-prompter' to specify a
 prompt string; prompt the user to choose between a subset of all the
-known projects; disallow returning arbitrary directories; and allow
-returning an empty string.
+known projects; and disallow returning arbitrary directories.
 See the docstring of 'project-prompter' for a full specification of
 these new optional arguments.
 
@@ -1891,6 +1890,17 @@ information.
 *** 'treesit-language-at-point-function' is now optional.
 Multi-language major modes can rely on the default return value from
 'treesit-language-at' that uses the new function 'treesit-parsers-at'.
+
++++
+*** New function 'treesit-query-with-optional'.
+When used in 'treesit-font-lock-rules', 'treesit-query-with-optional'
+returns a default query plus the valid queries from a list of optional
+queries.
+
++++
+*** New function 'treesit-query-with-fallback'.
+When used in 'treesit-font-lock-rules', 'treesit-query-with-fallback'
+selects the first valid query from a list.
 
 +++
 *** Tree-sitter thing functions now work better with multiple parsers.
@@ -3388,6 +3398,12 @@ To undo this change you can use
 This command prints the log of VC changes to the current fileset on
 another branch.
 
+---
+*** VC Annotate for Mercurial repositories shows changeset hashes.
+To restore showing revision numbers instead of changeset hashes,
+customize the new option vc-hg-annotate-show-revision-numbers to
+non-nil.
+
 +++
 *** New commands to handle repositories with multiple working trees.
 Some VCS support more than one working tree with the same backing
@@ -3578,15 +3594,28 @@ include were committed and will be pushed.
 current VC fileset.
 
 +++
-*** New commands to report information about outstanding changes.
-'C-x v T =' ('vc-diff-outstanding') and 'C-x v T D'
-('vc-root-diff-outstanding') report diffs of changes since the merge
+*** New commands to report information about unintegrated changes.
+'C-x v T =' ('vc-diff-unintegrated') and 'C-x v T D'
+('vc-root-diff-unintegrated') report diffs of changes since the merge
 base with the remote branch, including uncommitted changes.
-'C-x v T l' ('vc-log-outstanding') and 'C-x v T L'
-('vc-root-log-outstanding') show the corresponding revision logs.
+'C-x v T l' ('vc-log-unintegrated') and 'C-x v T L'
+('vc-root-log-unintegrated') show the corresponding revision logs.
 These are useful to view all outstanding (unmerged, unpushed) changes on
 the current branch.  They are also available as 'T =', 'T D', 'T l' and
 'T L' in VC Directory buffers.
+
+'C-x v T R =' ('vc-diff-remote-unintegrated'), 'C-x v T R D'
+('vc-root-diff-remote-unintegrated'), 'C-x v T R l'
+('vc-log-remote-unintegrated') and 'C-x v T R L'
+('vc-root-log-remote-unintegrated') are corresponding commands which
+report information about the remote versions of a topic branch.
+
++++
+*** New commands to report combined diffs of all local changes.
+'C-x v E =' ('vc-diff-outgoing-and-edited') and 'C-x v E D'
+('vc-root-diff-outgoing-and-edited') report combined diffs of all
+outgoing changes plus any uncommitted changes.  They are useful to show
+all work that's present only locally.
 
 +++
 *** New user option 'vc-use-incoming-outgoing-prefixes'.
@@ -4185,11 +4214,15 @@ provide more accurate warnings from byte compilation.
 The new optional argument READONLY to 'sqlite-open' function allows to
 open an existing database only for reading.
 
++++
 *** 'sqlite-open' now recognizes 'file://' URIs as well as file names.
 The 'file://' URIs are supported by default.  In the unusual case that a
 normal file name starts with "file:", you can disable the URI
 recognition by invoking 'sqlite-open' with the new optional argument
 DISABLE-URI non-nil.
+
++++
+*** 'sqlite-close' now does nothing if the connection is already closed.
 
 ** GUD
 
@@ -5244,9 +5277,7 @@ color Emoji font installed on your system for the 'emoji' script.
 +++
 ** Emacs on MS-Windows now supports 'yank-media'.
 This command inserts clipboard data of different formats into the
-current buffer, if the major mode supports it.  (Support for
-'yank-media' will be unavailable on MS-Windows if Emacs was configured
-'--without-native-image-api'.)
+current buffer, if the major mode supports it.
 
 ---
 ** Emacs on MS-Windows now supports up to 1024 sub-processes.
