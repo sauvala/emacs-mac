@@ -3336,6 +3336,9 @@ struct image
 
   /* Whether image scaling does smoothing.  */
   bool smoothing;
+#ifdef USE_METAL_RENDERING
+  void *metal_texture;   /* id<MTLTexture>, opaque for C */
+#endif
 #endif
 
   /* Hash value of image specification to speed up comparisons.  */

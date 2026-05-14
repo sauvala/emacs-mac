@@ -41,6 +41,9 @@ Original author: YAMAMOTO Mitsuharu
 #include "macfont.h"
 #include "macuvs.h"
 #include "pdumper.h"
+#ifdef USE_METAL_RENDERING
+#include "macmetal.h"
+#endif
 
 #include <libkern/OSByteOrder.h>
 
@@ -2885,8 +2888,10 @@ macfont_draw (struct glyph_string *s, int from, int to, int x, int y,
   struct frame *f = s->f;
   struct macfont_info *macfont_info = (struct macfont_info *) s->font;
   GC gc = s->gc;
+#ifndef USE_METAL_RENDERING
   CGRect background_rect;
   CGPoint text_position;
+#endif
   CGGlyph *glyphs;
   CGPoint *positions;
   CGFloat font_size = CTFontGetSize (macfont_info->macfont);
@@ -2895,10 +2900,13 @@ macfont_draw (struct glyph_string *s, int from, int to, int x, int y,
      || (macfont_info->antialias == MACFONT_ANTIALIAS_DEFAULT
 	 && font_size <= macfont_antialias_threshold));
   int len = to - from;
+#ifndef USE_METAL_RENDERING
   bool respect_alpha_background_p = s->hl != DRAW_CURSOR;
+#endif
 
   block_input ();
 
+#ifndef USE_METAL_RENDERING
   if (with_background)
     background_rect = CGRectMake (x, y - FONT_BASE (s->font),
 				  s->width, FONT_HEIGHT (s->font));
@@ -2906,6 +2914,7 @@ macfont_draw (struct glyph_string *s, int from, int to, int x, int y,
     background_rect = CGRectNull;
 
   text_position = CGPointMake (x, -y);
+#endif
   glyphs = xmalloc (sizeof (CGGlyph) * len);
   {
     CGFloat advance_delta = 0;
@@ -2928,6 +2937,50 @@ macfont_draw (struct glyph_string *s, int from, int to, int x, int y,
       }
   }
 
+#ifdef USE_METAL_RENDERING
+  /* Metal glyph rendering path.  */
+  mac_metal_apply_gc_clip (f, gc);
+  if (with_background)
+    emacs_metal_fill_rect (FRAME_METAL_CTX (f),
+                           x, y - FONT_BASE (s->font),
+                           s->width, FONT_HEIGHT (s->font),
+                           mac_metal_background_color (f, gc,
+                                                       s->hl != DRAW_CURSOR));
+
+  {
+    /* Build flat x-position array for Metal (one float per glyph).  */
+    float *metal_positions = alloca (sizeof (float) * len);
+    uint16_t *metal_glyphs = alloca (sizeof (uint16_t) * len);
+    for (int i = 0; i < len; i++)
+      {
+        metal_glyphs[i] = glyphs[i];
+        metal_positions[i] = x + positions[i].x;
+      }
+
+    emacs_metal_draw_glyphs (FRAME_METAL_CTX (f),
+                             metal_glyphs, metal_positions, len,
+                             (void *) macfont_info->macfont,
+                             gc->xgcv.foreground,
+                             (float) y);
+
+    /* Synthetic bold: draw again with 1px x offset.  */
+    if (macfont_info->synthetic_bold_p)
+      {
+        for (int i = 0; i < len; i++)
+          metal_positions[i] += 1.0f;
+        emacs_metal_draw_glyphs (FRAME_METAL_CTX (f),
+                                 metal_glyphs, metal_positions, len,
+                                 (void *) macfont_info->macfont,
+                                 gc->xgcv.foreground,
+                                 (float) y);
+      }
+  }
+
+  xfree (glyphs);
+  xfree (positions);
+  unblock_input ();
+  return len;
+#else /* !USE_METAL_RENDERING */
   /* We assume `macfont_info' is pointing to valid data during the
      execution of the code between MAC_BEGIN_DRAW_TO_FRAME and
      MAC_END_DRAW_TO_FRAME in a non-main thread, because the thread
@@ -3003,6 +3056,7 @@ macfont_draw (struct glyph_string *s, int from, int to, int x, int y,
   unblock_input ();
 
   return len;
+#endif /* !USE_METAL_RENDERING */
 #else  /* HAVE_NS */
   struct frame * f = s->f;
   struct macfont_info *macfont_info = (struct macfont_info *) s->font;

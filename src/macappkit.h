@@ -745,6 +745,7 @@ typedef NSInteger NSGlyphProperty;
 - (void)displayEmacsViewIfNeeded;
 - (void)lockFocusOnEmacsView;
 - (void)unlockFocusOnEmacsView;
+#ifndef USE_METAL_RENDERING
 - (void)scrollEmacsViewRect:(NSRect)aRect by:(NSSize)offset;
 - (void)invalidateEmacsViewBackingRect:(CGRect)invalidRect
 			     clipRects:(const CGRect *)clipRects
@@ -753,6 +754,7 @@ typedef NSInteger NSGlyphProperty;
 #if HAVE_MAC_METAL
 - (void)updateEmacsViewMTLObjects;
 #endif
+#endif /* !USE_METAL_RENDERING */
 - (NSPoint)convertEmacsViewPointToScreen:(NSPoint)point;
 - (NSPoint)convertEmacsViewPointFromScreen:(NSPoint)point;
 - (NSRect)convertEmacsViewRectToScreen:(NSRect)rect;
@@ -772,6 +774,7 @@ typedef NSInteger NSGlyphProperty;
 @end
 
 
+#ifndef USE_METAL_RENDERING
 /* Class for application-side double buffering.  */
 
 @interface EmacsBacking : NSObject
@@ -832,6 +835,7 @@ typedef NSInteger NSGlyphProperty;
 - (void)restoreImageBuffersData:(NSData *)imageBuffersData
 	      forRectanglesData:(NSData *)rectanglesData;
 @end
+#endif /* !USE_METAL_RENDERING */
 
 /* Class for Emacs view that handles drawing events only.  It is used
    directly by tooltip frames, and indirectly by ordinary frames via
@@ -839,16 +843,19 @@ typedef NSInteger NSGlyphProperty;
 
 @interface EmacsView : NSView
 {
+#ifndef USE_METAL_RENDERING
   /* Backing resources for applicaion-side double buffering.  */
   EmacsBacking *backing;
 
   /* Whether the backing size is out of sync with the view size.  */
   BOOL backingSizeOutOfSync;
+#endif
 }
 - (struct frame *)emacsFrame;
 + (void)globallyDisableUpdateLayer:(BOOL)flag;
 - (void)lockFocusOnBacking;
 - (void)unlockFocusOnBacking;
+#ifndef USE_METAL_RENDERING
 - (void)scrollBackingRect:(NSRect)rect by:(NSSize)delta;
 - (void)invalidateBackingRect:(CGRect)invalidRect
 		    clipRects:(const CGRect *)clipRects count:(CFIndex)count
@@ -856,6 +863,7 @@ typedef NSInteger NSGlyphProperty;
 #if HAVE_MAC_METAL
 - (void)updateMTLObjects;
 #endif
+#endif /* !USE_METAL_RENDERING */
 @end
 
 /* Class for Emacs view that also handles input events.  Used by

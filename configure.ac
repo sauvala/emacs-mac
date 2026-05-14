@@ -571,6 +571,9 @@ AC_ARG_WITH([mac],[AS_HELP_STRING([--with-mac],
 [use GUI on macOS.
 On by default on macOS.])],[],[with_mac=maybe])
 OPTION_DEFAULT_OFF([mac-metal],[use Metal framework in application-side double buffering (experimental)])
+AC_ARG_WITH([metal-rendering],
+  [AS_HELP_STRING([--with-metal-rendering],
+    [use Metal for all rendering (macOS 14+)])])
 OPTION_DEFAULT_OFF([rope],[use rope instead of gap buffer for text storage (experimental)])
 if test "$with_rope" = yes; then
   AC_DEFINE([USE_ROPE], [1], [Define to use rope for text storage.])
@@ -7622,6 +7625,25 @@ fail;
      else
        AC_MSG_RESULT(before 10.11)
      fi
+
+     if test "$with_metal_rendering" = yes; then
+       if test "$opsys" != darwin; then
+         AC_MSG_ERROR([--with-metal-rendering requires macOS])
+       fi
+       AC_MSG_CHECKING([for Metal framework])
+       metal_sdk_path=$(xcrun --show-sdk-path 2>/dev/null)
+       if test -f "${metal_sdk_path}/System/Library/Frameworks/Metal.framework/Headers/Metal.h"; then
+         AC_MSG_RESULT([yes])
+       else
+         AC_MSG_RESULT([no])
+         AC_MSG_ERROR([Metal framework not found (requires macOS SDK)])
+       fi
+       AC_DEFINE(USE_METAL_RENDERING, 1,
+         [Define to 1 if using Metal for all rendering.])
+       libs_metal="-framework Metal -framework MetalKit"
+       MAC_OBJC_OBJ="$MAC_OBJC_OBJ macmetal.o"
+     fi
+
      AC_MSG_CHECKING(Mac OS X version min required >= 11)
      AC_CACHE_VAL(emacs_cv_mac_os_x_min_required_11,
      [AC_LINK_IFELSE([AC_LANG_PROGRAM([[

@@ -23,6 +23,10 @@ along with GNU Emacs Mac port.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "frame.h"
 #include "../lwlib/lwlib-widget.h"
 
+#ifdef USE_METAL_RENDERING
+#include "macmetal.h"
+#endif
+
 #define RGB_TO_ULONG(r, g, b) (((r) << 16) | ((g) << 8) | (b))
 #define ARGB_TO_ULONG(a, r, g, b) (((a) << 24) | ((r) << 16) | ((g) << 8) | (b))
 
@@ -298,8 +302,13 @@ struct mac_output
   /* Hints for the size and the position of a window.  */
   XSizeHints *size_hints;
 
+#ifdef USE_METAL_RENDERING
+  /* Metal rendering context.  */
+  struct emacs_metal_context *metal_ctx;
+#else
   /* Quartz 2D graphics context.  */
   CGContextRef cg_context;
+#endif
 
   /* Data representing the array of NativeRectangle's that will be
      inverted on drawRect: invocation.  */
@@ -308,6 +317,12 @@ struct mac_output
 
 /* Return the X output data for frame F.  */
 #define FRAME_OUTPUT_DATA(f) ((f)->output_data.mac)
+
+#ifdef USE_METAL_RENDERING
+#define FRAME_METAL_CTX(f) ((f)->output_data.mac->metal_ctx)
+extern void mac_metal_apply_gc_clip (struct frame *, GC);
+extern uint32_t mac_metal_background_color (struct frame *, GC, bool);
+#endif
 
 /* Return the Mac window used for displaying data in frame F.  */
 #define FRAME_MAC_WINDOW(f) ((f)->output_data.mac->window_desc)
@@ -672,6 +687,7 @@ extern void mac_flush (struct frame *);
 extern void mac_create_frame_window (struct frame *);
 extern void mac_dispose_frame_window (struct frame *);
 extern void mac_change_frame_window_wm_state (struct frame *, WMState, WMState);
+#ifndef USE_METAL_RENDERING
 #if DRAWING_USE_GCD
 extern void mac_draw_to_frame (struct frame *, GC, CGRect,
 			       void (^) (CGContextRef, GC));
@@ -680,6 +696,7 @@ extern CGContextRef mac_begin_cg_clip (struct frame *, GC, CGRect);
 extern void mac_end_cg_clip (struct frame *);
 #endif
 extern void mac_scroll_area (struct frame *, GC, int, int, int, int, int, int);
+#endif /* !USE_METAL_RENDERING */
 extern Lisp_Object mac_color_lookup (const char *);
 extern Lisp_Object mac_color_list_alist (void);
 extern Lisp_Object mac_display_monitor_attributes_list (struct mac_display_info *);
@@ -759,6 +776,7 @@ extern CFTypeRef mac_sound_create (Lisp_Object, Lisp_Object);
 extern void mac_sound_play (CFTypeRef, Lisp_Object, Lisp_Object);
 extern void mac_within_gui (void (^block) (void));
 
+#ifndef USE_METAL_RENDERING
 #if DRAWING_USE_GCD
 #define MAC_BEGIN_DRAW_TO_FRAME(f, gc, rect, context)			\
   mac_draw_to_frame (f, gc, rect, ^(CGContextRef context, GC gc) {
@@ -770,6 +788,7 @@ extern void mac_within_gui (void (^block) (void));
 #define MAC_END_DRAW_TO_FRAME(f)		\
   mac_end_cg_clip (f);} while (0)
 #endif
+#endif /* !USE_METAL_RENDERING */
 
 #define CG_CONTEXT_FILL_RECT_WITH_GC_BACKGROUND(f, context, rect, gc,	\
 						respect_alpha_background) \

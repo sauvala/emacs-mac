@@ -185,20 +185,16 @@ the following Mac-specific ones:
     swiping/flicking, exiting from the splash screen by typing "q",
     and the "About Emacs" and "Preferences..." menu items in the
     application menu (labeled "Emacs") in the menu bar.
-
-  * High-resolution image display support for Retina displays.  Dynamic
-    resolution change is also supported.  For bitmap formats,
-    high-resolution data can be specified either by the "@2x" file name
-    convention, the ":data-2x" property, or multi-image TIFF.
-    Additionally, if the DPI metadata in an image without any of these
-    properties indicates that it is a high-resolution image, it will
-    automatically be treated as a "2x" image.  Shrinking a large image
-    with the "imagemagick" (or Mac-specific "image-io") image type also
-    works but gives a non-optimal result on dynamic resolution change.
-    For vector formats, images are automatically re-rendered according
-    to the resolution of the display the frame in on.  DocView mode and
-    LaTeX fragment preview in Org mode are modified so they can take
-    advantage of this feature.
+  * High-resolution image display support for Retina displays.
+    Dynamic resolution change is also supported.  For bitmap formats,
+    high-resolution data can be specified either by the "@2x" file
+    name convention, the ":data-2x" property, or multi-image TIFF.
+    Shrinking a large image with the "imagemagick" (or Mac-specific
+    "image-io") image type also works but gives a non-optimal result
+    on dynamic resolution change.  For vector formats, images are
+    automatically re-rendered according to the resolution of the
+    frame.  DocView mode and LaTeX fragment preview in Org mode are
+    modified so they can take advantage of this feature.
 
 As Quickdraw-style font rendering is considered obsolete as of Mac OS
 X 10.5, the variable `mac-allow-anti-aliasing', which was supported in
@@ -272,6 +268,31 @@ Dock without separating a GUI process (not thread) from the main Emacs
      If you want to enable ARC (Automatic Reference Counting) support
      on Mac OS X 10.7 with Xcode 4.2 or later, then specify
      CC="clang -fobjc-arc".
+
+     ** Experimental Metal GPU Rendering **
+
+     You can optionally use "--with-metal-rendering" to replace the
+     Core Graphics CPU rendering pipeline with a Metal GPU pipeline.
+     This requires macOS 14 (Sonoma) or later and is mutually
+     exclusive with the default Core Graphics rendering.
+
+     When enabled, all drawing (text, rectangles, images, fringes,
+     scrolling) is performed on the GPU via Metal.  Text is rendered
+     through a glyph atlas with Core Text shaping and Metal textured
+     quads.  The frame is presented via CAMetalLayer with a retained
+     GPU backbuffer.
+
+     Example configure line with Metal rendering:
+
+       ./configure --with-metal-rendering \
+         --with-native-compilation \
+         --enable-mac-app=yes \
+         --enable-mac-self-contained \
+         'CFLAGS=-O2 -mcpu=native -fobjc-arc'
+
+     This feature is experimental.  If you encounter rendering issues,
+     rebuild without "--with-metal-rendering" to use the standard
+     Core Graphics path.
 
   l. make && make install.
 

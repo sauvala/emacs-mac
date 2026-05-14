@@ -64,6 +64,15 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include TERM_HEADER
 #endif /* HAVE_WINDOW_SYSTEM */
 
+#ifdef USE_METAL_RENDERING
+#include "macmetal.h"
+#endif
+
+/* Work around GCC bug 54561.  */
+#if GNUC_PREREQ (4, 3, 0)
+# pragma GCC diagnostic ignored "-Wclobbered"
+#endif
+
 #ifdef HAVE_X_WINDOWS
 typedef struct x_bitmap_record Bitmap_Record;
 #ifndef USE_CAIRO
@@ -2400,6 +2409,13 @@ image_clear_image_1 (struct frame *f, struct image *img, int flags)
       CGImageRelease (img->cg_image);
       img->cg_image = NULL;
     }
+#ifdef USE_METAL_RENDERING
+  if (img->metal_texture)
+    {
+      emacs_metal_destroy_texture (img->metal_texture);
+      img->metal_texture = NULL;
+    }
+#endif
   xfree (img->cg_transform);
   img->cg_transform = NULL;
 #endif	/* HAVE_MACGUI */
@@ -5280,23 +5296,6 @@ image_load_image_io (struct frame *f, struct image *img, CFStringRef type)
 
 		  if (cg_image)
 		    {
-		      CFNumberRef dpi_width_ref = CFDictionaryGetValue (props, kCGImagePropertyDPIWidth);
-		      CFNumberRef dpi_height_ref = CFDictionaryGetValue (props, kCGImagePropertyDPIHeight);
-
-		      /* Auto-detect high-DPI 2x images */
-		      if (img->target_backing_scale == 0 && (dpi_width_ref || dpi_height_ref))
-			{
-			  double dpi_width = 72.0, dpi_height = 72.0;
-
-			  if (dpi_width_ref)
-			    CFNumberGetValue (dpi_width_ref, kCFNumberDoubleType, &dpi_width);
-			  if (dpi_height_ref)
-			    CFNumberGetValue (dpi_height_ref, kCFNumberDoubleType, &dpi_height);
-
-			  double max_dpi = fmax(dpi_width, dpi_height);
-			  if (max_dpi > 115.0) /* High DPI */
-			    img->target_backing_scale = 2;
-			}
 		      width = CGImageGetWidth (cg_image);
 		      height = CGImageGetHeight (cg_image);
 		      if (img->target_backing_scale == 2)
