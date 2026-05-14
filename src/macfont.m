@@ -2939,11 +2939,13 @@ macfont_draw (struct glyph_string *s, int from, int to, int x, int y,
 
 #ifdef USE_METAL_RENDERING
   /* Metal glyph rendering path.  */
+  mac_metal_apply_gc_clip (f, gc);
   if (with_background)
     emacs_metal_fill_rect (FRAME_METAL_CTX (f),
                            x, y - FONT_BASE (s->font),
                            s->width, FONT_HEIGHT (s->font),
-                           gc->xgcv.background);
+                           mac_metal_background_color (f, gc,
+                                                       s->hl != DRAW_CURSOR));
 
   {
     /* Build flat x-position array for Metal (one float per glyph).  */

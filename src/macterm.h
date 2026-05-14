@@ -320,6 +320,8 @@ struct mac_output
 
 #ifdef USE_METAL_RENDERING
 #define FRAME_METAL_CTX(f) ((f)->output_data.mac->metal_ctx)
+extern void mac_metal_apply_gc_clip (struct frame *, GC);
+extern uint32_t mac_metal_background_color (struct frame *, GC, bool);
 #endif
 
 /* Return the Mac window used for displaying data in frame F.  */

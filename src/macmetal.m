@@ -130,6 +130,7 @@ typedef struct {
 struct emacs_metal_context
 {
   id<MTLCommandQueue> command_queue;
+  id<MTLCommandBuffer> frame_command_buffer;
   CAMetalLayer *layer;
   id<MTLTexture> backbuffer;
 
@@ -156,6 +157,9 @@ struct emacs_metal_context
 
   struct emacs_metal_glyph_cache *glyph_cache;
 };
+
+static void flush_render_batches (emacs_metal_context_t *ctx,
+                                  id<MTLCommandBuffer> cmd);
 
 /* Create render pipeline states from the embedded shader source.  */
 
@@ -186,14 +190,25 @@ create_pipelines (void)
       return false;
     }
 
-  /* Solid pipeline — no blending.  */
+  /* Solid pipeline.  Blending is enabled so explicitly-alpha colors can
+     implement transparent backgrounds and visual-bell overlays.  */
   {
     MTLRenderPipelineDescriptor *desc
       = [[MTLRenderPipelineDescriptor alloc] init];
     desc.vertexFunction = vertex_fn;
     desc.fragmentFunction = fragment_solid_fn;
     desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
-    desc.colorAttachments[0].blendingEnabled = NO;
+    desc.colorAttachments[0].blendingEnabled = YES;
+    desc.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+    desc.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+    desc.colorAttachments[0].sourceRGBBlendFactor
+      = MTLBlendFactorSourceAlpha;
+    desc.colorAttachments[0].destinationRGBBlendFactor
+      = MTLBlendFactorOneMinusSourceAlpha;
+    desc.colorAttachments[0].sourceAlphaBlendFactor
+      = MTLBlendFactorSourceAlpha;
+    desc.colorAttachments[0].destinationAlphaBlendFactor
+      = MTLBlendFactorOneMinusSourceAlpha;
 
     shared_solid_pipeline
       = [shared_device newRenderPipelineStateWithDescriptor:desc error:&error];
@@ -460,6 +475,7 @@ emacs_metal_frame_begin (emacs_metal_context_t *ctx)
   };
 
   ctx->in_frame = true;
+  ctx->frame_command_buffer = [ctx->command_queue commandBuffer];
 }
 
 /* Render all pending batches into the backbuffer and reset batch state.
@@ -468,6 +484,19 @@ static void
 flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
 {
   if (ctx->batch_count == 0)
+    return;
+  if (ctx->vertex_count == 0)
+    {
+      ctx->batch_count = 0;
+      return;
+    }
+
+  id<MTLBuffer> draw_buffer
+    = [shared_device newBufferWithBytes:ctx->vertices
+                                 length:((NSUInteger) ctx->vertex_count
+                                         * sizeof (metal_vertex_t))
+                                options:MTLResourceStorageModeShared];
+  if (!draw_buffer)
     return;
 
   MTLRenderPassDescriptor *pass
@@ -487,6 +516,10 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
   for (int i = 0; i < ctx->batch_count; i++)
     {
       metal_batch_t *batch = &ctx->batches[i];
+      if (batch->vertex_count <= 0
+          || batch->scissor.w <= 0
+          || batch->scissor.h <= 0)
+        continue;
 
       /* Set scissor rect.  */
       MTLScissorRect scissor = {
@@ -504,7 +537,7 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
         [encoder setRenderPipelineState:shared_solid_pipeline];
 
       /* Set vertex buffer and uniforms.  */
-      [encoder setVertexBuffer:ctx->vertex_buffers[ctx->current_buffer]
+      [encoder setVertexBuffer:draw_buffer
                         offset:0
                        atIndex:0];
       [encoder setVertexBytes:viewport_size
@@ -542,10 +575,13 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
   if (!drawable)
     {
       dispatch_semaphore_signal (ctx->buffer_semaphore);
+      ctx->frame_command_buffer = nil;
       return;
     }
 
-  id<MTLCommandBuffer> cmd = [ctx->command_queue commandBuffer];
+  id<MTLCommandBuffer> cmd = ctx->frame_command_buffer;
+  if (!cmd)
+    cmd = [ctx->command_queue commandBuffer];
 
   /* Render all pending batches into the backbuffer.  */
   flush_render_batches (ctx, cmd);
@@ -581,6 +617,7 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
   }];
 
   [cmd commit];
+  ctx->frame_command_buffer = nil;
 }
 
 /* Local MIN/MAX for integer arithmetic if not already defined.  */
@@ -632,10 +669,22 @@ static metal_vertex_t *
 emit_vertices (emacs_metal_context_t *ctx, int count,
                id<MTLTexture> texture, bool is_glyph)
 {
-  if (ctx->vertex_count + count > METAL_MAX_VERTICES)
+  if (!ctx->frame_command_buffer)
     return NULL;
 
+  if (ctx->vertex_count + count > METAL_MAX_VERTICES)
+    {
+      flush_render_batches (ctx, ctx->frame_command_buffer);
+      if (count > METAL_MAX_VERTICES)
+        return NULL;
+    }
+
   metal_batch_t *b = ensure_batch (ctx, texture, is_glyph);
+  if (!b && ctx->batch_count >= METAL_MAX_BATCHES)
+    {
+      flush_render_batches (ctx, ctx->frame_command_buffer);
+      b = ensure_batch (ctx, texture, is_glyph);
+    }
   if (!b)
     return NULL;
 
@@ -660,6 +709,12 @@ set_vertex (metal_vertex_t *v,
   v->color[2]    = (uint8_t)( color        & 0xFF); /* B */
   v->color[3]    = (uint8_t)((color >> 24) & 0xFF); /* A */
   v->texture_id  = texture_id;
+}
+
+static uint32_t
+metal_opaque_if_no_alpha (uint32_t color)
+{
+  return (color & 0xFF000000u) ? color : (color | 0xFF000000u);
 }
 
 /* --- Glyph atlas --- */
@@ -862,7 +917,8 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   /* Pen position in bitmap pixel coordinates.
      Place the pen so the glyph's bounding box starts at pixel (1, 1).
      CG origin is bottom-left (y-up).  */
-  float pen_px_x = 1.0f - px_left;
+  float pen_px_x = 1.0f - px_left
+    + ((float) subpixel / (float) SUBPIXEL_POSITIONS);
   float pen_px_y = 1.0f - px_bottom;
 
   /* Pen position in points (after CTM scaling by s).  */
@@ -910,7 +966,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
         return NULL;
 
       cg_ctx = CGBitmapContextCreate (pixels, gw, gh, 8, gw,
-                                      NULL, kCGImageAlphaOnly);
+                                      NULL, (CGBitmapInfo) kCGImageAlphaOnly);
       if (!cg_ctx)
         {
           free (pixels);
@@ -988,8 +1044,7 @@ emacs_metal_draw_glyphs (emacs_metal_context_t *ctx,
 
   CTFontRef font = (CTFontRef)font_ptr;
   int s = ctx->scale;
-  /* Emacs Mac port colors are 0x00RRGGBB — force alpha to 0xFF.  */
-  uint32_t c = color | 0xFF000000u;
+  uint32_t c = metal_opaque_if_no_alpha (color);
   float atlas_size_inv = 1.0f / (float)GLYPH_ATLAS_SIZE;
 
   for (int i = 0; i < count; i++)
@@ -1059,8 +1114,7 @@ emacs_metal_fill_rect (emacs_metal_context_t *ctx,
   int s = ctx->scale;
   float x0 = (float)(x * s), y0 = (float)(y * s);
   float x1 = (float)((x + w) * s), y1 = (float)((y + h) * s);
-  /* Emacs Mac port colors are 0x00RRGGBB — force alpha to 0xFF.  */
-  uint32_t c = color | 0xFF000000u;
+  uint32_t c = metal_opaque_if_no_alpha (color);
 
   metal_vertex_t *v = emit_vertices (ctx, 6, nil, false);
   if (!v) return;
@@ -1128,7 +1182,7 @@ emacs_metal_draw_line (emacs_metal_context_t *ctx,
       float nx = (-ldy / len) * 0.5f;
       float ny = ( ldx / len) * 0.5f;
 
-      uint32_t c = color | 0xFF000000u;
+      uint32_t c = metal_opaque_if_no_alpha (color);
 
       metal_vertex_t *v = emit_vertices (ctx, 6, nil, false);
       if (!v) return;
@@ -1185,6 +1239,48 @@ emacs_metal_pop_clip (emacs_metal_context_t *ctx)
 }
 
 void
+emacs_metal_set_clip_rect (emacs_metal_context_t *ctx,
+                           int x, int y, int w, int h)
+{
+  if (!ctx)
+    return;
+
+  int s = ctx->scale;
+  int nx = x * s;
+  int ny = y * s;
+  int nw = w * s;
+  int nh = h * s;
+  int fw = ctx->width * s;
+  int fh = ctx->height * s;
+
+  int ix = METAL_MAX (0, nx);
+  int iy = METAL_MAX (0, ny);
+  int ix2 = METAL_MIN (fw, nx + nw);
+  int iy2 = METAL_MIN (fh, ny + nh);
+
+  ctx->clip_depth = 1;
+  ctx->clip_stack[0] = (metal_clip_rect_t){
+    .x = ix, .y = iy,
+    .w = METAL_MAX (0, ix2 - ix),
+    .h = METAL_MAX (0, iy2 - iy)
+  };
+}
+
+void
+emacs_metal_reset_clip (emacs_metal_context_t *ctx)
+{
+  if (!ctx)
+    return;
+
+  ctx->clip_depth = 1;
+  ctx->clip_stack[0] = (metal_clip_rect_t){
+    .x = 0, .y = 0,
+    .w = ctx->width * ctx->scale,
+    .h = ctx->height * ctx->scale
+  };
+}
+
+void
 emacs_metal_scroll (emacs_metal_context_t *ctx,
                     int x, int y, int w, int h,
                     int dx, int dy)
@@ -1197,7 +1293,9 @@ emacs_metal_scroll (emacs_metal_context_t *ctx,
   int sdx = dx * s, sdy = dy * s;
 
   /* Flush pending draws before blit.  */
-  id<MTLCommandBuffer> cmd = [ctx->command_queue commandBuffer];
+  id<MTLCommandBuffer> cmd = ctx->frame_command_buffer;
+  if (!cmd)
+    return;
   flush_render_batches (ctx, cmd);
 
   /* Ensure staging texture is large enough.  */
@@ -1210,7 +1308,7 @@ emacs_metal_scroll (emacs_metal_context_t *ctx,
                                                           width:sw height:sh
                                                       mipmapped:NO];
       desc.storageMode = MTLStorageModePrivate;
-      desc.usage = MTLTextureUsageShaderRead;
+      desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
       ctx->scroll_staging = [shared_device newTextureWithDescriptor:desc];
       ctx->scroll_staging_w = sw;
       ctx->scroll_staging_h = sh;
@@ -1234,11 +1332,6 @@ emacs_metal_scroll (emacs_metal_context_t *ctx,
        destinationSlice:0 destinationLevel:0
       destinationOrigin:MTLOriginMake (sx + sdx, sy + sdy, 0)];
   [blit endEncoding];
-  [cmd commit];
-  /* waitUntilCompleted needed: ensures blit finishes before subsequent
-     vertex buffer writes overwrite data the GPU might still be reading
-     from the flushed batches.  */
-  [cmd waitUntilCompleted];
 }
 
 /* --- Image texture upload and drawing --- */
@@ -1267,6 +1360,8 @@ emacs_metal_upload_cg_image (emacs_metal_context_t *ctx,
 
   size_t bpr = width * 4;
   uint8_t *pixels = calloc (height, bpr);
+  if (!pixels)
+    return NULL;
   CGColorSpaceRef cs = CGColorSpaceCreateWithName (kCGColorSpaceSRGB);
   CGContextRef cg = CGBitmapContextCreate (pixels, width, height, 8, bpr, cs,
                                            kCGImageAlphaPremultipliedFirst
