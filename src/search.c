@@ -85,9 +85,11 @@ struct rope_linearize_context
 {
   struct buffer *buf;
   unsigned char *saved_beg;
+  ptrdiff_t saved_gpt;
   ptrdiff_t saved_gpt_byte;
   ptrdiff_t saved_gap_size;
   unsigned char *linearized;    /* malloc'd contiguous copy */
+  bool free_linearized;
   bool active;
 };
 
@@ -105,11 +107,13 @@ rope_linearize_cleanup (void *arg)
   if (!ctx->active)
     return;
   ctx->buf->text->beg = ctx->saved_beg;
+  ctx->buf->text->gpt = ctx->saved_gpt;
   ctx->buf->text->gpt_byte = ctx->saved_gpt_byte;
   ctx->buf->text->gap_size = ctx->saved_gap_size;
   ctx->buf->text->using_rope = true;
+  if (ctx->free_linearized)
+    xfree (ctx->linearized);
   ctx->active = false;
-  /* Don't free linearized here — it may be the cached copy.  */
 }
 
 /* Begin linearization: copy rope content to contiguous buffer,
@@ -122,8 +126,10 @@ rope_linearize_begin (struct rope_linearize_context *ctx)
 
   ctx->buf = buf;
   ctx->saved_beg = buf->text->beg;
+  ctx->saved_gpt = buf->text->gpt;
   ctx->saved_gpt_byte = buf->text->gpt_byte;
   ctx->saved_gap_size = buf->text->gap_size;
+  ctx->free_linearized = false;
 
   /* Reuse cache if valid.  */
   if (buf == linearize_cache_owner
@@ -153,18 +159,13 @@ rope_linearize_begin (struct rope_linearize_context *ctx)
 
   /* Temporarily switch to gap-buffer mode.  */
   buf->text->beg = ctx->linearized - (BEGV_BYTE - BEG_BYTE);
+  buf->text->gpt = Z;
   buf->text->gpt_byte = Z_BYTE;
   buf->text->gap_size = 0;
   buf->text->using_rope = false;
   ctx->active = true;
 }
 
-/* End linearization: restore rope state.  */
-static void
-rope_linearize_end (struct rope_linearize_context *ctx)
-{
-  rope_linearize_cleanup (ctx);
-}
 #endif /* USE_ROPE */
 
 static AVOID
@@ -754,24 +755,25 @@ fast_looking_at (Lisp_Object regexp, ptrdiff_t pos, ptrdiff_t pos_byte,
   /* For rope: temporarily switch to gap-buffer mode so PTR_BYTE_POS
      works correctly for the \= regex anchor.  */
   struct rope_linearize_context rope_ctx;
-  bool rope_switched = false;
   if (!STRINGP (string) && current_buffer->text->using_rope && p1)
     {
       /* p1 points to the static cache — don't free it via unwind.
 	 Just save/restore buffer fields.  */
       rope_ctx.buf = current_buffer;
       rope_ctx.saved_beg = current_buffer->text->beg;
+      rope_ctx.saved_gpt = GPT;
       rope_ctx.saved_gpt_byte = GPT_BYTE;
       rope_ctx.saved_gap_size = GAP_SIZE;
       rope_ctx.linearized = p1;
+      rope_ctx.free_linearized = false;
       rope_ctx.active = true;
       record_unwind_protect_ptr (rope_linearize_cleanup, &rope_ctx);
       current_buffer->text->beg
 	= p1 - (BEGV_BYTE - BEG_BYTE);
+      GPT = Z;
       GPT_BYTE = Z_BYTE;
       GAP_SIZE = 0;
       current_buffer->text->using_rope = false;
-      rope_switched = true;
     }
 #endif
   re_match_object = STRINGP (string) ? string : Qnil;
@@ -1781,11 +1783,17 @@ search_buffer_non_re (Lisp_Object string, ptrdiff_t pos,
       rope_get_text_emacs (BEGV_BYTE, visible_bytes, (char *) linearized);
       linearized[visible_bytes] = 0;
 
-      /* Save buffer state.  */
-      unsigned char *saved_beg = current_buffer->text->beg;
-      ptrdiff_t saved_gpt = GPT;
-      ptrdiff_t saved_gpt_byte = GPT_BYTE;
-      ptrdiff_t saved_gap_size = GAP_SIZE;
+      specpdl_ref rope_count = SPECPDL_INDEX ();
+      struct rope_linearize_context rope_ctx;
+      rope_ctx.buf = current_buffer;
+      rope_ctx.saved_beg = current_buffer->text->beg;
+      rope_ctx.saved_gpt = GPT;
+      rope_ctx.saved_gpt_byte = GPT_BYTE;
+      rope_ctx.saved_gap_size = GAP_SIZE;
+      rope_ctx.linearized = linearized;
+      rope_ctx.free_linearized = true;
+      rope_ctx.active = true;
+      record_unwind_protect_ptr (rope_linearize_cleanup, &rope_ctx);
 
       /* Make buffer look like a contiguous gap buffer with no gap.  */
       current_buffer->text->beg = linearized - (BEGV_BYTE - BEG_BYTE);
@@ -1801,14 +1809,7 @@ search_buffer_non_re (Lisp_Object string, ptrdiff_t pos,
 	   : simple_search (n, pat, raw_pattern_size, len_byte, trt,
 			    pos, pos_byte, lim, lim_byte));
 
-      /* Restore buffer state.  */
-      current_buffer->text->beg = saved_beg;
-      GPT = saved_gpt;
-      GPT_BYTE = saved_gpt_byte;
-      GAP_SIZE = saved_gap_size;
-      current_buffer->text->using_rope = true;
-
-      xfree (linearized);
+      unbind_to (rope_count, Qnil);
       SAFE_FREE ();
       return result;
     }

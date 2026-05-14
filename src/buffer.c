@@ -4885,10 +4885,7 @@ free_buffer_text (struct buffer *b)
 
 #ifdef USE_ROPE
   if (b->text->using_rope)
-    {
-      buffer_destroy_rope (b);
-    }
-  else
+    buffer_destroy_rope (b);
 #endif
   if (!pdumper_object_p (b->text->beg))
     {

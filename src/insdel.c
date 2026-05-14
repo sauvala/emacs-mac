@@ -920,12 +920,13 @@ insert_1_both (const char *string,
       /* Tell display engine what changed (normally done by gap movement).  */
       BUF_COMPUTE_UNCHANGED (current_buffer, PT, PT);
 
+      if (rope_insert_emacs (PT_BYTE, string, nbytes, nchars) != 0)
+	error ("Rope insertion failed");
+
       /* Record insertion for undo.  */
       record_insert (PT, nchars);
       modiff_incr (&MODIFF, nchars);
       CHARS_MODIFF = MODIFF;
-
-      rope_insert_emacs (PT_BYTE, string, nbytes, nchars);
 
       /* Update buffer positions.  */
       ZV += nchars;
@@ -1111,14 +1112,19 @@ insert_from_string_1 (Lisp_Object string, ptrdiff_t pos, ptrdiff_t pos_byte,
 	  insert_bytes = nchars;
 	}
 
-      record_insert (PT, nchars);
-      modiff_incr (&MODIFF, nchars);
-      CHARS_MODIFF = MODIFF;
-
-      rope_insert_emacs (PT_BYTE, insert_data, insert_bytes, nchars);
+      if (rope_insert_emacs (PT_BYTE, insert_data, insert_bytes, nchars) != 0)
+	{
+	  if (temp_buffer)
+	    xfree (temp_buffer);
+	  error ("Rope insertion failed");
+	}
 
       if (temp_buffer)
 	xfree (temp_buffer);
+
+      record_insert (PT, nchars);
+      modiff_incr (&MODIFF, nchars);
+      CHARS_MODIFF = MODIFF;
 
       /* Update buffer positions.  */
       ZV += nchars;
@@ -1463,12 +1469,16 @@ insert_from_buffer_1 (struct buffer *buf,
 	  xfree (src_tmp);
 	}
 
+      if (rope_insert_emacs (PT_BYTE, tmp, outgoing_nbytes, nchars) != 0)
+	{
+	  xfree (tmp);
+	  error ("Rope insertion failed");
+	}
+      xfree (tmp);
+
       record_insert (PT, nchars);
       modiff_incr (&MODIFF, nchars);
       CHARS_MODIFF = MODIFF;
-
-      rope_insert_emacs (PT_BYTE, tmp, outgoing_nbytes, nchars);
-      xfree (tmp);
 
       ZV += nchars;
       Z += nchars;
@@ -1710,7 +1720,8 @@ replace_range (ptrdiff_t from, ptrdiff_t to, Lisp_Object new,
 	  /* Delete the old text.  */
 	  if (nbytes_del > 0)
 	    {
-	      rope_delete_emacs (from_byte, nbytes_del);
+	      if (rope_delete_emacs (from_byte, nbytes_del) != 0)
+		error ("Rope deletion failed");
 	      ZV -= nchars_del;
 	      Z -= nchars_del;
 	      ZV_BYTE -= nbytes_del;
@@ -1722,9 +1733,10 @@ replace_range (ptrdiff_t from, ptrdiff_t to, Lisp_Object new,
 	  /* Insert the new text.  */
 	  if (inschars > 0)
 	    {
-	      rope_insert_emacs (from_byte,
-				 (const char *) SDATA (new),
-				 insbytes, inschars);
+	      if (rope_insert_emacs (from_byte,
+				     (const char *) SDATA (new),
+				     insbytes, inschars) != 0)
+		error ("Rope insertion failed");
 	      ZV += inschars;
 	      Z += inschars;
 	      ZV_BYTE += insbytes;
@@ -2031,7 +2043,8 @@ replace_range_2 (ptrdiff_t from, ptrdiff_t from_byte,
       /* Delete old text.  */
       if (nbytes_del > 0)
 	{
-	  rope_delete_emacs (from_byte, nbytes_del);
+	  if (rope_delete_emacs (from_byte, nbytes_del) != 0)
+	    error ("Rope deletion failed");
 	  ZV -= nchars_del;
 	  Z -= nchars_del;
 	  ZV_BYTE -= nbytes_del;
@@ -2043,7 +2056,8 @@ replace_range_2 (ptrdiff_t from, ptrdiff_t from_byte,
       /* Insert new text.  */
       if (insbytes > 0)
 	{
-	  rope_insert_emacs (from_byte, ins, insbytes, inschars);
+	  if (rope_insert_emacs (from_byte, ins, insbytes, inschars) != 0)
+	    error ("Rope insertion failed");
 	  ZV += inschars;
 	  Z += inschars;
 	  ZV_BYTE += insbytes;
@@ -2392,7 +2406,8 @@ del_range_2 (ptrdiff_t from, ptrdiff_t from_byte,
       offset_intervals (current_buffer, from, - nchars_del);
 
       /* Delete from rope.  */
-      rope_delete_emacs (from_byte, nbytes_del);
+      if (rope_delete_emacs (from_byte, nbytes_del) != 0)
+	error ("Rope deletion failed");
 
       /* Update buffer positions.  */
       ZV -= nchars_del;

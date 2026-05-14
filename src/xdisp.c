@@ -3580,6 +3580,7 @@ init_iterator (struct it *it, struct window *w,
       it->bidi_p =
 	!redisplay__inhibit_bidi
 	&& !NILP (BVAR (current_buffer, bidi_display_reordering))
+	&& !current_buffer->long_line_optimizations_p
 	&& it->multibyte_p;
 
       /* If we are to reorder bidirectional text, init the bidi
@@ -21448,13 +21449,7 @@ redisplay_window (Lisp_Object window, bool just_this_one_p)
 	{
 	  size_t max_line = rope_longest_row_chars_emacs ();
 	  if (max_line > (size_t) XFIXNUM (Vlong_line_threshold))
-	    {
-	      current_buffer->long_line_optimizations_p = true;
-	      /* Disable bidi reordering to avoid O(n) bidi cache
-		 growth on every cursor movement in long lines.  */
-	      if (!NILP (BVAR (current_buffer, bidi_display_reordering)))
-		BVAR (current_buffer, bidi_display_reordering) = Qnil;
-	    }
+	    current_buffer->long_line_optimizations_p = true;
 	}
       else
 #endif
@@ -21469,11 +21464,7 @@ redisplay_window (Lisp_Object window, bool just_this_one_p)
 	      if (!found || max > threshold) break;
 	    }
 	  if (max > threshold)
-	    {
-	      current_buffer->long_line_optimizations_p = true;
-	      if (!NILP (BVAR (current_buffer, bidi_display_reordering)))
-		BVAR (current_buffer, bidi_display_reordering) = Qnil;
-	    }
+	    current_buffer->long_line_optimizations_p = true;
 	}
     }
 

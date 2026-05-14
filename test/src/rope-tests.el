@@ -300,5 +300,49 @@
       ;; Should have 3 lines (3 newlines).
       (should (= (car stats) 3)))))
 
+(ert-deftest rope-test-invalid-byte-insert-does-not-corrupt-buffer ()
+  "A rejected rope insertion must leave buffer state unchanged."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (set-buffer-multibyte nil)
+    (let ((before (list (buffer-string)
+                        (point-min) (point-max)
+                        (position-bytes (point-min))
+                        (position-bytes (point-max)))))
+      (should-error (insert (unibyte-string #xff)))
+      (should (equal (list (buffer-string)
+                           (point-min) (point-max)
+                           (position-bytes (point-min))
+                           (position-bytes (point-max)))
+                     before)))))
+
+(ert-deftest rope-test-search-quit-restores-rope-state ()
+  "Plain string search must restore rope state after a quit."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (let ((program (expand-file-name invocation-name invocation-directory))
+        (code
+         (prin1-to-string
+          '(with-temp-buffer
+             (buffer-enable-rope)
+             (insert (make-string 200000 ?a))
+             (goto-char (point-min))
+             (unwind-protect
+                 (let ((inhibit-quit nil))
+                   (setq quit-flag t)
+                   (search-forward "z" nil nil))
+               (setq quit-flag nil)
+               (princ (format "%S %S %S"
+                              (buffer-using-rope-p)
+                              (buffer-size)
+                              (buffer-substring-no-properties
+                               (point-min) (+ 11 (point-min))))))))))
+    (with-temp-buffer
+      (let ((status (call-process program nil t nil "--batch" "-Q"
+                                  "--eval" code)))
+        (should (= status 255))
+        (should (string-match-p "t 200000 \"aaaaaaaaaaa\""
+                                (buffer-string)))))))
+
 (provide 'rope-tests)
 ;;; rope-tests.el ends here

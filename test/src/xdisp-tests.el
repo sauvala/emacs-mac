@@ -179,4 +179,21 @@ int main () {
         (buffer-string)))
     "foo\n")))
 
+(ert-deftest xdisp-tests--long-line-redisplay-preserves-bidi-setting ()
+  "Long-line redisplay should not mutate `bidi-display-reordering'."
+  (let ((old-buffer (window-buffer)))
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local bidi-display-reordering t)
+          (let ((long-line-threshold 10)
+                (redisplay-skip-initial-frame nil))
+            (dotimes (_ 20)
+              (insert "xxxxx"))
+            (switch-to-buffer (current-buffer))
+            (redisplay 'force)
+            (should (long-line-optimizations-p))
+            (should (eq bidi-display-reordering t))))
+      (when (buffer-live-p old-buffer)
+        (switch-to-buffer old-buffer)))))
+
 ;;; xdisp-tests.el ends here
