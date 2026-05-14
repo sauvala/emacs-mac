@@ -2391,7 +2391,7 @@ skip_syntaxes (bool forwardp, Lisp_Object string, Lisp_Object lim)
 		     || pos < gl_state.e_property);
 
 	      if (pos_byte < lim_byte)
-		update_syntax_table_forward (pos, false, gl_state.object);
+		update_syntax_table_forward (pos, gl_state.object);
 	    }
 	}
       else
