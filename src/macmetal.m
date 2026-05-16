@@ -103,7 +103,7 @@ static NSString *const metal_shader_source = @
 
 /* Vertex and batch data structures.  */
 
-#define METAL_MAX_VERTICES (65536)
+#define METAL_MAX_VERTICES (262144)
 #define METAL_MAX_CLIP_STACK (32)
 #define METAL_VERTEX_BUFFER_COUNT (2)
 #define METAL_MAX_BATCHES (4096)
@@ -491,11 +491,7 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
       return;
     }
 
-  id<MTLBuffer> draw_buffer
-    = [shared_device newBufferWithBytes:ctx->vertices
-                                 length:((NSUInteger) ctx->vertex_count
-                                         * sizeof (metal_vertex_t))
-                                options:MTLResourceStorageModeShared];
+  id<MTLBuffer> draw_buffer = ctx->vertex_buffers[ctx->current_buffer];
   if (!draw_buffer)
     return;
 
@@ -512,6 +508,13 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
     (float)(ctx->width * ctx->scale),
     (float)(ctx->height * ctx->scale)
   };
+
+  [encoder setVertexBuffer:draw_buffer
+                    offset:0
+                   atIndex:0];
+  [encoder setVertexBytes:viewport_size
+                   length:sizeof (viewport_size)
+                  atIndex:1];
 
   for (int i = 0; i < ctx->batch_count; i++)
     {
@@ -536,14 +539,6 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
       else
         [encoder setRenderPipelineState:shared_solid_pipeline];
 
-      /* Set vertex buffer and uniforms.  */
-      [encoder setVertexBuffer:draw_buffer
-                        offset:0
-                       atIndex:0];
-      [encoder setVertexBytes:viewport_size
-                       length:sizeof (viewport_size)
-                      atIndex:1];
-
       /* Set texture if needed.  */
       if (batch->texture)
         [encoder setFragmentTexture:batch->texture atIndex:0];
@@ -556,7 +551,6 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
   [encoder endEncoding];
 
   ctx->batch_count = 0;
-  ctx->vertex_count = 0;
 }
 
 void
@@ -675,7 +669,8 @@ emit_vertices (emacs_metal_context_t *ctx, int count,
   if (ctx->vertex_count + count > METAL_MAX_VERTICES)
     {
       flush_render_batches (ctx, ctx->frame_command_buffer);
-      if (count > METAL_MAX_VERTICES)
+      if (count > METAL_MAX_VERTICES
+          || ctx->vertex_count + count > METAL_MAX_VERTICES)
         return NULL;
     }
 
