@@ -107,6 +107,7 @@ enum {FONT_SPACING_SYNTHETIC_MONO = FONT_SPACING_MONO};
 
 static const CGAffineTransform synthetic_italic_atfm = {1, 0, 0.25, 1, 0, 0};
 static const CGFloat synthetic_bold_factor = 0.024;
+#define MACFONT_DRAW_STACK_GLYPHS 256
 
 static Boolean cfnumber_get_font_symbolic_traits_value (CFNumberRef,
                                                         CTFontSymbolicTraits *);
@@ -2900,6 +2901,10 @@ macfont_draw (struct glyph_string *s, int from, int to, int x, int y,
      || (macfont_info->antialias == MACFONT_ANTIALIAS_DEFAULT
 	 && font_size <= macfont_antialias_threshold));
   int len = to - from;
+  CGGlyph stack_glyphs[MACFONT_DRAW_STACK_GLYPHS];
+  CGPoint stack_positions[MACFONT_DRAW_STACK_GLYPHS];
+  CGGlyph *glyphs_heap = NULL;
+  CGPoint *positions_heap = NULL;
 #ifndef USE_METAL_RENDERING
   bool respect_alpha_background_p = s->hl != DRAW_CURSOR;
 #endif
@@ -2915,13 +2920,23 @@ macfont_draw (struct glyph_string *s, int from, int to, int x, int y,
 
   text_position = CGPointMake (x, -y);
 #endif
-  glyphs = xmalloc (sizeof (CGGlyph) * len);
+  if (len <= MACFONT_DRAW_STACK_GLYPHS)
+    {
+      glyphs = stack_glyphs;
+      positions = stack_positions;
+    }
+  else
+    {
+      glyphs_heap = xmalloc (sizeof (CGGlyph) * len);
+      positions_heap = xmalloc (sizeof (CGPoint) * len);
+      glyphs = glyphs_heap;
+      positions = positions_heap;
+    }
   {
     CGFloat advance_delta = 0;
     int i;
     CGFloat total_width = 0;
 
-    positions = xmalloc (sizeof (CGPoint) * len);
     for (i = 0; i < len; i++)
       {
 	int width;
@@ -2976,8 +2991,10 @@ macfont_draw (struct glyph_string *s, int from, int to, int x, int y,
       }
   }
 
-  xfree (glyphs);
-  xfree (positions);
+  if (glyphs_heap)
+    xfree (glyphs_heap);
+  if (positions_heap)
+    xfree (positions_heap);
   unblock_input ();
   return len;
 #else /* !USE_METAL_RENDERING */
@@ -3044,11 +3061,13 @@ macfont_draw (struct glyph_string *s, int from, int to, int x, int y,
 #if defined (XMALLOC_BLOCK_INPUT_CHECK) && DRAWING_USE_GCD
   /* Don't use xfree here, because this might be called in a non-main
      thread.  */
-  free (glyphs);
-  free (positions);
+  free (glyphs_heap);
+  free (positions_heap);
 #else
-  xfree (glyphs);
-  xfree (positions);
+  if (glyphs_heap)
+    xfree (glyphs_heap);
+  if (positions_heap)
+    xfree (positions_heap);
 #endif
 
   MAC_END_DRAW_TO_FRAME (f);
