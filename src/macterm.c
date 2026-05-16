@@ -262,17 +262,16 @@ mac_draw_cg_image (struct frame *f, GC gc,
        matching what the CoreGraphics path does via CGImageIsMask check.  */
     void *fill_color = CGImageIsMask (image) ? (void *)gc->cg_fore_color : NULL;
     mac_metal_apply_gc_clip (f, gc);
-    void *texture = emacs_metal_upload_cg_image (FRAME_METAL_CTX (f),
-                                                 (void *)image,
-                                                 img_w, img_h,
-                                                 fill_color);
+    void *texture =
+      emacs_metal_get_cached_cg_image (FRAME_METAL_CTX (f),
+				       (void *)image, img_w, img_h,
+				       fill_color);
     if (texture)
       {
         emacs_metal_draw_image_texture (FRAME_METAL_CTX (f), texture,
                                         metal_src_x, metal_src_y,
                                         metal_width, metal_height,
                                         dest_x, dest_y, width, height);
-        emacs_metal_destroy_texture (texture);
       }
   }
 #else

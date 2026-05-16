@@ -61,6 +61,10 @@ extern void *emacs_metal_upload_cg_image (emacs_metal_context_t *ctx,
                                           void *cg_image,
                                           int width, int height,
                                           void *fill_color);
+extern void *emacs_metal_get_cached_cg_image (emacs_metal_context_t *ctx,
+                                              void *cg_image,
+                                              int width, int height,
+                                              void *fill_color);
 extern void emacs_metal_draw_image_texture (emacs_metal_context_t *ctx,
                                             void *texture,
                                             int src_x, int src_y,

@@ -107,6 +107,7 @@ static NSString *const metal_shader_source = @
 #define METAL_MAX_CLIP_STACK (32)
 #define METAL_VERTEX_BUFFER_COUNT (2)
 #define METAL_MAX_BATCHES (4096)
+#define METAL_IMAGE_CACHE_SIZE (64)
 
 typedef struct {
     float position[2];
@@ -126,6 +127,14 @@ typedef struct {
     id<MTLTexture> texture;
     bool is_glyph;
 } metal_batch_t;
+
+typedef struct {
+    CGImageRef image;
+    CGColorRef fill_color;
+    int width, height;
+    id<MTLTexture> texture;
+    uint64_t last_used;
+} metal_image_cache_entry_t;
 
 struct emacs_metal_context
 {
@@ -158,6 +167,9 @@ struct emacs_metal_context
   struct emacs_metal_glyph_cache *glyph_cache;
   uint8_t *glyph_scratch_pixels;
   size_t glyph_scratch_capacity;
+
+  metal_image_cache_entry_t image_cache[METAL_IMAGE_CACHE_SIZE];
+  uint64_t image_cache_clock;
 };
 
 static void flush_render_batches (emacs_metal_context_t *ctx,
@@ -181,6 +193,33 @@ glyph_scratch_pixels (emacs_metal_context_t *ctx, size_t size)
 
   memset (ctx->glyph_scratch_pixels, 0, size);
   return ctx->glyph_scratch_pixels;
+}
+
+static void
+clear_image_cache_entry (metal_image_cache_entry_t *entry)
+{
+  if (entry->image)
+    CGImageRelease (entry->image);
+  if (entry->fill_color)
+    CGColorRelease (entry->fill_color);
+
+  entry->image = NULL;
+  entry->fill_color = NULL;
+  entry->width = 0;
+  entry->height = 0;
+  entry->texture = nil;
+  entry->last_used = 0;
+}
+
+static bool
+cg_color_key_equal (CGColorRef a, CGColorRef b)
+{
+  if (a == b)
+    return true;
+  if (!a || !b)
+    return false;
+
+  return CGColorEqualToColor (a, b);
 }
 
 /* Create render pipeline states from the embedded shader source.  */
@@ -466,6 +505,8 @@ emacs_metal_context_destroy (emacs_metal_context_t *ctx)
   ctx->command_queue = nil;
   ctx->layer = nil;
   free (ctx->glyph_scratch_pixels);
+  for (int i = 0; i < METAL_IMAGE_CACHE_SIZE; i++)
+    clear_image_cache_entry (&ctx->image_cache[i]);
 
   if (ctx->glyph_cache)
     {
@@ -1396,6 +1437,57 @@ emacs_metal_upload_cg_image (emacs_metal_context_t *ctx,
   free (pixels);
 
   return (__bridge_retained void *)texture;
+}
+
+void *
+emacs_metal_get_cached_cg_image (emacs_metal_context_t *ctx,
+                                 void *cg_image_ptr,
+                                 int width, int height,
+                                 void *fill_color_ptr)
+{
+  CGImageRef cg_image = (CGImageRef)cg_image_ptr;
+  CGColorRef fill_color = (CGColorRef)fill_color_ptr;
+  if (!ctx || !cg_image || width <= 0 || height <= 0)
+    return NULL;
+
+  uint64_t now = ++ctx->image_cache_clock;
+  metal_image_cache_entry_t *victim = NULL;
+
+  for (int i = 0; i < METAL_IMAGE_CACHE_SIZE; i++)
+    {
+      metal_image_cache_entry_t *entry = &ctx->image_cache[i];
+
+      if (entry->image == cg_image
+          && entry->width == width
+          && entry->height == height
+          && cg_color_key_equal (entry->fill_color, fill_color))
+        {
+          entry->last_used = now;
+          return (__bridge void *)entry->texture;
+        }
+
+      if (!entry->image)
+        victim = entry;
+      else if (!victim || entry->last_used < victim->last_used)
+        victim = entry;
+    }
+
+  void *texture_ptr = emacs_metal_upload_cg_image (ctx, cg_image_ptr,
+                                                   width, height,
+                                                   fill_color_ptr);
+  if (!texture_ptr)
+    return NULL;
+
+  clear_image_cache_entry (victim);
+  victim->image = CGImageRetain (cg_image);
+  if (fill_color)
+    victim->fill_color = CGColorRetain (fill_color);
+  victim->width = width;
+  victim->height = height;
+  victim->texture = (__bridge_transfer id<MTLTexture>)texture_ptr;
+  victim->last_used = now;
+
+  return (__bridge void *)victim->texture;
 }
 
 void
