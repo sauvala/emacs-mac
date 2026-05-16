@@ -35,4 +35,16 @@
     (should-not (string-match-p "emacs_metal_upload_cg_image" body))
     (should-not (string-match-p "emacs_metal_destroy_texture" body))))
 
+(ert-deftest macterm-metal-clip-union-records-overdraw-stats ()
+  "The Metal clip union path should record exact and union clip areas."
+  (let ((body (macterm-tests--function-body
+               "mac_metal_apply_gc_clip"
+               "\nuint32_t\nmac_metal_background_color")))
+    (should (string-match-p "mac_metal_clip_exact_area" body))
+    (should (string-match-p "mac_metal_clip_union_area" body))
+    (should (string-match-p "CGRectUnion" body)))
+  (let ((source (macterm-tests--source)))
+    (should (string-match-p "mac-metal-clip-overdraw-stats" source))
+    (should (string-match-p "defsubr (&Smac_metal_clip_overdraw_stats)" source))))
+
 ;;; source-invariants.el ends here

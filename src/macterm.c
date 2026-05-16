@@ -125,6 +125,21 @@ mac_end_scale_mismatch_detection (struct frame *f)
 }
 
 #ifdef USE_METAL_RENDERING
+static uintmax_t mac_metal_clip_union_calls;
+static uintmax_t mac_metal_clip_rect_count;
+static double mac_metal_clip_exact_area;
+static double mac_metal_clip_union_area;
+
+static double
+mac_metal_rect_area (CGRect rect)
+{
+  rect = CGRectStandardize (rect);
+  CGFloat width = CGRectGetWidth (rect);
+  CGFloat height = CGRectGetHeight (rect);
+
+  return width > 0 && height > 0 ? (double) width * (double) height : 0.0;
+}
+
 void
 mac_metal_apply_gc_clip (struct frame *f, GC gc)
 {
@@ -138,9 +153,21 @@ mac_metal_apply_gc_clip (struct frame *f, GC gc)
         (const CGRect *) CFDataGetBytePtr (gc->clip_rects_data);
       CFIndex count = CFDataGetLength (gc->clip_rects_data) / sizeof (CGRect);
       CGRect union_rect = rects[0];
+      double exact_area = mac_metal_rect_area (rects[0]);
 
       for (CFIndex i = 1; i < count; i++)
-        union_rect = CGRectUnion (union_rect, rects[i]);
+        {
+          exact_area += mac_metal_rect_area (rects[i]);
+          union_rect = CGRectUnion (union_rect, rects[i]);
+        }
+
+      if (count > 1)
+        {
+          mac_metal_clip_union_calls++;
+          mac_metal_clip_rect_count += count;
+          mac_metal_clip_exact_area += exact_area;
+          mac_metal_clip_union_area += mac_metal_rect_area (union_rect);
+        }
 
       int x = floor (CGRectGetMinX (union_rect));
       int y = floor (CGRectGetMinY (union_rect));
@@ -178,6 +205,57 @@ mac_metal_background_color (struct frame *f, GC gc, bool respect_alpha_backgroun
   return (alpha << 24) | (gc->xgcv.background & 0x00FFFFFFu);
 }
 #endif
+
+DEFUN ("mac-metal-clip-overdraw-stats", Fmac_metal_clip_overdraw_stats,
+       Smac_metal_clip_overdraw_stats, 0, 1, 0,
+       doc: /* Return Metal clip union overdraw statistics.
+If optional RESET is non-nil, reset the counters after reading them.
+
+The returned value is a plist with keys `:clip-calls', `:clip-rectangles',
+`:exact-area', `:union-area', `:overdraw-area', and `:overdraw-ratio'.
+These counters are only active in Metal rendering builds.  */)
+  (Lisp_Object reset)
+{
+  uintmax_t clip_union_calls = 0;
+  uintmax_t clip_rect_count = 0;
+  double exact_area = 0.0;
+  double union_area = 0.0;
+
+#ifdef USE_METAL_RENDERING
+  clip_union_calls = mac_metal_clip_union_calls;
+  clip_rect_count = mac_metal_clip_rect_count;
+  exact_area = mac_metal_clip_exact_area;
+  union_area = mac_metal_clip_union_area;
+#endif
+
+  double overdraw_area = union_area - exact_area;
+  double overdraw_ratio = exact_area > 0.0 ? union_area / exact_area : 0.0;
+
+  if (overdraw_area < 0.0)
+    overdraw_area = 0.0;
+
+  Lisp_Object result[] =
+    {
+      intern_c_string (":clip-calls"), make_uint (clip_union_calls),
+      intern_c_string (":clip-rectangles"), make_uint (clip_rect_count),
+      intern_c_string (":exact-area"), make_float (exact_area),
+      intern_c_string (":union-area"), make_float (union_area),
+      intern_c_string (":overdraw-area"), make_float (overdraw_area),
+      intern_c_string (":overdraw-ratio"), make_float (overdraw_ratio),
+    };
+
+#ifdef USE_METAL_RENDERING
+  if (!NILP (reset))
+    {
+      mac_metal_clip_union_calls = 0;
+      mac_metal_clip_rect_count = 0;
+      mac_metal_clip_exact_area = 0.0;
+      mac_metal_clip_union_area = 0.0;
+    }
+#endif
+
+  return Flist (ARRAYELTS (result), result);
+}
 
 /* X display function emulation */
 
@@ -6175,6 +6253,8 @@ mac_initialize (void)
 void
 syms_of_macterm (void)
 {
+  defsubr (&Smac_metal_clip_overdraw_stats);
+
   DEFSYM (Qcontrol, "control");
   DEFSYM (Qmeta, "meta");
   DEFSYM (Qalt, "alt");
