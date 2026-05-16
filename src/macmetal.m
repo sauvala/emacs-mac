@@ -1042,11 +1042,12 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
    color.  */
 void
 emacs_metal_draw_glyphs (emacs_metal_context_t *ctx,
-                         uint16_t *glyphs,
-                         float *positions,
+                         const CGGlyph *glyphs,
+                         const CGPoint *positions,
                          int count,
                          void *font_ptr,
                          uint32_t color,
+                         float origin_x,
                          float baseline_y)
 {
   if (!ctx->in_frame || count <= 0)
@@ -1059,7 +1060,7 @@ emacs_metal_draw_glyphs (emacs_metal_context_t *ctx,
 
   for (int i = 0; i < count; i++)
     {
-      float x_pos = positions[i] * s;
+      float x_pos = (origin_x + positions[i].x) * s;
       float y_pos = baseline_y * s;
 
       /* Compute subpixel quantization.  */

@@ -35,4 +35,13 @@
     (should (string-match-p "stack_positions" body))
     (should (string-match-p "len <= MACFONT_DRAW_STACK_GLYPHS" body))))
 
+(ert-deftest macfont-metal-draw-reuses-coretext-glyph-arrays ()
+  "The Metal text path should not copy glyph arrays before drawing."
+  (let ((body (macfont-tests--function-body "macfont_draw")))
+    (should-not (string-match-p "metal_glyphs" body))
+    (should-not (string-match-p "metal_positions" body))
+    (should (string-match-p
+             (regexp-quote "emacs_metal_draw_glyphs (FRAME_METAL_CTX (f),")
+             body))))
+
 ;;; source-invariants.el ends here

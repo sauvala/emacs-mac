@@ -4,6 +4,7 @@
 #ifdef USE_METAL_RENDERING
 
 #include <stdint.h>
+#include <CoreGraphics/CoreGraphics.h>
 
 typedef struct emacs_metal_context emacs_metal_context_t;
 
@@ -42,11 +43,12 @@ extern void emacs_metal_reset_clip (emacs_metal_context_t *ctx);
 
 /* Glyph rendering -- font is a CTFontRef cast to void* for C API */
 extern void emacs_metal_draw_glyphs (emacs_metal_context_t *ctx,
-                                     uint16_t *glyphs,
-                                     float *positions,
+                                     const CGGlyph *glyphs,
+                                     const CGPoint *positions,
                                      int count,
                                      void *font,
                                      uint32_t color,
+                                     float origin_x,
                                      float baseline_y);
 
 /* Scrolling */
