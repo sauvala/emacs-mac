@@ -156,10 +156,32 @@ struct emacs_metal_context
   dispatch_semaphore_t buffer_semaphore;
 
   struct emacs_metal_glyph_cache *glyph_cache;
+  uint8_t *glyph_scratch_pixels;
+  size_t glyph_scratch_capacity;
 };
 
 static void flush_render_batches (emacs_metal_context_t *ctx,
                                   id<MTLCommandBuffer> cmd);
+
+static uint8_t *
+glyph_scratch_pixels (emacs_metal_context_t *ctx, size_t size)
+{
+  if (size == 0)
+    return NULL;
+
+  if (ctx->glyph_scratch_capacity < size)
+    {
+      uint8_t *pixels = realloc (ctx->glyph_scratch_pixels, size);
+      if (!pixels)
+        return NULL;
+
+      ctx->glyph_scratch_pixels = pixels;
+      ctx->glyph_scratch_capacity = size;
+    }
+
+  memset (ctx->glyph_scratch_pixels, 0, size);
+  return ctx->glyph_scratch_pixels;
+}
 
 /* Create render pipeline states from the embedded shader source.  */
 
@@ -443,6 +465,7 @@ emacs_metal_context_destroy (emacs_metal_context_t *ctx)
   ctx->scroll_staging = nil;
   ctx->command_queue = nil;
   ctx->layer = nil;
+  free (ctx->glyph_scratch_pixels);
 
   if (ctx->glyph_cache)
     {
@@ -927,7 +950,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
     {
       /* RGBA bitmap for color emoji.  */
       size_t bpr = (size_t)gw * 4;
-      pixels = calloc (gh, bpr);
+      pixels = glyph_scratch_pixels (ctx, (size_t)gh * bpr);
       if (!pixels)
         return NULL;
 
@@ -937,10 +960,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
                                       | kCGBitmapByteOrder32Host);
       CGColorSpaceRelease (cs);
       if (!cg_ctx)
-        {
-          free (pixels);
-          return NULL;
-        }
+        return NULL;
 
       CGContextScaleCTM (cg_ctx, s, s);
       CGPoint draw_point = CGPointMake (pen_pt_x, pen_pt_y);
@@ -956,17 +976,14 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   else
     {
       /* Alpha-only bitmap for monochrome glyphs.  */
-      pixels = calloc ((size_t)gw * (size_t)gh, 1);
+      pixels = glyph_scratch_pixels (ctx, (size_t)gw * (size_t)gh);
       if (!pixels)
         return NULL;
 
       cg_ctx = CGBitmapContextCreate (pixels, gw, gh, 8, gw,
                                       NULL, (CGBitmapInfo) kCGImageAlphaOnly);
       if (!cg_ctx)
-        {
-          free (pixels);
-          return NULL;
-        }
+        return NULL;
 
       CGContextSetGrayFillColor (cg_ctx, 1.0, 1.0);
       CGContextScaleCTM (cg_ctx, s, s);
@@ -980,8 +997,6 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
                                    withBytes:pixels
                                  bytesPerRow:(NSUInteger)gw];
     }
-
-  free (pixels);
 
   /* Insert into the hash table using open addressing.  */
   uint32_t idx = glyph_cache_hash (font, glyph_id, subpixel);

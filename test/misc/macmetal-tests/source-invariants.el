@@ -23,7 +23,13 @@
     (should (string-match (concat "\n" (regexp-quote function-name) " (")
                           source))
     (let ((start (match-beginning 0)))
-      (should (string-match "\n}\n\nvoid\nemacs_metal_frame_end" source start))
+      (should (string-match (pcase function-name
+                              ("flush_render_batches"
+                               "\n}\n\nvoid\nemacs_metal_frame_end")
+                              ("glyph_cache_rasterize"
+                               (regexp-quote "\n}\n\n/* Draw an array"))
+                              (_ "\n}\n\n"))
+                            source start))
       (substring source start (match-beginning 0)))))
 
 (ert-deftest macmetal-flush-render-batches-reuses-frame-vertex-buffer ()
@@ -33,5 +39,12 @@
     (should (string-match-p
              (regexp-quote "ctx->vertex_buffers[ctx->current_buffer]")
              body))))
+
+(ert-deftest macmetal-glyph-rasterize-reuses-scratch-pixel-buffer ()
+  "Glyph cache misses should reuse context-owned scratch pixel storage."
+  (let ((body (macmetal-tests--function-body "glyph_cache_rasterize")))
+    (should (string-match-p "glyph_scratch_pixels" body))
+    (should-not (string-match-p "pixels = calloc" body))
+    (should-not (string-match-p "free (pixels)" body))))
 
 ;;; source-invariants.el ends here
