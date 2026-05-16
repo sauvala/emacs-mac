@@ -74,4 +74,14 @@
     (should (string-match-p "render_stats.texture_upload_bytes" upload-body))
     (should (string-match-p "command_buffer_seconds" source))))
 
+(ert-deftest macmetal-glyph-cache-evicts-entries-instead-of-resetting ()
+  "Glyph cache pressure should evict entries without resetting all atlas pages."
+  (let ((source (macmetal-tests--source))
+        (body (macmetal-tests--function-body "glyph_cache_rasterize")))
+    (should (string-match-p "glyph_cache_evict_entries" source))
+    (should (string-match-p "eviction_cursor" source))
+    (should (string-match-p "last_used" source))
+    (should-not (string-match-p "memset (gc->entries" body))
+    (should-not (string-match-p "Reset all atlas pages" body))))
+
 ;;; source-invariants.el ends here

@@ -20,6 +20,7 @@ static struct emacs_metal_render_stats render_stats;
 #define GLYPH_ATLAS_SIZE (2048)
 #define GLYPH_ATLAS_MAX_PAGES (8)
 #define GLYPH_CACHE_SIZE (16384)  /* MUST be power of 2 for hash table */
+#define GLYPH_CACHE_EVICT_BATCH (1024)
 #define SUBPIXEL_POSITIONS (4)
 
 typedef struct {
@@ -31,7 +32,9 @@ typedef struct {
     uint16_t atlas_w, atlas_h;
     float bearing_x, bearing_y;
     float advance;
+    uint64_t last_used;
     bool is_color;
+    bool deleted;
 } glyph_cache_entry_t;
 
 typedef struct {
@@ -47,6 +50,8 @@ struct emacs_metal_glyph_cache {
     int page_count;
     glyph_cache_entry_t entries[GLYPH_CACHE_SIZE];
     int entry_count;
+    uint64_t clock;
+    uint32_t eviction_cursor;
 };
 
 /* MSL shader source.  */
@@ -964,6 +969,7 @@ glyph_cache_get_page (emacs_metal_context_t *ctx,
           if (gc->entries[i].atlas_page == 0)
             {
               gc->entries[i].font = NULL;
+              gc->entries[i].deleted = true;
               gc->entry_count--;
             }
           else
@@ -1013,6 +1019,37 @@ glyph_cache_hash (CTFontRef font, uint16_t glyph_id, uint8_t subpixel)
   return (uint32_t)(h & (GLYPH_CACHE_SIZE - 1));
 }
 
+static void
+glyph_cache_evict_entries (struct emacs_metal_glyph_cache *gc)
+{
+  int evicted = 0;
+  int scanned = 0;
+  uint64_t protected_after = (gc->clock > GLYPH_CACHE_EVICT_BATCH
+                              ? gc->clock - GLYPH_CACHE_EVICT_BATCH
+                              : 0);
+
+  while (evicted < GLYPH_CACHE_EVICT_BATCH
+         && gc->entry_count > 0
+         && scanned < GLYPH_CACHE_SIZE * 2)
+    {
+      glyph_cache_entry_t *entry = &gc->entries[gc->eviction_cursor];
+
+      gc->eviction_cursor =
+        (gc->eviction_cursor + 1) & (GLYPH_CACHE_SIZE - 1);
+      scanned++;
+
+      if (entry->font == NULL)
+        continue;
+      if (entry->last_used > protected_after && scanned < GLYPH_CACHE_SIZE)
+        continue;
+
+      entry->font = NULL;
+      entry->deleted = true;
+      gc->entry_count--;
+      evicted++;
+    }
+}
+
 /* Look up a cached glyph entry.  Returns NULL on miss.  */
 static glyph_cache_entry_t *
 glyph_cache_lookup (emacs_metal_context_t *ctx,
@@ -1026,10 +1063,17 @@ glyph_cache_lookup (emacs_metal_context_t *ctx,
       uint32_t slot = (idx + probe) & (GLYPH_CACHE_SIZE - 1);
       glyph_cache_entry_t *e = &gc->entries[slot];
       if (e->font == NULL)
-        return NULL;
+        {
+          if (!e->deleted)
+            return NULL;
+          continue;
+        }
       if (e->font == font && e->glyph_id == glyph_id
           && e->subpixel == subpixel)
-        return e;
+        {
+          e->last_used = ++gc->clock;
+          return e;
+        }
     }
 
   return NULL;
@@ -1043,16 +1087,10 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
 {
   struct emacs_metal_glyph_cache *gc = ctx->glyph_cache;
 
-  /* If the cache is nearly full, clear everything and start fresh.  */
+  /* If the cache is nearly full, evict some old entries without discarding
+     all atlas pages.  The atlas page eviction path reclaims texture space.  */
   if (gc->entry_count >= GLYPH_CACHE_SIZE - 64)
-    {
-      memset (gc->entries, 0, sizeof (gc->entries));
-      gc->entry_count = 0;
-      /* Reset all atlas pages too.  */
-      for (int i = 0; i < gc->page_count; i++)
-        gc->pages[i].texture = nil;
-      gc->page_count = 0;
-    }
+    glyph_cache_evict_entries (gc);
 
   /* Get glyph bounding box (in points, relative to pen position).  */
   CGGlyph cg_glyph = (CGGlyph)glyph_id;
@@ -1166,20 +1204,31 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   /* Insert into the hash table using open addressing.  */
   uint32_t idx = glyph_cache_hash (font, glyph_id, subpixel);
   glyph_cache_entry_t *entry = NULL;
+  glyph_cache_entry_t *deleted_entry = NULL;
   for (int probe = 0; probe < GLYPH_CACHE_SIZE; probe++)
     {
       uint32_t slot = (idx + probe) & (GLYPH_CACHE_SIZE - 1);
-      if (gc->entries[slot].font == NULL)
+      glyph_cache_entry_t *candidate = &gc->entries[slot];
+
+      if (candidate->font == NULL && candidate->deleted)
         {
-          entry = &gc->entries[slot];
+          if (!deleted_entry)
+            deleted_entry = candidate;
+        }
+      else if (candidate->font == NULL)
+        {
+          entry = deleted_entry ? deleted_entry : candidate;
           break;
         }
     }
 
   if (!entry)
+    entry = deleted_entry;
+  if (!entry)
     return NULL;
 
   entry->font = font;
+  entry->deleted = false;
   entry->glyph_id = glyph_id;
   entry->subpixel = subpixel;
   entry->atlas_page = (uint16_t)page;
@@ -1197,6 +1246,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   entry->bearing_x = px_left - 1.0f;
   entry->bearing_y = px_bottom - 1.0f;
   entry->advance = (float)advance_size.width * s;
+  entry->last_used = ++gc->clock;
   entry->is_color = is_color;
   gc->entry_count++;
 
