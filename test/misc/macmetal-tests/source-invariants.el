@@ -47,4 +47,16 @@
     (should-not (string-match-p "pixels = calloc" body))
     (should-not (string-match-p "free (pixels)" body))))
 
+(ert-deftest macmetal-batches-preserve-multiple-clip-rectangles ()
+  "Metal batches should replay one vertex range through each active clip rect."
+  (let ((source (macmetal-tests--source))
+        (flush-body (macmetal-tests--function-body "flush_render_batches")))
+    (should (string-match-p "emacs_metal_set_clip_rects" source))
+    (should (string-match-p "clip_offset" source))
+    (should (string-match-p "clip_count" source))
+    (should (string-match-p "batch_clip_rects" source))
+    (should (string-match-p "clip_index < batch->clip_count" flush-body))
+    (should (string-match-p "batch->vertex_offset" flush-body))
+    (should (string-match-p "batch->vertex_count" flush-body))))
+
 ;;; source-invariants.el ends here

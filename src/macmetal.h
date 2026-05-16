@@ -39,6 +39,8 @@ extern void emacs_metal_push_clip (emacs_metal_context_t *ctx,
 extern void emacs_metal_pop_clip (emacs_metal_context_t *ctx);
 extern void emacs_metal_set_clip_rect (emacs_metal_context_t *ctx,
                                        int x, int y, int w, int h);
+extern void emacs_metal_set_clip_rects (emacs_metal_context_t *ctx,
+                                        const CGRect *rects, int count);
 extern void emacs_metal_reset_clip (emacs_metal_context_t *ctx);
 
 /* Glyph rendering -- font is a CTFontRef cast to void* for C API */

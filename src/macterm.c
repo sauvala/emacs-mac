@@ -169,13 +169,18 @@ mac_metal_apply_gc_clip (struct frame *f, GC gc)
           mac_metal_clip_union_area += mac_metal_rect_area (union_rect);
         }
 
-      int x = floor (CGRectGetMinX (union_rect));
-      int y = floor (CGRectGetMinY (union_rect));
-      int x2 = ceil (CGRectGetMaxX (union_rect));
-      int y2 = ceil (CGRectGetMaxY (union_rect));
+      if (count > 1)
+        emacs_metal_set_clip_rects (FRAME_METAL_CTX (f), rects, count);
+      else
+        {
+          int x = floor (CGRectGetMinX (union_rect));
+          int y = floor (CGRectGetMinY (union_rect));
+          int x2 = ceil (CGRectGetMaxX (union_rect));
+          int y2 = ceil (CGRectGetMaxY (union_rect));
 
-      emacs_metal_set_clip_rect (FRAME_METAL_CTX (f),
-                                 x, y, x2 - x, y2 - y);
+          emacs_metal_set_clip_rect (FRAME_METAL_CTX (f),
+                                     x, y, x2 - x, y2 - y);
+        }
     }
   else
     emacs_metal_reset_clip (FRAME_METAL_CTX (f));

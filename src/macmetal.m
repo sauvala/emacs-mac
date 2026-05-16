@@ -107,6 +107,8 @@ static NSString *const metal_shader_source = @
 #define METAL_MAX_CLIP_STACK (32)
 #define METAL_VERTEX_BUFFER_COUNT (2)
 #define METAL_MAX_BATCHES (4096)
+#define METAL_MAX_ACTIVE_CLIP_RECTS (128)
+#define METAL_MAX_BATCH_CLIP_RECTS (16384)
 #define METAL_IMAGE_CACHE_SIZE (64)
 
 typedef struct {
@@ -121,9 +123,15 @@ typedef struct {
 } metal_clip_rect_t;
 
 typedef struct {
+    metal_clip_rect_t rects[METAL_MAX_ACTIVE_CLIP_RECTS];
+    int count;
+} metal_clip_region_t;
+
+typedef struct {
     int vertex_offset;
     int vertex_count;
-    metal_clip_rect_t scissor;
+    int clip_offset;
+    int clip_count;
     id<MTLTexture> texture;
     bool is_glyph;
 } metal_batch_t;
@@ -150,10 +158,12 @@ struct emacs_metal_context
 
   metal_batch_t batches[METAL_MAX_BATCHES];
   int batch_count;
+  metal_clip_rect_t batch_clip_rects[METAL_MAX_BATCH_CLIP_RECTS];
+  int batch_clip_rect_count;
   id<MTLTexture> current_texture;
   bool current_is_glyph;
 
-  metal_clip_rect_t clip_stack[METAL_MAX_CLIP_STACK];
+  metal_clip_region_t clip_stack[METAL_MAX_CLIP_STACK];
   int clip_depth;
 
   int width, height, scale;
@@ -527,12 +537,14 @@ emacs_metal_frame_begin (emacs_metal_context_t *ctx)
   ctx->vertices = [ctx->vertex_buffers[ctx->current_buffer] contents];
   ctx->vertex_count = 0;
   ctx->batch_count = 0;
+  ctx->batch_clip_rect_count = 0;
   ctx->current_texture = nil;
   ctx->current_is_glyph = false;
 
   /* Default clip to full frame in pixels.  */
   ctx->clip_depth = 1;
-  ctx->clip_stack[0] = (metal_clip_rect_t){
+  ctx->clip_stack[0].count = 1;
+  ctx->clip_stack[0].rects[0] = (metal_clip_rect_t){
     .x = 0, .y = 0,
     .w = ctx->width * ctx->scale,
     .h = ctx->height * ctx->scale
@@ -584,18 +596,8 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
     {
       metal_batch_t *batch = &ctx->batches[i];
       if (batch->vertex_count <= 0
-          || batch->scissor.w <= 0
-          || batch->scissor.h <= 0)
+          || batch->clip_count <= 0)
         continue;
-
-      /* Set scissor rect.  */
-      MTLScissorRect scissor = {
-        .x = (NSUInteger)batch->scissor.x,
-        .y = (NSUInteger)batch->scissor.y,
-        .width = (NSUInteger)batch->scissor.w,
-        .height = (NSUInteger)batch->scissor.h
-      };
-      [encoder setScissorRect:scissor];
 
       /* Select pipeline state.  */
       if (batch->texture)
@@ -607,14 +609,31 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
       if (batch->texture)
         [encoder setFragmentTexture:batch->texture atIndex:0];
 
-      [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                  vertexStart:(NSUInteger)batch->vertex_offset
-                  vertexCount:(NSUInteger)batch->vertex_count];
+      for (int clip_index = 0; clip_index < batch->clip_count; clip_index++)
+        {
+          metal_clip_rect_t *clip =
+            &ctx->batch_clip_rects[batch->clip_offset + clip_index];
+          if (clip->w <= 0 || clip->h <= 0)
+            continue;
+
+          MTLScissorRect scissor = {
+            .x = (NSUInteger)clip->x,
+            .y = (NSUInteger)clip->y,
+            .width = (NSUInteger)clip->w,
+            .height = (NSUInteger)clip->h
+          };
+          [encoder setScissorRect:scissor];
+
+          [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                      vertexStart:(NSUInteger)batch->vertex_offset
+                      vertexCount:(NSUInteger)batch->vertex_count];
+        }
     }
 
   [encoder endEncoding];
 
   ctx->batch_count = 0;
+  ctx->batch_clip_rect_count = 0;
 }
 
 void
@@ -688,24 +707,92 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
 
 /* --- Batch management helpers --- */
 
+static bool
+clip_rects_equal (metal_clip_rect_t a, metal_clip_rect_t b)
+{
+  return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+}
+
+static metal_clip_rect_t
+intersect_clip_rects (metal_clip_rect_t a, metal_clip_rect_t b)
+{
+  int ix = METAL_MAX (a.x, b.x);
+  int iy = METAL_MAX (a.y, b.y);
+  int ix2 = METAL_MIN (a.x + a.w, b.x + b.w);
+  int iy2 = METAL_MIN (a.y + a.h, b.y + b.h);
+
+  return (metal_clip_rect_t){
+    .x = ix, .y = iy,
+    .w = METAL_MAX (0, ix2 - ix),
+    .h = METAL_MAX (0, iy2 - iy)
+  };
+}
+
+static void
+set_clip_to_cg_rect_union (emacs_metal_context_t *ctx, const CGRect *rects,
+                           int count)
+{
+  CGRect union_rect = rects[0];
+
+  for (int i = 1; i < count; i++)
+    union_rect = CGRectUnion (union_rect, rects[i]);
+
+  int x = floor (CGRectGetMinX (union_rect));
+  int y = floor (CGRectGetMinY (union_rect));
+  int x2 = ceil (CGRectGetMaxX (union_rect));
+  int y2 = ceil (CGRectGetMaxY (union_rect));
+
+  emacs_metal_set_clip_rect (ctx, x, y, x2 - x, y2 - y);
+}
+
+static bool
+batch_clip_matches (emacs_metal_context_t *ctx, metal_batch_t *batch,
+                    metal_clip_region_t *clip)
+{
+  if (batch->clip_count != clip->count)
+    return false;
+
+  for (int i = 0; i < clip->count; i++)
+    if (!clip_rects_equal (ctx->batch_clip_rects[batch->clip_offset + i],
+                           clip->rects[i]))
+      return false;
+
+  return true;
+}
+
+static bool
+store_batch_clip (emacs_metal_context_t *ctx, metal_batch_t *batch,
+                  metal_clip_region_t *clip)
+{
+  if (clip->count <= 0
+      || ctx->batch_clip_rect_count + clip->count > METAL_MAX_BATCH_CLIP_RECTS)
+    return false;
+
+  batch->clip_offset = ctx->batch_clip_rect_count;
+  batch->clip_count = clip->count;
+
+  memcpy (&ctx->batch_clip_rects[batch->clip_offset], clip->rects,
+          sizeof clip->rects[0] * clip->count);
+  ctx->batch_clip_rect_count += clip->count;
+
+  return true;
+}
+
 /* Return the current batch if it is compatible with (texture, is_glyph) and
-   the current scissor rect, otherwise open a new one.  Returns NULL when the
-   batch array is full.  */
+   the current clip region, otherwise open a new one.  Returns NULL when the
+   batch or clip array is full.  */
 static metal_batch_t *
 ensure_batch (emacs_metal_context_t *ctx,
               id<MTLTexture> texture, bool is_glyph)
 {
-  metal_clip_rect_t *clip = &ctx->clip_stack[ctx->clip_depth - 1];
+  metal_clip_region_t *clip = &ctx->clip_stack[ctx->clip_depth - 1];
 
   if (ctx->batch_count > 0)
     {
       metal_batch_t *b = &ctx->batches[ctx->batch_count - 1];
       if (b->texture == texture
           && b->is_glyph == is_glyph
-          && b->scissor.x == clip->x
-          && b->scissor.y == clip->y
-          && b->scissor.w == clip->w
-          && b->scissor.h == clip->h)
+          && batch_clip_matches (ctx, b, clip))
         return b;
     }
 
@@ -715,9 +802,13 @@ ensure_batch (emacs_metal_context_t *ctx,
   metal_batch_t *b = &ctx->batches[ctx->batch_count++];
   b->vertex_offset = ctx->vertex_count;
   b->vertex_count  = 0;
-  b->scissor       = *clip;
   b->texture       = texture;
   b->is_glyph      = is_glyph;
+  if (!store_batch_clip (ctx, b, clip))
+    {
+      ctx->batch_count--;
+      return NULL;
+    }
   return b;
 }
 
@@ -739,7 +830,7 @@ emit_vertices (emacs_metal_context_t *ctx, int count,
     }
 
   metal_batch_t *b = ensure_batch (ctx, texture, is_glyph);
-  if (!b && ctx->batch_count >= METAL_MAX_BATCHES)
+  if (!b)
     {
       flush_render_batches (ctx, ctx->frame_command_buffer);
       b = ensure_batch (ctx, texture, is_glyph);
@@ -1258,35 +1349,39 @@ void
 emacs_metal_push_clip (emacs_metal_context_t *ctx,
                        int x, int y, int w, int h)
 {
-  if (ctx->clip_depth >= METAL_MAX_CLIP_STACK)
+  if (!ctx || ctx->clip_depth >= METAL_MAX_CLIP_STACK)
     return;
 
   int s = ctx->scale;
-  metal_clip_rect_t *parent = &ctx->clip_stack[ctx->clip_depth - 1];
+  metal_clip_region_t *parent = &ctx->clip_stack[ctx->clip_depth - 1];
+  metal_clip_region_t *child = &ctx->clip_stack[ctx->clip_depth];
 
   /* New rect in physical pixels.  */
-  int nx = x * s;
-  int ny = y * s;
-  int nw = w * s;
-  int nh = h * s;
+  metal_clip_rect_t clip = {
+    .x = x * s,
+    .y = y * s,
+    .w = w * s,
+    .h = h * s
+  };
 
-  /* Intersect with parent.  */
-  int ix = METAL_MAX (nx, parent->x);
-  int iy = METAL_MAX (ny, parent->y);
-  int ix2 = METAL_MIN (nx + nw, parent->x + parent->w);
-  int iy2 = METAL_MIN (ny + nh, parent->y + parent->h);
+  child->count = 0;
+  for (int i = 0; i < parent->count; i++)
+    {
+      metal_clip_rect_t rect = intersect_clip_rects (parent->rects[i], clip);
+      if (rect.w > 0 && rect.h > 0)
+        child->rects[child->count++] = rect;
+    }
 
-  ctx->clip_stack[ctx->clip_depth].x = ix;
-  ctx->clip_stack[ctx->clip_depth].y = iy;
-  ctx->clip_stack[ctx->clip_depth].w = METAL_MAX (0, ix2 - ix);
-  ctx->clip_stack[ctx->clip_depth].h = METAL_MAX (0, iy2 - iy);
+  if (child->count == 0)
+    child->rects[child->count++] = (metal_clip_rect_t){ .x = 0, .y = 0,
+                                                        .w = 0, .h = 0 };
   ctx->clip_depth++;
 }
 
 void
 emacs_metal_pop_clip (emacs_metal_context_t *ctx)
 {
-  if (ctx->clip_depth > 1)
+  if (ctx && ctx->clip_depth > 1)
     ctx->clip_depth--;
 }
 
@@ -1311,11 +1406,78 @@ emacs_metal_set_clip_rect (emacs_metal_context_t *ctx,
   int iy2 = METAL_MIN (fh, ny + nh);
 
   ctx->clip_depth = 1;
-  ctx->clip_stack[0] = (metal_clip_rect_t){
+  ctx->clip_stack[0].count = 1;
+  ctx->clip_stack[0].rects[0] = (metal_clip_rect_t){
     .x = ix, .y = iy,
     .w = METAL_MAX (0, ix2 - ix),
     .h = METAL_MAX (0, iy2 - iy)
   };
+}
+
+void
+emacs_metal_set_clip_rects (emacs_metal_context_t *ctx,
+                            const CGRect *rects, int count)
+{
+  if (!ctx)
+    return;
+
+  if (!rects || count <= 0)
+    {
+      emacs_metal_set_clip_rect (ctx, 0, 0, 0, 0);
+      return;
+    }
+
+  if (count > METAL_MAX_ACTIVE_CLIP_RECTS)
+    {
+      set_clip_to_cg_rect_union (ctx, rects, count);
+      return;
+    }
+
+  int s = ctx->scale;
+  metal_clip_rect_t frame_clip = {
+    .x = 0, .y = 0,
+    .w = ctx->width * s,
+    .h = ctx->height * s
+  };
+  metal_clip_region_t *clip = &ctx->clip_stack[0];
+
+  ctx->clip_depth = 1;
+  clip->count = 0;
+
+  for (int i = 0; i < count; i++)
+    {
+      CGRect rect = CGRectStandardize (rects[i]);
+      int x = floor (CGRectGetMinX (rect)) * s;
+      int y = floor (CGRectGetMinY (rect)) * s;
+      int x2 = ceil (CGRectGetMaxX (rect)) * s;
+      int y2 = ceil (CGRectGetMaxY (rect)) * s;
+      metal_clip_rect_t candidate = {
+        .x = x, .y = y,
+        .w = METAL_MAX (0, x2 - x),
+        .h = METAL_MAX (0, y2 - y)
+      };
+
+      candidate = intersect_clip_rects (frame_clip, candidate);
+      if (candidate.w > 0 && candidate.h > 0)
+        {
+          for (int j = 0; j < clip->count; j++)
+            {
+              metal_clip_rect_t intersection =
+                intersect_clip_rects (clip->rects[j], candidate);
+              if (intersection.w > 0 && intersection.h > 0)
+                {
+                  set_clip_to_cg_rect_union (ctx, rects, count);
+                  return;
+                }
+            }
+
+          clip->rects[clip->count++] = candidate;
+        }
+    }
+
+  if (clip->count == 0)
+    clip->rects[clip->count++] = (metal_clip_rect_t){ .x = 0, .y = 0,
+                                                      .w = 0, .h = 0 };
 }
 
 void
@@ -1325,7 +1487,8 @@ emacs_metal_reset_clip (emacs_metal_context_t *ctx)
     return;
 
   ctx->clip_depth = 1;
-  ctx->clip_stack[0] = (metal_clip_rect_t){
+  ctx->clip_stack[0].count = 1;
+  ctx->clip_stack[0].rects[0] = (metal_clip_rect_t){
     .x = 0, .y = 0,
     .w = ctx->width * ctx->scale,
     .h = ctx->height * ctx->scale
