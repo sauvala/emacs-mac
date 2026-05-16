@@ -13,6 +13,7 @@ static id<MTLDevice> shared_device;
 static id<MTLLibrary> shared_library;
 static id<MTLRenderPipelineState> shared_solid_pipeline;
 static id<MTLRenderPipelineState> shared_textured_pipeline;
+static struct emacs_metal_render_stats render_stats;
 
 /* Glyph atlas constants and data structures.  */
 
@@ -184,6 +185,15 @@ struct emacs_metal_context
 
 static void flush_render_batches (emacs_metal_context_t *ctx,
                                   id<MTLCommandBuffer> cmd);
+
+void
+emacs_metal_get_render_stats (struct emacs_metal_render_stats *stats,
+                              bool reset)
+{
+  *stats = render_stats;
+  if (reset)
+    memset (&render_stats, 0, sizeof render_stats);
+}
 
 static uint8_t *
 glyph_scratch_pixels (emacs_metal_context_t *ctx, size_t size)
@@ -571,6 +581,9 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
   if (!draw_buffer)
     return;
 
+  int flushed_batches = ctx->batch_count;
+  int flushed_vertices = ctx->vertex_count;
+
   MTLRenderPassDescriptor *pass
     = [MTLRenderPassDescriptor renderPassDescriptor];
   pass.colorAttachments[0].texture = ctx->backbuffer;
@@ -627,10 +640,15 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
           [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                       vertexStart:(NSUInteger)batch->vertex_offset
                       vertexCount:(NSUInteger)batch->vertex_count];
+          render_stats.scissor_draws++;
         }
     }
 
   [encoder endEncoding];
+
+  render_stats.flushes++;
+  render_stats.batches += flushed_batches;
+  render_stats.vertices += flushed_vertices;
 
   ctx->batch_count = 0;
   ctx->batch_clip_rect_count = 0;
@@ -682,6 +700,8 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
              destinationLevel:0
             destinationOrigin:MTLOriginMake (0, 0, 0)];
         [blit endEncoding];
+        render_stats.blits++;
+        render_stats.blit_bytes += (uintmax_t) copy_w * copy_h * 4;
       }
   }
 
@@ -689,7 +709,16 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
   [cmd presentDrawable:drawable];
 
   __block dispatch_semaphore_t sema = ctx->buffer_semaphore;
+  double command_start = CACurrentMediaTime ();
+  render_stats.frames++;
+  render_stats.command_buffers++;
   [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull buffer) {
+    double elapsed = CACurrentMediaTime () - command_start;
+    if (elapsed < 0.0)
+      elapsed = 0.0;
+    render_stats.command_buffer_seconds += elapsed;
+    if (render_stats.max_command_buffer_seconds < elapsed)
+      render_stats.max_command_buffer_seconds = elapsed;
     dispatch_semaphore_signal (sema);
   }];
 
@@ -1104,6 +1133,8 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
                                  mipmapLevel:0
                                    withBytes:pixels
                                  bytesPerRow:(NSUInteger)(gw * 4)];
+      render_stats.texture_uploads++;
+      render_stats.texture_upload_bytes += (uintmax_t) gw * gh * 4;
     }
   else
     {
@@ -1128,6 +1159,8 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
                                  mipmapLevel:0
                                    withBytes:pixels
                                  bytesPerRow:(NSUInteger)gw];
+      render_stats.texture_uploads++;
+      render_stats.texture_upload_bytes += (uintmax_t) gw * gh;
     }
 
   /* Insert into the hash table using open addressing.  */
@@ -1547,6 +1580,8 @@ emacs_metal_scroll (emacs_metal_context_t *ctx,
        destinationSlice:0 destinationLevel:0
       destinationOrigin:MTLOriginMake (sx + sdx, sy + sdy, 0)];
   [blit endEncoding];
+  render_stats.blits += 2;
+  render_stats.blit_bytes += (uintmax_t) sw * sh * 4 * 2;
 }
 
 /* --- Image texture upload and drawing --- */
@@ -1597,6 +1632,8 @@ emacs_metal_upload_cg_image (emacs_metal_context_t *ctx,
              mipmapLevel:0
                withBytes:pixels
              bytesPerRow:bpr];
+  render_stats.texture_uploads++;
+  render_stats.texture_upload_bytes += (uintmax_t) height * bpr;
   free (pixels);
 
   return (__bridge_retained void *)texture;

@@ -4,9 +4,26 @@
 #ifdef USE_METAL_RENDERING
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <CoreGraphics/CoreGraphics.h>
 
 typedef struct emacs_metal_context emacs_metal_context_t;
+
+struct emacs_metal_render_stats
+{
+  uintmax_t frames;
+  uintmax_t flushes;
+  uintmax_t batches;
+  uintmax_t vertices;
+  uintmax_t scissor_draws;
+  uintmax_t blits;
+  uintmax_t blit_bytes;
+  uintmax_t texture_uploads;
+  uintmax_t texture_upload_bytes;
+  uintmax_t command_buffers;
+  double command_buffer_seconds;
+  double max_command_buffer_seconds;
+};
 
 /* Context lifecycle */
 extern emacs_metal_context_t *emacs_metal_context_create (void *view,
@@ -17,6 +34,8 @@ extern void emacs_metal_context_resize (emacs_metal_context_t *ctx,
                                         int width, int height,
                                         int scale);
 extern void emacs_metal_context_destroy (emacs_metal_context_t *ctx);
+extern void emacs_metal_get_render_stats (struct emacs_metal_render_stats *,
+                                          bool reset);
 
 /* Frame begin/end */
 extern void emacs_metal_frame_begin (emacs_metal_context_t *ctx);

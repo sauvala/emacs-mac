@@ -59,4 +59,19 @@
     (should (string-match-p "batch->vertex_offset" flush-body))
     (should (string-match-p "batch->vertex_count" flush-body))))
 
+(ert-deftest macmetal-records-render-counters ()
+  "Metal should count hot renderer operations for performance analysis."
+  (let ((source (macmetal-tests--source))
+        (flush-body (macmetal-tests--function-body "flush_render_batches"))
+        (upload-body (macmetal-tests--function-body
+                      "emacs_metal_upload_cg_image")))
+    (should (string-match-p "emacs_metal_render_stats" source))
+    (should (string-match-p "emacs_metal_get_render_stats" source))
+    (should (string-match-p "render_stats.flushes" flush-body))
+    (should (string-match-p "render_stats.batches" flush-body))
+    (should (string-match-p "render_stats.vertices" flush-body))
+    (should (string-match-p "render_stats.texture_uploads" upload-body))
+    (should (string-match-p "render_stats.texture_upload_bytes" upload-body))
+    (should (string-match-p "command_buffer_seconds" source))))
+
 ;;; source-invariants.el ends here

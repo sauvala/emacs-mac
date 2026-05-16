@@ -262,6 +262,69 @@ These counters are only active in Metal rendering builds.  */)
   return Flist (ARRAYELTS (result), result);
 }
 
+DEFUN ("mac-metal-render-stats", Fmac_metal_render_stats,
+       Smac_metal_render_stats, 0, 1, 0,
+       doc: /* Return Metal renderer counters.
+If optional RESET is non-nil, reset the counters after reading them.
+
+The returned value is a plist with frame, batch, vertex, blit, texture upload,
+and command-buffer timing counters.  These counters are only active in Metal
+rendering builds.  */)
+  (Lisp_Object reset)
+{
+  uintmax_t frames = 0;
+  uintmax_t flushes = 0;
+  uintmax_t batches = 0;
+  uintmax_t vertices = 0;
+  uintmax_t scissor_draws = 0;
+  uintmax_t blits = 0;
+  uintmax_t blit_bytes = 0;
+  uintmax_t texture_uploads = 0;
+  uintmax_t texture_upload_bytes = 0;
+  uintmax_t command_buffers = 0;
+  double command_buffer_seconds = 0.0;
+  double max_command_buffer_seconds = 0.0;
+
+#ifdef USE_METAL_RENDERING
+  struct emacs_metal_render_stats stats;
+
+  emacs_metal_get_render_stats (&stats, !NILP (reset));
+  frames = stats.frames;
+  flushes = stats.flushes;
+  batches = stats.batches;
+  vertices = stats.vertices;
+  scissor_draws = stats.scissor_draws;
+  blits = stats.blits;
+  blit_bytes = stats.blit_bytes;
+  texture_uploads = stats.texture_uploads;
+  texture_upload_bytes = stats.texture_upload_bytes;
+  command_buffers = stats.command_buffers;
+  command_buffer_seconds = stats.command_buffer_seconds;
+  max_command_buffer_seconds = stats.max_command_buffer_seconds;
+#endif
+
+  Lisp_Object result[] =
+    {
+      intern_c_string (":frames"), make_uint (frames),
+      intern_c_string (":flushes"), make_uint (flushes),
+      intern_c_string (":batches"), make_uint (batches),
+      intern_c_string (":vertices"), make_uint (vertices),
+      intern_c_string (":scissor-draws"), make_uint (scissor_draws),
+      intern_c_string (":blits"), make_uint (blits),
+      intern_c_string (":blit-bytes"), make_uint (blit_bytes),
+      intern_c_string (":texture-uploads"), make_uint (texture_uploads),
+      intern_c_string (":texture-upload-bytes"),
+      make_uint (texture_upload_bytes),
+      intern_c_string (":command-buffers"), make_uint (command_buffers),
+      intern_c_string (":command-buffer-seconds"),
+      make_float (command_buffer_seconds),
+      intern_c_string (":max-command-buffer-seconds"),
+      make_float (max_command_buffer_seconds),
+    };
+
+  return Flist (ARRAYELTS (result), result);
+}
+
 /* X display function emulation */
 
 static void
@@ -6259,6 +6322,7 @@ void
 syms_of_macterm (void)
 {
   defsubr (&Smac_metal_clip_overdraw_stats);
+  defsubr (&Smac_metal_render_stats);
 
   DEFSYM (Qcontrol, "control");
   DEFSYM (Qmeta, "meta");

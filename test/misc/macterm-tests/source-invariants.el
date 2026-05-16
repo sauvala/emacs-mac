@@ -48,4 +48,11 @@
     (should (string-match-p "mac-metal-clip-overdraw-stats" source))
     (should (string-match-p "defsubr (&Smac_metal_clip_overdraw_stats)" source))))
 
+(ert-deftest macterm-exposes-metal-render-stats ()
+  "The mac terminal should expose Metal render counters to Lisp."
+  (let ((source (macterm-tests--source)))
+    (should (string-match-p "mac-metal-render-stats" source))
+    (should (string-match-p "emacs_metal_get_render_stats" source))
+    (should (string-match-p "defsubr (&Smac_metal_render_stats)" source))))
+
 ;;; source-invariants.el ends here
