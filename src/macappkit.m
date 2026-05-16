@@ -17049,9 +17049,33 @@ mac_within_lisp_deferred_if_gui_thread (void (^block) (void))
    notifying delivery of SIGALRM.  */
 static int mac_select_fds[2];
 
+struct mac_select_latency_stats mac_select_latency_stats;
+
 /* Whether buffer and glyph matrix access from the GUI thread is
    restricted to the case that no Lisp thread is running.  */
 static bool mac_buffer_and_glyph_matrix_access_restricted_p;
+
+static void
+mac_record_select_latency (double *total, double *maximum, double start)
+{
+  double elapsed = mac_system_uptime () - start;
+
+  if (elapsed < 0.0)
+    elapsed = 0.0;
+
+  *total += elapsed;
+  if (*maximum < elapsed)
+    *maximum = elapsed;
+}
+
+void
+mac_get_select_latency_stats (struct mac_select_latency_stats *stats,
+			      bool reset)
+{
+  *stats = mac_select_latency_stats;
+  if (reset)
+    memset (&mac_select_latency_stats, 0, sizeof mac_select_latency_stats);
+}
 
 static int
 read_all_from_nonblocking_fd (int fd)
@@ -17175,6 +17199,9 @@ mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
   if (!initialized)
     return thread_select (pselect, nfds, rfds, wfds, efds, timeout, sigmask);
 
+  double select_start = mac_system_uptime ();
+  mac_select_latency_stats.calls++;
+
   read_all_from_nonblocking_fd (mac_select_fds[0]);
 
   if (inhibit_window_system || noninteractive || nfds <= mac_select_fds[1]
@@ -17201,11 +17228,17 @@ mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 	  r = -1;
 	}
 
+      mac_select_latency_stats.fallback_calls++;
+      mac_record_select_latency (&mac_select_latency_stats.total_seconds,
+				 &mac_select_latency_stats.max_seconds,
+				 select_start);
       return r;
     }
 
   /* Check if some input is already available.  We need to block input
      because run loop may call back drawRect:.  */
+  double gui_probe_start = mac_system_uptime ();
+  mac_select_latency_stats.gui_probe_calls++;
   block_input ();
   mac_within_gui_and_here (^{
       [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
@@ -17232,6 +17265,9 @@ mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 	}
     });
   unblock_input ();
+  mac_record_select_latency (&mac_select_latency_stats.gui_probe_seconds,
+			     &mac_select_latency_stats.max_gui_probe_seconds,
+			     gui_probe_start);
 
   /* unblock_input above might have read some events.  */
   if (has_event_p || detect_input_pending ())
@@ -17239,11 +17275,21 @@ mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
       /* Pretend that `select' is interrupted by a signal.  */
       errno = EINTR;
 
+      mac_record_select_latency (&mac_select_latency_stats.total_seconds,
+				 &mac_select_latency_stats.max_seconds,
+				 select_start);
       return -1;
     }
   else if (r != 0 || (timeout && timespec_sign (*timeout) == 0))
-    return r;
+    {
+      mac_record_select_latency (&mac_select_latency_stats.total_seconds,
+				 &mac_select_latency_stats.max_seconds,
+				 select_start);
+      return r;
+    }
 
+  double gui_wait_start = mac_system_uptime ();
+  mac_select_latency_stats.gui_wait_calls++;
   block_input ();
   turn_on_atimers (false);
   thread_may_switch_p = !NILP (XCDR (Fall_threads ()));
@@ -17283,13 +17329,18 @@ mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 		{
 		  [currentRunLoop runMode:NSDefaultRunLoopMode
 			       beforeDate:limit];
-		  if (!written_p && (mac_peek_next_event () != NULL
-				     || detect_input_pending ()
-				     || emacs_windows_need_display_p ()))
+		  mac_select_latency_stats.run_loop_iterations++;
+		  bool useful_wakeup_p = (mac_peek_next_event () != NULL
+					  || detect_input_pending ()
+					  || emacs_windows_need_display_p ());
+		  if (!written_p && useful_wakeup_p)
 		    {
 		      write_one_byte_to_fd (mac_select_fds[0]);
 		      written_p = true;
+		      mac_select_latency_stats.run_loop_wakeups_with_work++;
 		    }
+		  else if (!useful_wakeup_p && !mac_select_next_command)
+		    mac_select_latency_stats.run_loop_wakeups_without_work++;
 		  if ((mac_select_next_command & MAC_SELECT_COMMAND_SUSPEND)
 		      && mac_gui_queue.count == 0)
 		    /* Bogus suspend command: would be a residual from
@@ -17352,15 +17403,24 @@ mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
     });
   turn_on_atimers (true);
   unblock_input ();
+  mac_record_select_latency (&mac_select_latency_stats.gui_wait_seconds,
+			     &mac_select_latency_stats.max_gui_wait_seconds,
+			     gui_wait_start);
 
   if (r < 0 || detect_input_pending ())
     {
       /* Pretend that `select' is interrupted by a signal.  */
       errno = EINTR;
 
+      mac_record_select_latency (&mac_select_latency_stats.total_seconds,
+				 &mac_select_latency_stats.max_seconds,
+				 select_start);
       return -1;
     }
 
+  mac_record_select_latency (&mac_select_latency_stats.total_seconds,
+			     &mac_select_latency_stats.max_seconds,
+			     select_start);
   return r;
 }
 

@@ -623,7 +623,25 @@ extern struct mac_accessibility_display_options
   bool differentiate_without_color_p;
   bool reduce_transparency_p;
 } mac_accessibility_display_options;
+extern struct mac_select_latency_stats
+{
+  uintmax_t calls;
+  uintmax_t fallback_calls;
+  uintmax_t gui_probe_calls;
+  uintmax_t gui_wait_calls;
+  uintmax_t run_loop_iterations;
+  uintmax_t run_loop_wakeups_with_work;
+  uintmax_t run_loop_wakeups_without_work;
+  double total_seconds;
+  double max_seconds;
+  double gui_probe_seconds;
+  double max_gui_probe_seconds;
+  double gui_wait_seconds;
+  double max_gui_wait_seconds;
+} mac_select_latency_stats;
 extern Lisp_Object mac_nsobject_to_lisp (CFTypeRef);
+extern void mac_get_select_latency_stats (struct mac_select_latency_stats *,
+					  bool);
 extern void mac_alert_sound_play (void);
 extern double mac_appkit_version (void);
 extern double mac_system_uptime (void);

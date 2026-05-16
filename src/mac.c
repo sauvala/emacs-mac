@@ -3082,6 +3082,46 @@ mac_relocate (const char *epath)
   return epath;
 }
 
+DEFUN ("mac-select-latency-stats", Fmac_select_latency_stats,
+       Smac_select_latency_stats, 0, 1, 0,
+       doc: /* Return AppKit select emulation latency statistics.
+If optional RESET is non-nil, reset the counters after reading them.
+
+The returned value is a plist containing call counters, run-loop wakeup
+counters, and accumulated/max latency values in seconds.  */)
+  (Lisp_Object reset)
+{
+  struct mac_select_latency_stats stats;
+
+  mac_get_select_latency_stats (&stats, !NILP (reset));
+
+  Lisp_Object result[] =
+    {
+      intern_c_string (":calls"), make_uint (stats.calls),
+      intern_c_string (":fallback-calls"), make_uint (stats.fallback_calls),
+      intern_c_string (":gui-probe-calls"), make_uint (stats.gui_probe_calls),
+      intern_c_string (":gui-wait-calls"), make_uint (stats.gui_wait_calls),
+      intern_c_string (":run-loop-iterations"),
+      make_uint (stats.run_loop_iterations),
+      intern_c_string (":run-loop-wakeups-with-work"),
+      make_uint (stats.run_loop_wakeups_with_work),
+      intern_c_string (":run-loop-wakeups-without-work"),
+      make_uint (stats.run_loop_wakeups_without_work),
+      intern_c_string (":total-seconds"), make_float (stats.total_seconds),
+      intern_c_string (":max-seconds"), make_float (stats.max_seconds),
+      intern_c_string (":gui-probe-seconds"),
+      make_float (stats.gui_probe_seconds),
+      intern_c_string (":max-gui-probe-seconds"),
+      make_float (stats.max_gui_probe_seconds),
+      intern_c_string (":gui-wait-seconds"),
+      make_float (stats.gui_wait_seconds),
+      intern_c_string (":max-gui-wait-seconds"),
+      make_float (stats.max_gui_wait_seconds),
+    };
+
+  return Flist (ARRAYELTS (result), result);
+}
+
 void
 syms_of_mac (void)
 {
@@ -3130,6 +3170,7 @@ syms_of_mac (void)
   defsubr (&Smac_get_preference);
   defsubr (&Smac_convert_property_list);
   defsubr (&Smac_code_convert_string);
+  defsubr (&Smac_select_latency_stats);
 
   defsubr (&Smac_file_alias_p);
   defsubr (&Ssystem_move_file_to_trash);
