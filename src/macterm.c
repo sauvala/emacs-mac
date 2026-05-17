@@ -268,8 +268,8 @@ DEFUN ("mac-metal-render-stats", Fmac_metal_render_stats,
 If optional RESET is non-nil, reset the counters after reading them.
 
 The returned value is a plist with frame, batch, vertex, blit, texture upload,
-and command-buffer timing counters.  These counters are only active in Metal
-rendering builds.  */)
+glyph cache, and command-buffer timing counters.  These counters are only
+active in Metal rendering builds.  */)
   (Lisp_Object reset)
 {
   uintmax_t frames = 0;
@@ -281,6 +281,8 @@ rendering builds.  */)
   uintmax_t blit_bytes = 0;
   uintmax_t texture_uploads = 0;
   uintmax_t texture_upload_bytes = 0;
+  uintmax_t glyph_cache_hits = 0;
+  uintmax_t glyph_cache_misses = 0;
   uintmax_t command_buffers = 0;
   double command_buffer_seconds = 0.0;
   double max_command_buffer_seconds = 0.0;
@@ -298,6 +300,8 @@ rendering builds.  */)
   blit_bytes = stats.blit_bytes;
   texture_uploads = stats.texture_uploads;
   texture_upload_bytes = stats.texture_upload_bytes;
+  glyph_cache_hits = stats.glyph_cache_hits;
+  glyph_cache_misses = stats.glyph_cache_misses;
   command_buffers = stats.command_buffers;
   command_buffer_seconds = stats.command_buffer_seconds;
   max_command_buffer_seconds = stats.max_command_buffer_seconds;
@@ -315,6 +319,8 @@ rendering builds.  */)
       intern_c_string (":texture-uploads"), make_uint (texture_uploads),
       intern_c_string (":texture-upload-bytes"),
       make_uint (texture_upload_bytes),
+      intern_c_string (":glyph-cache-hits"), make_uint (glyph_cache_hits),
+      intern_c_string (":glyph-cache-misses"), make_uint (glyph_cache_misses),
       intern_c_string (":command-buffers"), make_uint (command_buffers),
       intern_c_string (":command-buffer-seconds"),
       make_float (command_buffer_seconds),

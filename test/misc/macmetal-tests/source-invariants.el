@@ -74,6 +74,17 @@
     (should (string-match-p "render_stats.texture_upload_bytes" upload-body))
     (should (string-match-p "command_buffer_seconds" source))))
 
+(ert-deftest macmetal-records-glyph-cache-counters ()
+  "Metal should count glyph cache hits and misses for tuning atlas behavior."
+  (let ((source (macmetal-tests--source))
+        (lookup-body (macmetal-tests--function-body "glyph_cache_lookup"))
+        (rasterize-body (macmetal-tests--function-body
+                         "glyph_cache_rasterize")))
+    (should (string-match-p "glyph_cache_hits" source))
+    (should (string-match-p "glyph_cache_misses" source))
+    (should (string-match-p "render_stats.glyph_cache_hits" lookup-body))
+    (should (string-match-p "render_stats.glyph_cache_misses" rasterize-body))))
+
 (ert-deftest macmetal-glyph-cache-evicts-entries-instead-of-resetting ()
   "Glyph cache pressure should evict entries without resetting all atlas pages."
   (let ((source (macmetal-tests--source))

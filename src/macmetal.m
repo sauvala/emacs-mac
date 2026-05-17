@@ -1072,6 +1072,7 @@ glyph_cache_lookup (emacs_metal_context_t *ctx,
           && e->subpixel == subpixel)
         {
           e->last_used = ++gc->clock;
+          render_stats.glyph_cache_hits++;
           return e;
         }
     }
@@ -1086,6 +1087,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
                        CTFontRef font, uint16_t glyph_id, uint8_t subpixel)
 {
   struct emacs_metal_glyph_cache *gc = ctx->glyph_cache;
+  render_stats.glyph_cache_misses++;
 
   /* If the cache is nearly full, evict some old entries without discarding
      all atlas pages.  The atlas page eviction path reclaims texture space.  */

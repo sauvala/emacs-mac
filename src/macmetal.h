@@ -20,6 +20,8 @@ struct emacs_metal_render_stats
   uintmax_t blit_bytes;
   uintmax_t texture_uploads;
   uintmax_t texture_upload_bytes;
+  uintmax_t glyph_cache_hits;
+  uintmax_t glyph_cache_misses;
   uintmax_t command_buffers;
   double command_buffer_seconds;
   double max_command_buffer_seconds;

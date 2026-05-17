@@ -53,6 +53,8 @@
   (let ((source (macterm-tests--source)))
     (should (string-match-p "mac-metal-render-stats" source))
     (should (string-match-p "emacs_metal_get_render_stats" source))
+    (should (string-match-p ":glyph-cache-hits" source))
+    (should (string-match-p ":glyph-cache-misses" source))
     (should (string-match-p "defsubr (&Smac_metal_render_stats)" source))))
 
 ;;; source-invariants.el ends here

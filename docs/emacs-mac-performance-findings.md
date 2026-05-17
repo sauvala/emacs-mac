@@ -5,48 +5,93 @@ assumes upstream Emacs will handle incremental garbage collection, so the focus
 here is mac-port-specific interactive latency: scrolling, typing, redisplay,
 large-buffer navigation, image rendering, and GUI event responsiveness.
 
+## Current Status
+
+The first wave of Metal renderer performance work is now in the `nemesis`
+history.  The plan checklist in `docs/superpowers/plans/2026-03-23-metal-gpu-rendering.md`
+is stale; use this section as the current summary.
+
+Completed:
+
+- `cb6b83789ad` — optimized Metal batch vertex buffers so batch flushing uses
+  the existing reusable vertex-buffer ring instead of allocating a fresh
+  `MTLBuffer` on each flush.
+- `43bb05cfdeb` — added reusable glyph raster scratch storage, avoiding
+  temporary pixel-buffer allocation on each glyph cache miss.
+- `2f3537a38e6` — avoided heap allocation for short `macfont_draw` glyph runs.
+- `c97e99adb33` — let the Metal path consume Mac glyph run positions directly,
+  avoiding a duplicate intermediate position array.
+- `0ef92d7e80e` — added a small transient `CGImageRef` texture cache for image
+  paths that do not have a persistent `struct image` texture.
+- `ff922ca35cc` — exposed Metal clip union overdraw statistics.
+- `09d84b4d84d` — preserved multi-rect clipping through Metal batching instead
+  of always collapsing to one union scissor.
+- `6f888f45119` — added AppKit `mac_select` latency statistics.
+- `29000c3cf02` — exposed Metal renderer counters for frames, flushes, batches,
+  vertices, blits, texture uploads, and command-buffer timing.
+- `445d8a98e2f` — added the mac performance benchmark harness.
+- `944ea879dc2` — replaced whole glyph-cache reset under entry-table pressure
+  with incremental entry eviction.
+- Added Metal glyph cache hit/miss counters to `mac-metal-render-stats`, with
+  source-invariant tests.
+
+Still open:
+
+- Decide whether the retained backbuffer should keep doing a full drawable blit
+  every frame, or whether some paths can render directly to the drawable.
+- Investigate triple buffering only if the new command-buffer timing counters
+  show CPU/GPU stalls.
+- Batch glyph atlas uploads where practical.
+- Track font-generation invalidation instead of relying only on `CTFontRef`
+  pointer identity in the glyph cache key.
+- Consider ASCII/common-glyph prewarming for active font faces.
+- Consider separate glyph atlases by scale and font class if churn remains high.
+- Cache glyph advances/extents by font, glyph, antialias mode, and scale if
+  profiling still shows repeated metric work in `macfont_draw`.
+- Add dirty-region driven rendering and row/run-level batching as larger
+  follow-up refactors.
+- Use the new event-loop latency stats to decide whether the
+  socketpair/select/run-loop choreography needs simplification.
+
 ## Priority Recommendations
 
 ### 1. Finish and harden the Metal renderer
 
-The current Metal path is promising, but still has avoidable costs.
+The current Metal path is promising, and some of the original hot-path costs
+have been removed.
 
-- `src/macmetal.m:484` creates a fresh `MTLBuffer` with `newBufferWithBytes` in
-  `flush_render_batches`, even though the context already owns reusable vertex
-  buffers. This adds allocation and copy overhead on a hot path.
-- `src/macmetal.m:563` presents by blitting the persistent backbuffer into the
-  drawable each frame. That is simple and preserves scroll state, but it makes
-  every presentation pay a full texture copy.
+Done:
 
-Recommended work:
+- `cb6b83789ad` removed the fresh `MTLBuffer` allocation/copy from
+  `flush_render_batches`; draws now encode from the context-owned vertex-buffer
+  ring.
+- `29000c3cf02` added counters for batches, vertices, texture uploads, flushes,
+  blits, and command-buffer latency.
 
-- Use the existing reusable vertex-buffer ring directly in render encoders.
+Remaining work:
+
 - Move from double buffering to triple buffering if GPU/CPU synchronization
   shows stalls.
 - Render directly to the drawable where possible.
 - Keep the persistent backbuffer only where it materially helps scroll
   preservation.
-- Add Metal counters for batches, vertices, texture uploads, flushes, blits,
-  and command-buffer latency.
 
 ### 2. Make glyph rendering more cache-aware
 
 The Metal glyph atlas rasterizes one glyph at a time through CoreText and uses a
-coarse cache policy.
+coarse cache policy, but the worst allocation and eviction behavior has been
+improved.
 
-- `src/macmetal.m:862` rasterizes individual glyphs on cache miss.
-- `src/macmetal.m:867` clears the entire glyph cache and all atlas pages when
-  the entry table is nearly full.
-- `src/macmetal.m:931` and `src/macmetal.m:961` allocate temporary pixel buffers
-  per missed glyph.
-- `src/macmetal.m:982` uploads each missed glyph separately with
-  `replaceRegion`.
+Done:
 
-Recommended work:
+- `43bb05cfdeb` added reusable scratch buffers for glyph rasterization.
+- `944ea879dc2` replaced whole-cache reset with incremental cache-entry
+  eviction.
+- Added glyph cache hit/miss counters to `mac-metal-render-stats`.
 
-- Add reusable scratch buffers for glyph rasterization.
+Remaining work:
+
 - Batch atlas uploads where practical.
-- Replace whole-cache reset with LRU or clock eviction.
 - Track font-generation invalidation instead of relying only on font pointer
   identity.
 - Prewarm ASCII and common glyphs for active font faces.
@@ -57,57 +102,51 @@ Recommended work:
 `macfont_draw` does per-call allocation and repeated metric lookup in a hot text
 rendering path.
 
-- `src/macfont.m:2918` allocates glyph arrays per draw call.
-- `src/macfont.m:2924` allocates positions per draw call.
-- `src/macfont.m:2931` calls `macfont_glyph_extents` inside the per-glyph loop.
-- `src/macfont.m:2952` builds another stack array for Metal x positions.
+Done:
 
-Recommended work:
+- `2f3537a38e6` added stack storage for short glyph strings.
+- `c97e99adb33` avoided building duplicate Metal x-position arrays by consuming
+  existing glyph position data.
+
+Remaining work:
 
 - Introduce a per-frame or per-thread scratch arena for glyph and position
-  arrays.
-- Use stack storage for short glyph strings and scratch storage for longer
-  runs.
+  arrays for longer runs if profiling shows those allocations still matter.
 - Cache glyph advances/extents by font, glyph, antialias mode, and scale.
-- Avoid building duplicate intermediate arrays when the Metal path can consume
-  the existing glyph/position data.
 
 ### 4. Avoid transient image texture uploads
 
 Ordinary image glyphs have a Metal texture cache, but some image drawing paths
-still upload and destroy textures per call.
+used to upload and destroy textures per call.
 
-- `src/macterm.c:2078` caches `s->img->metal_texture` for regular image glyphs.
-- `src/macterm.c:265` uploads a `CGImageRef` to a Metal texture in
-  `mac_draw_cg_image`.
-- `src/macterm.c:275` destroys that texture immediately after drawing.
-- `src/macmetal.m:1340` converts each `CGImageRef` through a temporary bitmap
-  before upload.
+Done:
 
-Recommended work:
+- `0ef92d7e80e` added a small texture cache for transient `CGImageRef` users.
+- The cache key includes the image pointer, dimensions, and mask/fill color.
+- `29000c3cf02` tracks texture upload counts and bytes per frame.
 
-- Add a small texture cache for transient `CGImageRef` users.
-- Include scale, mask/fill color, and transform flags in the cache key.
+Remaining work:
+
+- Include transform flags in the transient texture cache key if a transformed
+  path starts sharing cached textures incorrectly.
 - Keep special handling for image masks such as fringe bitmaps.
-- Track texture upload counts and bytes per frame.
 
 ### 5. Improve Metal clipping fidelity and batching
 
-The Metal path currently converts multi-rect clipping into one union scissor.
+The Metal path originally converted multi-rect clipping into one union scissor.
 
-- `src/macterm.c:134` reads clip rectangles from the GC.
-- `src/macterm.c:140` starts with the first rect and unions the rest.
-- `src/macterm.c:150` sets a single Metal clip rectangle.
+Done:
 
-This can overdraw significantly when damage is fragmented across rows, windows,
-fringes, or modelines.
+- `ff922ca35cc` added exact-vs-union overdraw counters.
+- `09d84b4d84d` preserved multi-rect clipping through the Metal batching layer
+  and replays compatible batches through each active scissor.
 
-Recommended work:
+Remaining work:
 
-- Preserve multi-rect clipping through the Metal batching layer.
-- Emit repeated scissored batches for complex clip regions.
-- Group batches by compatible pipeline, texture, and clip state.
-- Measure overdraw by comparing union area against original clip area.
+- Use the overdraw counters to decide whether further dirty-region propagation
+  is worth the complexity.
+- Continue grouping batches by compatible pipeline, texture, and clip state as
+  new drawing paths are added.
 
 ## Larger Refactors
 
@@ -149,9 +188,12 @@ contribute to perceived latency.
 - `src/macappkit.m:17254` runs the GUI event loop while coordinating with Lisp
   select handling.
 
-Recommended instrumentation:
+Done:
 
-- Time spent waiting in `mac_select`.
+- `6f888f45119` added AppKit select latency statistics.
+
+Remaining instrumentation:
+
 - Time from input event arrival to command dispatch.
 - Time from buffer modification to frame presentation.
 - Number of GUI/Lisp semaphore round trips per frame.
@@ -170,8 +212,8 @@ Metal work.
 
 ## Benchmark Harness
 
-Before major changes, add repeatable benchmarks that exercise mac-port-specific
-paths:
+`445d8a98e2f` added a repeatable benchmark harness.  Keep extending it with
+scenarios that exercise mac-port-specific paths:
 
 - Scroll a huge source file.
 - Render long mixed-script lines.
@@ -188,18 +230,21 @@ Useful counters:
 - draw time
 - present time
 - glyph cache hit/miss rate
-- texture upload count and bytes
-- batch count
-- vertex count
-- clip union overdraw ratio
+- texture upload count and bytes (`29000c3cf02`)
+- batch count (`29000c3cf02`)
+- vertex count (`29000c3cf02`)
+- clip union overdraw ratio (`ff922ca35cc`)
 - event-to-present latency
 
 ## Suggested Order
 
-1. Add instrumentation and benchmark scenarios.
-2. Remove obvious Metal allocation and copy costs.
-3. Improve glyph cache allocation, eviction, and upload behavior.
-4. Reduce `macfont_draw` allocation and repeated metric work.
-5. Add transient image texture caching.
-6. Improve clipping and dirty-region propagation.
-7. Revisit event-loop architecture based on latency traces.
+1. Run the benchmark harness across Core Graphics and Metal builds to establish
+   post-optimization baselines.
+2. Use command-buffer timing to decide whether triple buffering or direct
+   drawable rendering is worth pursuing.
+3. Improve glyph atlas behavior: batched uploads, font-generation invalidation,
+   optional prewarming, and scale/font-class atlas separation.
+4. Profile `macfont_draw` again before adding metric caches or longer-run
+   scratch arenas.
+5. Investigate dirty-region driven rendering and row/run-level batching.
+6. Revisit event-loop architecture based on latency traces.
