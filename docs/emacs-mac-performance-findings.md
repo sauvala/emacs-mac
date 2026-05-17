@@ -98,6 +98,45 @@ Remaining work:
 - Keep the persistent backbuffer only where it materially helps scroll
   preservation.
 
+Recommended next implementation:
+
+- Keep drawing into the retained backbuffer synchronous.  `emacs_metal_frame_end`
+  should still flush all pending batches before returning so Emacs redisplay
+  state remains deterministic.
+- Split presentation from frame drawing.  After a changed frame is flushed into
+  the retained backbuffer, mark presentation pending and schedule one main-queue
+  presentation task instead of immediately blocking on `CAMetalLayer
+  nextDrawable`.
+- Coalesce bursty redisplay.  If another redisplay cycle updates the retained
+  backbuffer before the scheduled presentation task runs, keep one pending task
+  and present only the newest retained backbuffer contents.
+- If an update arrives while a presentation task is already acquiring a drawable
+  or submitting a command buffer, mark that another present is needed and
+  schedule one more task after the current presentation completes.  This keeps a
+  final-present guarantee after redisplay bursts.
+- Keep context lifetime explicit.  Context destruction must invalidate pending
+  presentation work before freeing textures, the command queue, or the
+  `CAMetalLayer` reference.
+- Start with full backbuffer-to-drawable copies in the async task.  Direct
+  drawable rendering and dirty-region presentation should remain separate
+  follow-up experiments.
+- Add counters for requested presentations, coalesced/skipped presentation
+  requests, async presentation task runs, and final-present reschedules.  Compare
+  these with `nextDrawable` wait time to confirm the main thread is no longer
+  paying the full drawable wait on every changed redisplay cycle.
+
+Success criteria for the first pass:
+
+- Text-heavy benchmark scenarios should show a material elapsed-time reduction
+  versus the 2026-05-17 Metal default baseline while preserving correct final
+  frame contents.
+- `nextDrawable` wait may still exist, but it should move out of the tight
+  redisplay path enough that mixed-script, emoji, and modeline/fringe get closer
+  to Core Graphics.
+- No change should rely on disabling display synchronization or forcing
+  `maximumDrawableCount` to 3, since those knobs were already measured and did
+  not materially close the gap.
+
 ### 2. Make glyph rendering more cache-aware
 
 The Metal glyph atlas rasterizes one glyph at a time through CoreText and uses a
@@ -370,18 +409,20 @@ Useful counters:
 
 ## Suggested Order
 
-1. Compare bounded direct scroll-copy chunks against the staging path with
+1. Prototype coalesced/asynchronous Metal presentation while keeping retained
+   backbuffer drawing synchronous.  This directly targets the measured
+   `nextDrawable` wait in text-heavy benchmark scenarios.
+2. Compare bounded direct scroll-copy chunks against the staging path with
    repeated runs and interactive traces.  Keep the chunked path only if the
    lower byte traffic does not regress command-buffer latency on real scrolls.
-2. Investigate full-drawable presentation/direct-drawable options for changed
-   frames; defer triple buffering unless future command-buffer timing shows
-   stalls.
-3. Add a targeted no-op redisplay/presentation benchmark if no-op update cycles
+3. Investigate direct-drawable or dirty-region rendering for changed frames
+   after coalesced presentation has been measured.
+4. Add a targeted no-op redisplay/presentation benchmark if no-op update cycles
    become a suspected source of interactive latency.
-4. Keep font-generation invalidation on the glyph-cache list, but defer
+5. Keep font-generation invalidation on the glyph-cache list, but defer
    prewarming, atlas separation, and batched uploads until traces show higher
    miss or upload pressure.
-5. Profile `macfont_draw` again before adding metric caches or longer-run
+6. Profile `macfont_draw` again before adding metric caches or longer-run
    scratch arenas.
-6. Investigate dirty-region driven rendering and row/run-level batching.
-7. Revisit event-loop architecture based on latency traces.
+7. Investigate dirty-region driven rendering and row/run-level batching.
+8. Revisit event-loop architecture based on latency traces.
