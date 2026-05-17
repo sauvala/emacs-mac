@@ -26,19 +26,32 @@ Completed:
 - `ff922ca35cc` — exposed Metal clip union overdraw statistics.
 - `09d84b4d84d` — preserved multi-rect clipping through Metal batching instead
   of always collapsing to one union scissor.
+- Added split Metal blit counters for presentation vs scroll-preservation
+  copies while preserving aggregate blit counters.
+- Added a `backbuffer_dirty` guard so Metal update cycles that do not change
+  the retained backbuffer skip drawable acquisition and the full presentation
+  blit.
+- Added a bounded direct scroll-copy path for Metal axis-aligned scrolls.  It
+  splits the copy into ordered non-overlapping chunks to avoid the staging
+  texture when the chunk count is small.
 - `6f888f45119` — added AppKit `mac_select` latency statistics.
 - `29000c3cf02` — exposed Metal renderer counters for frames, flushes, batches,
   vertices, blits, texture uploads, and command-buffer timing.
 - `445d8a98e2f` — added the mac performance benchmark harness.
+- Added a scheduled unattended GUI benchmark runner,
+  `mac-performance-run-benchmarks-and-exit`, that starts after frame setup,
+  writes result/progress files, and exits with a status code.
 - `944ea879dc2` — replaced whole glyph-cache reset under entry-table pressure
   with incremental entry eviction.
-- Added Metal glyph cache hit/miss counters to `mac-metal-render-stats`, with
-  source-invariant tests.
+- `8636b60dd34` — added Metal glyph cache hit/miss counters to
+  `mac-metal-render-stats`, with source-invariant tests.
 
 Still open:
 
 - Decide whether the retained backbuffer should keep doing a full drawable blit
-  every frame, or whether some paths can render directly to the drawable.
+  after changed frames, or whether some paths can render directly to the
+  drawable.  Partial dirty-rect copies to `CAMetalDrawable` are not safe by
+  themselves because drawable contents are transient.
 - Investigate triple buffering only if the new command-buffer timing counters
   show CPU/GPU stalls.
 - Batch glyph atlas uploads where practical.
@@ -87,7 +100,8 @@ Done:
 - `43bb05cfdeb` added reusable scratch buffers for glyph rasterization.
 - `944ea879dc2` replaced whole-cache reset with incremental cache-entry
   eviction.
-- Added glyph cache hit/miss counters to `mac-metal-render-stats`.
+- `8636b60dd34` added glyph cache hit/miss counters to
+  `mac-metal-render-stats`.
 
 Remaining work:
 
@@ -223,6 +237,71 @@ scenarios that exercise mac-port-specific paths:
 - Measure typing latency under LSP, Flymake, and syntax-highlighting load.
 - Compare Core Graphics and Metal builds under identical workloads.
 
+Current benchmark status:
+
+- Isolated Core Graphics and Metal builds from `8636b60dd34` both complete with
+  `--without-rsvg --without-xwidgets --without-mailutils
+  --without-native-compilation`; the Metal build compiles `macmetal.o` and links
+  successfully with `--with-metal-rendering`.
+- The main checkout's current configured build is blocked before the changed
+  mac files by a local missing `librsvg/rsvg.h` header.  Reconfigure without
+  librsvg or reinstall librsvg before using that checkout for fresh baselines.
+- Automated GUI startup should use
+  `mac-performance-run-benchmarks-and-exit`, which schedules the benchmark with
+  `run-with-timer` after frame setup.  A one-iteration smoke run completes and
+  writes result/progress files; run full Core Graphics and Metal baselines with
+  this entry point or interactively via `mac-performance-run-benchmarks`.
+- A 120-iteration scheduled baseline run completed for the isolated Core
+  Graphics and Metal builds on 2026-05-17.  Single-run elapsed seconds:
+
+  | Scenario | Core Graphics | Metal |
+  | --- | ---: | ---: |
+  | scroll-source | 0.091 | 0.134 |
+  | mixed-script | 0.048 | 0.170 |
+  | emoji | 0.035 | 0.129 |
+  | inline-images | 0.312 | 0.317 |
+  | modeline-fringe | 0.121 | 1.007 |
+
+- The Metal run did not show obvious command-buffer stalls in this small
+  sample: max command-buffer time was about 0.84 ms outside modeline/fringe and
+  about 2.04 ms in modeline/fringe.  The more suspicious signal is retained
+  backbuffer traffic: modeline/fringe reported 357 blits and about 1.46 GB of
+  blit bytes.  Prioritize direct-drawable or dirty-region/backbuffer work before
+  triple buffering unless future traces show CPU/GPU synchronization stalls.
+- A first safe reduction is now implemented: no-op Metal update cycles leave
+  `backbuffer_dirty` clear and return before `nextDrawable`, avoiding a full
+  retained-backbuffer presentation blit.  Changed frames still need the full
+  backbuffer-to-drawable copy until a direct-drawable or retained-drawable design
+  exists.
+- A same-session 120-iteration rerun after rebuilding the Metal executable with
+  split blit counters and no-op presentation suppression showed no elapsed-time
+  improvement in the existing scenarios, because they all perform changed-frame
+  redisplay:
+
+  | Scenario | Core Graphics | Metal | Metal/CG |
+  | --- | ---: | ---: | ---: |
+  | scroll-source | 0.093 | 0.130 | 1.39x |
+  | mixed-script | 0.045 | 0.170 | 3.77x |
+  | emoji | 0.036 | 0.128 | 3.54x |
+  | inline-images | 0.311 | 0.309 | 0.99x |
+  | modeline-fringe | 0.122 | 1.008 | 8.25x |
+
+- The split counters refine the retained-backbuffer diagnosis.  In
+  `modeline-fringe`, the aggregate 357 blits and about 1.40 GiB of blit traffic
+  split into 121 presentation blits / about 631 MiB and 236 scroll-preservation
+  blits / about 765 MiB.  The next optimization target should therefore include
+  scroll-preservation backbuffer copies, not just full-drawable presentation.
+- A follow-up Metal rerun with bounded direct scroll-copy chunks cut
+  `modeline-fringe` scroll-preservation traffic from about 765 MiB to about
+  382.5 MiB and total blit traffic from about 1.40 GiB to about 1.01 GiB.  The
+  elapsed time changed only from 1.008 s to 1.005 s in this single run, while
+  scroll blit commands increased from 236 to 357.  This confirms byte traffic
+  was reduced, but it does not yet prove an interactive latency win.
+- The same Metal run does not make glyph-cache churn look urgent: reported
+  glyph-cache misses were 1 in scroll-source and 0 in the other scenarios.
+  Batched atlas uploads, ASCII prewarming, and atlas separation should wait for
+  traces that show materially higher miss or upload pressure.
+
 Useful counters:
 
 - frame time
@@ -233,18 +312,24 @@ Useful counters:
 - texture upload count and bytes (`29000c3cf02`)
 - batch count (`29000c3cf02`)
 - vertex count (`29000c3cf02`)
+- presentation vs scroll-preservation blit count and bytes
 - clip union overdraw ratio (`ff922ca35cc`)
 - event-to-present latency
 
 ## Suggested Order
 
-1. Run the benchmark harness across Core Graphics and Metal builds to establish
-   post-optimization baselines.
-2. Use command-buffer timing to decide whether triple buffering or direct
-   drawable rendering is worth pursuing.
-3. Improve glyph atlas behavior: batched uploads, font-generation invalidation,
-   optional prewarming, and scale/font-class atlas separation.
-4. Profile `macfont_draw` again before adding metric caches or longer-run
+1. Compare bounded direct scroll-copy chunks against the staging path with
+   repeated runs and interactive traces.  Keep the chunked path only if the
+   lower byte traffic does not regress command-buffer latency on real scrolls.
+2. Investigate full-drawable presentation/direct-drawable options for changed
+   frames; defer triple buffering unless future command-buffer timing shows
+   stalls.
+3. Add a targeted no-op redisplay/presentation benchmark if no-op update cycles
+   become a suspected source of interactive latency.
+4. Keep font-generation invalidation on the glyph-cache list, but defer
+   prewarming, atlas separation, and batched uploads until traces show higher
+   miss or upload pressure.
+5. Profile `macfont_draw` again before adding metric caches or longer-run
    scratch arenas.
-5. Investigate dirty-region driven rendering and row/run-level batching.
-6. Revisit event-loop architecture based on latency traces.
+6. Investigate dirty-region driven rendering and row/run-level batching.
+7. Revisit event-loop architecture based on latency traces.

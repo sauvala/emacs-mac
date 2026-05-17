@@ -268,7 +268,8 @@ DEFUN ("mac-metal-render-stats", Fmac_metal_render_stats,
 If optional RESET is non-nil, reset the counters after reading them.
 
 The returned value is a plist with frame, batch, vertex, blit, texture upload,
-glyph cache, and command-buffer timing counters.  These counters are only
+glyph cache, and command-buffer timing counters.  Blit counters include both
+aggregate counts and presentation/scroll subtotals.  These counters are only
 active in Metal rendering builds.  */)
   (Lisp_Object reset)
 {
@@ -279,6 +280,10 @@ active in Metal rendering builds.  */)
   uintmax_t scissor_draws = 0;
   uintmax_t blits = 0;
   uintmax_t blit_bytes = 0;
+  uintmax_t present_blits = 0;
+  uintmax_t present_blit_bytes = 0;
+  uintmax_t scroll_blits = 0;
+  uintmax_t scroll_blit_bytes = 0;
   uintmax_t texture_uploads = 0;
   uintmax_t texture_upload_bytes = 0;
   uintmax_t glyph_cache_hits = 0;
@@ -298,6 +303,10 @@ active in Metal rendering builds.  */)
   scissor_draws = stats.scissor_draws;
   blits = stats.blits;
   blit_bytes = stats.blit_bytes;
+  present_blits = stats.present_blits;
+  present_blit_bytes = stats.present_blit_bytes;
+  scroll_blits = stats.scroll_blits;
+  scroll_blit_bytes = stats.scroll_blit_bytes;
   texture_uploads = stats.texture_uploads;
   texture_upload_bytes = stats.texture_upload_bytes;
   glyph_cache_hits = stats.glyph_cache_hits;
@@ -316,6 +325,10 @@ active in Metal rendering builds.  */)
       intern_c_string (":scissor-draws"), make_uint (scissor_draws),
       intern_c_string (":blits"), make_uint (blits),
       intern_c_string (":blit-bytes"), make_uint (blit_bytes),
+      intern_c_string (":present-blits"), make_uint (present_blits),
+      intern_c_string (":present-blit-bytes"), make_uint (present_blit_bytes),
+      intern_c_string (":scroll-blits"), make_uint (scroll_blits),
+      intern_c_string (":scroll-blit-bytes"), make_uint (scroll_blit_bytes),
       intern_c_string (":texture-uploads"), make_uint (texture_uploads),
       intern_c_string (":texture-upload-bytes"),
       make_uint (texture_upload_bytes),

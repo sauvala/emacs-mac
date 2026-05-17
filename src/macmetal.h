@@ -18,6 +18,10 @@ struct emacs_metal_render_stats
   uintmax_t scissor_draws;
   uintmax_t blits;
   uintmax_t blit_bytes;
+  uintmax_t present_blits;
+  uintmax_t present_blit_bytes;
+  uintmax_t scroll_blits;
+  uintmax_t scroll_blit_bytes;
   uintmax_t texture_uploads;
   uintmax_t texture_upload_bytes;
   uintmax_t glyph_cache_hits;

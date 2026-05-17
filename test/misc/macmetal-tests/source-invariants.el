@@ -74,6 +74,54 @@
     (should (string-match-p "render_stats.texture_upload_bytes" upload-body))
     (should (string-match-p "command_buffer_seconds" source))))
 
+(ert-deftest macmetal-records-present-and-scroll-blits-separately ()
+  "Metal should distinguish presentation blits from scroll-preservation blits."
+  (let ((source (macmetal-tests--source))
+        (frame-end-body (macmetal-tests--function-body
+                         "emacs_metal_frame_end"))
+        (scroll-body (macmetal-tests--function-body "emacs_metal_scroll")))
+    (should (string-match-p "present_blits" source))
+    (should (string-match-p "present_blit_bytes" source))
+    (should (string-match-p "scroll_blits" source))
+    (should (string-match-p "scroll_blit_bytes" source))
+    (should (string-match-p "render_stats.present_blits" frame-end-body))
+    (should (string-match-p "render_stats.present_blit_bytes" frame-end-body))
+    (should (string-match-p "render_stats.scroll_blits" scroll-body))
+    (should (string-match-p "render_stats.scroll_blit_bytes" scroll-body))))
+
+(ert-deftest macmetal-skips-presentation-when-backbuffer-is-unchanged ()
+  "Metal should avoid full-drawable presentation for no-op update cycles."
+  (let ((source (macmetal-tests--source))
+        (frame-end-body (macmetal-tests--function-body
+                         "emacs_metal_frame_end"))
+        (emit-body (macmetal-tests--function-body "emit_vertices"))
+        (scroll-body (macmetal-tests--function-body "emacs_metal_scroll")))
+    (should (string-match-p "backbuffer_dirty" source))
+    (should (string-match-p "ctx->backbuffer_dirty = false" source))
+    (should (string-match-p "ctx->backbuffer_dirty = true" emit-body))
+    (should (string-match-p "ctx->backbuffer_dirty = true" scroll-body))
+    (should (string-match-p "ctx->backbuffer_dirty = false" frame-end-body))
+    (should (string-match-p
+             "if (!ctx->backbuffer_dirty)[\0-\377]*nextDrawable"
+             frame-end-body))))
+
+(ert-deftest macmetal-scroll-can-avoid-staging-for-bounded-axis-aligned-copies ()
+  "Axis-aligned scrolls should avoid staging when ordered direct chunks are bounded."
+  (let ((source (macmetal-tests--source))
+        (scroll-body (macmetal-tests--function-body "emacs_metal_scroll")))
+    (should (string-match-p "METAL_SCROLL_DIRECT_MAX_BLITS" source))
+    (should (string-match-p "scroll_backbuffer_in_place" source))
+    (should (string-match-p "scroll_backbuffer_in_place" scroll-body))
+    (should (string-match-p
+             (regexp-quote "render_stats.scroll_blits += scroll_blit_count")
+             scroll-body))
+    (should (string-match-p
+             (regexp-quote "render_stats.scroll_blit_bytes += scroll_blit_bytes")
+             scroll-body))
+    (should (string-match-p
+             "scroll_blit_bytes = (uintmax_t) sw \\* sh \\* 4"
+             source))))
+
 (ert-deftest macmetal-records-glyph-cache-counters ()
   "Metal should count glyph cache hits and misses for tuning atlas behavior."
   (let ((source (macmetal-tests--source))

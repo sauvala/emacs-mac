@@ -32,4 +32,16 @@
                        "mac-select-latency-stats"))
       (should (string-match-p pattern source)))))
 
+(ert-deftest mac-benchmark-has-scheduled-startup-runner ()
+  "The benchmark harness should support unattended GUI startup runs."
+  (let ((source (mac-benchmark-tests--source)))
+    (dolist (pattern '("mac-performance-run-benchmarks-and-exit"
+                       "mac-performance-benchmark-startup-delay"
+                       "run-with-timer"
+                       "mac-performance--record-progress"
+                       "with-temp-file"
+                       "kill-emacs 0"
+                       "kill-emacs 1"))
+      (should (string-match-p pattern source)))))
+
 ;;; source-invariants.el ends here
