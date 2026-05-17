@@ -288,6 +288,9 @@ active in Metal rendering builds.  */)
   uintmax_t texture_upload_bytes = 0;
   uintmax_t glyph_cache_hits = 0;
   uintmax_t glyph_cache_misses = 0;
+  uintmax_t next_drawable_calls = 0;
+  double next_drawable_seconds = 0.0;
+  double max_next_drawable_seconds = 0.0;
   uintmax_t command_buffers = 0;
   double command_buffer_seconds = 0.0;
   double max_command_buffer_seconds = 0.0;
@@ -311,6 +314,9 @@ active in Metal rendering builds.  */)
   texture_upload_bytes = stats.texture_upload_bytes;
   glyph_cache_hits = stats.glyph_cache_hits;
   glyph_cache_misses = stats.glyph_cache_misses;
+  next_drawable_calls = stats.next_drawable_calls;
+  next_drawable_seconds = stats.next_drawable_seconds;
+  max_next_drawable_seconds = stats.max_next_drawable_seconds;
   command_buffers = stats.command_buffers;
   command_buffer_seconds = stats.command_buffer_seconds;
   max_command_buffer_seconds = stats.max_command_buffer_seconds;
@@ -334,6 +340,11 @@ active in Metal rendering builds.  */)
       make_uint (texture_upload_bytes),
       intern_c_string (":glyph-cache-hits"), make_uint (glyph_cache_hits),
       intern_c_string (":glyph-cache-misses"), make_uint (glyph_cache_misses),
+      intern_c_string (":next-drawable-calls"), make_uint (next_drawable_calls),
+      intern_c_string (":next-drawable-seconds"),
+      make_float (next_drawable_seconds),
+      intern_c_string (":max-next-drawable-seconds"),
+      make_float (max_next_drawable_seconds),
       intern_c_string (":command-buffers"), make_uint (command_buffers),
       intern_c_string (":command-buffer-seconds"),
       make_float (command_buffer_seconds),
@@ -342,6 +353,53 @@ active in Metal rendering builds.  */)
     };
 
   return Flist (ARRAYELTS (result), result);
+}
+
+DEFUN ("mac-metal-set-display-sync-enabled",
+       Fmac_metal_set_display_sync_enabled,
+       Smac_metal_set_display_sync_enabled, 1, 2, 0,
+       doc: /* Set Metal layer display synchronization for FRAME.
+ENABLED non-nil enables display synchronization.  FRAME defaults to the
+selected frame.  Return non-nil if the setting was applied.
+
+This function is only active in Metal rendering builds.  */)
+  (Lisp_Object enabled, Lisp_Object frame)
+{
+#ifdef USE_METAL_RENDERING
+  struct frame *f = decode_window_system_frame (frame);
+
+  if (FRAME_MAC_P (f) && FRAME_METAL_CTX (f)
+      && emacs_metal_set_display_sync_enabled (FRAME_METAL_CTX (f),
+                                               !NILP (enabled)))
+    return Qt;
+#endif
+
+  return Qnil;
+}
+
+DEFUN ("mac-metal-set-maximum-drawable-count",
+       Fmac_metal_set_maximum_drawable_count,
+       Smac_metal_set_maximum_drawable_count, 1, 2, 0,
+       doc: /* Set Metal layer maximum drawable COUNT for FRAME.
+COUNT must be 2 or 3.  FRAME defaults to the selected frame.  Return non-nil
+if the setting was applied.
+
+This function is only active in Metal rendering builds.  */)
+  (Lisp_Object count, Lisp_Object frame)
+{
+#ifdef USE_METAL_RENDERING
+  CHECK_FIXNUM (count);
+  EMACS_INT drawable_count = XFIXNUM (count);
+  struct frame *f = decode_window_system_frame (frame);
+
+  if (drawable_count >= 2 && drawable_count <= 3
+      && FRAME_MAC_P (f) && FRAME_METAL_CTX (f)
+      && emacs_metal_set_maximum_drawable_count (FRAME_METAL_CTX (f),
+                                                 drawable_count))
+    return Qt;
+#endif
+
+  return Qnil;
 }
 
 /* X display function emulation */
@@ -6342,6 +6400,8 @@ syms_of_macterm (void)
 {
   defsubr (&Smac_metal_clip_overdraw_stats);
   defsubr (&Smac_metal_render_stats);
+  defsubr (&Smac_metal_set_display_sync_enabled);
+  defsubr (&Smac_metal_set_maximum_drawable_count);
 
   DEFSYM (Qcontrol, "control");
   DEFSYM (Qmeta, "meta");

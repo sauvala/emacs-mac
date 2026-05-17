@@ -7,6 +7,7 @@
 #import <MetalKit/MetalKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <CoreText/CoreText.h>
+#import <objc/message.h>
 
 /* Shared Metal state, initialized once on first context creation.  */
 static id<MTLDevice> shared_device;
@@ -548,6 +549,38 @@ emacs_metal_context_destroy (emacs_metal_context_t *ctx)
   free (ctx);
 }
 
+bool
+emacs_metal_set_display_sync_enabled (emacs_metal_context_t *ctx, bool enabled)
+{
+  if (!ctx || !ctx->layer)
+    return false;
+
+  /* Toggle CAMetalLayer displaySyncEnabled when the SDK/runtime supports it.  */
+  SEL selector = @selector(setDisplaySyncEnabled:);
+  if (![ctx->layer respondsToSelector:selector])
+    return false;
+
+  ((void (*) (id, SEL, BOOL)) objc_msgSend) (ctx->layer, selector, enabled);
+  return true;
+}
+
+bool
+emacs_metal_set_maximum_drawable_count (emacs_metal_context_t *ctx,
+                                        unsigned long count)
+{
+  if (!ctx || !ctx->layer || count < 2 || count > 3)
+    return false;
+
+  /* Tune CAMetalLayer maximumDrawableCount when the runtime supports it.  */
+  SEL selector = @selector(setMaximumDrawableCount:);
+  if (![ctx->layer respondsToSelector:selector])
+    return false;
+
+  ((void (*) (id, SEL, NSUInteger)) objc_msgSend) (ctx->layer, selector,
+                                                   (NSUInteger) count);
+  return true;
+}
+
 void
 emacs_metal_frame_begin (emacs_metal_context_t *ctx)
 {
@@ -691,7 +724,17 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
      sub-rectangle presentation is unsafe without a retained drawable chain.  */
   id<CAMetalDrawable> drawable = nil;
   if (ctx->layer)
-    drawable = [ctx->layer nextDrawable];
+    {
+      double next_drawable_start = CACurrentMediaTime ();
+      drawable = [ctx->layer nextDrawable];
+      double next_drawable_elapsed = CACurrentMediaTime () - next_drawable_start;
+      if (next_drawable_elapsed < 0.0)
+        next_drawable_elapsed = 0.0;
+      render_stats.next_drawable_calls++;
+      render_stats.next_drawable_seconds += next_drawable_elapsed;
+      if (render_stats.max_next_drawable_seconds < next_drawable_elapsed)
+        render_stats.max_next_drawable_seconds = next_drawable_elapsed;
+    }
 
   if (!drawable)
     {

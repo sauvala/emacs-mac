@@ -28,6 +28,11 @@ Completed:
   of always collapsing to one union scissor.
 - Added split Metal blit counters for presentation vs scroll-preservation
   copies while preserving aggregate blit counters.
+- Added Metal `nextDrawable` wait counters so renderer statistics can separate
+  layer drawable acquisition time from command-buffer execution time.
+- Added experimental Metal layer pacing controls for display synchronization
+  and maximum drawable count.  They are intended for measurement, not yet as
+  user-facing tuning policy.
 - Added a `backbuffer_dirty` guard so Metal update cycles that do not change
   the retained backbuffer skip drawable acquisition and the full presentation
   blit.
@@ -52,8 +57,12 @@ Still open:
   after changed frames, or whether some paths can render directly to the
   drawable.  Partial dirty-rect copies to `CAMetalDrawable` are not safe by
   themselves because drawable contents are transient.
-- Investigate triple buffering only if the new command-buffer timing counters
-  show CPU/GPU stalls.
+- Prototype coalesced or asynchronous Metal presentation so tight redisplay
+  loops do not block the main thread on `CAMetalLayer nextDrawable` for every
+  changed frame.
+- Do not spend more time on display-sync or maximum-drawable-count tuning until
+  the presentation path changes; the current 2026-05-17 benchmark runs did not
+  show meaningful elapsed-time improvement from either knob.
 - Batch glyph atlas uploads where practical.
 - Track font-generation invalidation instead of relying only on `CTFontRef`
   pointer identity in the glyph cache key.
@@ -83,8 +92,8 @@ Done:
 
 Remaining work:
 
-- Move from double buffering to triple buffering if GPU/CPU synchronization
-  shows stalls.
+- Prototype coalesced/asynchronous presentation so redisplay can update the
+  retained backbuffer without synchronously waiting for every layer drawable.
 - Render directly to the drawable where possible.
 - Keep the persistent backbuffer only where it materially helps scroll
   preservation.
@@ -262,12 +271,11 @@ Current benchmark status:
   | inline-images | 0.312 | 0.317 |
   | modeline-fringe | 0.121 | 1.007 |
 
-- The Metal run did not show obvious command-buffer stalls in this small
-  sample: max command-buffer time was about 0.84 ms outside modeline/fringe and
-  about 2.04 ms in modeline/fringe.  The more suspicious signal is retained
-  backbuffer traffic: modeline/fringe reported 357 blits and about 1.46 GB of
-  blit bytes.  Prioritize direct-drawable or dirty-region/backbuffer work before
-  triple buffering unless future traces show CPU/GPU synchronization stalls.
+- The initial Metal run did not show obvious command-buffer stalls in this
+  small sample: max command-buffer time was about 0.84 ms outside
+  modeline/fringe and about 2.04 ms in modeline/fringe.  The first suspicious
+  signal was retained backbuffer traffic: modeline/fringe reported 357 blits
+  and about 1.46 GB of blit bytes.
 - A first safe reduction is now implemented: no-op Metal update cycles leave
   `backbuffer_dirty` clear and return before `nextDrawable`, avoiding a full
   retained-backbuffer presentation blit.  Changed frames still need the full
@@ -301,6 +309,48 @@ Current benchmark status:
   glyph-cache misses were 1 in scroll-source and 0 in the other scenarios.
   Batched atlas uploads, ASCII prewarming, and atlas separation should wait for
   traces that show materially higher miss or upload pressure.
+- A follow-up rebuild added `nextDrawable` timing counters.  The 2026-05-17
+  text-heavy benchmark gap is dominated by drawable acquisition waits, not by
+  command-buffer execution:
+
+  | Scenario | Metal seconds | `nextDrawable` wait | Command-buffer wait |
+  | --- | ---: | ---: | ---: |
+  | scroll-source | 0.130 | 41.1 ms | 9.2 ms |
+  | mixed-script | 0.171 | 114.4 ms | 9.7 ms |
+  | emoji | 0.129 | 88.8 ms | 7.4 ms |
+  | inline-images | 0.314 | 0.2 ms | 8.3 ms |
+  | modeline-fringe | 1.009 | 694.6 ms | 98.8 ms |
+
+- Disabling `CAMetalLayer` display synchronization did not materially improve
+  elapsed time in the same 120-iteration run:
+
+  | Scenario | Sync on | Sync off |
+  | --- | ---: | ---: |
+  | scroll-source | 0.130 | 0.134 |
+  | mixed-script | 0.171 | 0.171 |
+  | emoji | 0.129 | 0.129 |
+  | inline-images | 0.314 | 0.307 |
+  | modeline-fringe | 1.009 | 1.025 |
+
+- Forcing `maximumDrawableCount` to 3 was also not enough to make Metal
+  competitive with Core Graphics in text-heavy scenarios:
+
+  | Scenario | Core Graphics | Metal default | Metal drawable count 3 |
+  | --- | ---: | ---: | ---: |
+  | scroll-source | 0.093 | 0.130 | 0.131 |
+  | mixed-script | 0.045 | 0.171 | 0.170 |
+  | emoji | 0.036 | 0.129 | 0.129 |
+  | inline-images | 0.311 | 0.314 | 0.314 |
+  | modeline-fringe | 0.122 | 1.009 | 1.006 |
+
+- The likely high-impact path for text-heavy competitiveness is therefore not
+  glyph-cache work, display-sync toggling, or simple triple buffering.  It is a
+  presentation architecture change: update the retained backbuffer during
+  redisplay, but coalesce or asynchronously perform drawable acquisition and
+  presentation so benchmark-style tight redisplay loops do not synchronously
+  wait for the display layer on every changed frame.  That needs careful
+  lifetime handling for the frame/context and a final-present guarantee after a
+  burst of updates.
 
 Useful counters:
 
@@ -308,6 +358,8 @@ Useful counters:
 - redisplay time
 - draw time
 - present time
+- `nextDrawable` wait time
+- skipped/coalesced presentation count
 - glyph cache hit/miss rate
 - texture upload count and bytes (`29000c3cf02`)
 - batch count (`29000c3cf02`)

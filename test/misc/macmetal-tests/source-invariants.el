@@ -63,6 +63,8 @@
   "Metal should count hot renderer operations for performance analysis."
   (let ((source (macmetal-tests--source))
         (flush-body (macmetal-tests--function-body "flush_render_batches"))
+        (frame-end-body (macmetal-tests--function-body
+                         "emacs_metal_frame_end"))
         (upload-body (macmetal-tests--function-body
                       "emacs_metal_upload_cg_image")))
     (should (string-match-p "emacs_metal_render_stats" source))
@@ -72,7 +74,24 @@
     (should (string-match-p "render_stats.vertices" flush-body))
     (should (string-match-p "render_stats.texture_uploads" upload-body))
     (should (string-match-p "render_stats.texture_upload_bytes" upload-body))
+    (should (string-match-p "next_drawable_seconds" source))
+    (should (string-match-p "render_stats.next_drawable_calls" frame-end-body))
+    (should (string-match-p "render_stats.next_drawable_seconds" frame-end-body))
     (should (string-match-p "command_buffer_seconds" source))))
+
+(ert-deftest macmetal-can-toggle-layer-display-sync ()
+  "Metal should expose a layer display-sync toggle for pacing experiments."
+  (let ((source (macmetal-tests--source)))
+    (should (string-match-p "emacs_metal_set_display_sync_enabled" source))
+    (should (string-match-p "setDisplaySyncEnabled:" source))
+    (should (string-match-p "displaySyncEnabled" source))))
+
+(ert-deftest macmetal-can-tune-maximum-drawable-count ()
+  "Metal should expose CAMetalLayer drawable-count tuning for pacing tests."
+  (let ((source (macmetal-tests--source)))
+    (should (string-match-p "emacs_metal_set_maximum_drawable_count" source))
+    (should (string-match-p "setMaximumDrawableCount:" source))
+    (should (string-match-p "maximumDrawableCount" source))))
 
 (ert-deftest macmetal-records-present-and-scroll-blits-separately ()
   "Metal should distinguish presentation blits from scroll-preservation blits."

@@ -57,8 +57,27 @@
     (should (string-match-p ":present-blit-bytes" source))
     (should (string-match-p ":scroll-blits" source))
     (should (string-match-p ":scroll-blit-bytes" source))
+    (should (string-match-p ":next-drawable-calls" source))
+    (should (string-match-p ":next-drawable-seconds" source))
+    (should (string-match-p ":max-next-drawable-seconds" source))
     (should (string-match-p ":glyph-cache-hits" source))
     (should (string-match-p ":glyph-cache-misses" source))
     (should (string-match-p "defsubr (&Smac_metal_render_stats)" source))))
+
+(ert-deftest macterm-exposes-metal-display-sync-toggle ()
+  "The mac terminal should expose the Metal display-sync toggle to Lisp."
+  (let ((source (macterm-tests--source)))
+    (should (string-match-p "mac-metal-set-display-sync-enabled" source))
+    (should (string-match-p "emacs_metal_set_display_sync_enabled" source))
+    (should (string-match-p
+             "defsubr (&Smac_metal_set_display_sync_enabled)" source))))
+
+(ert-deftest macterm-exposes-metal-maximum-drawable-count-toggle ()
+  "The mac terminal should expose Metal drawable-count tuning to Lisp."
+  (let ((source (macterm-tests--source)))
+    (should (string-match-p "mac-metal-set-maximum-drawable-count" source))
+    (should (string-match-p "emacs_metal_set_maximum_drawable_count" source))
+    (should (string-match-p
+             "defsubr (&Smac_metal_set_maximum_drawable_count)" source))))
 
 ;;; source-invariants.el ends here
