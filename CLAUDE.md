@@ -13,6 +13,16 @@ This is the **emacs-mac port** — a macOS-specific fork of GNU Emacs providing 
 - `emacs-mac-gnu_master_exp` — experimental, tracks GNU Emacs master (upstream)
 - `nemesis` — automated weekly sync with GNU Emacs master via GitHub Actions, plus custom features
 
+For local work in this checkout, use the local `nemesis` branch and keep it
+tracking `fork/nemesis`.  Push Nemesis work to the fork with:
+
+```bash
+git push fork HEAD:nemesis
+```
+
+Do not treat `fork/gnu-master` as the upstream for local `nemesis` work; it is a
+separate fork branch.
+
 ## Build Commands
 
 ```bash
