@@ -39,6 +39,14 @@ Completed:
 - Added a bounded direct scroll-copy path for Metal axis-aligned scrolls.  It
   splits the copy into ordered non-overlapping chunks to avoid the staging
   texture when the chunk count is small.
+- Added a first coalesced/asynchronous Metal presentation path.  Changed frames
+  still flush drawing into the retained backbuffer synchronously, but
+  backbuffer-to-drawable presentation now runs from a scheduled main-queue task
+  with coalescing and final-present rescheduling counters.
+- A 2026-05-18 benchmark run showed that the first main-queue presentation
+  prototype is not the right final shape: it coalesces presentations, but
+  `nextDrawable` still blocks the main event loop from the scheduled task and
+  text-heavy elapsed times regress.
 - `6f888f45119` — added AppKit `mac_select` latency statistics.
 - `29000c3cf02` — exposed Metal renderer counters for frames, flushes, batches,
   vertices, blits, texture uploads, and command-buffer timing.
@@ -57,12 +65,13 @@ Still open:
   after changed frames, or whether some paths can render directly to the
   drawable.  Partial dirty-rect copies to `CAMetalDrawable` are not safe by
   themselves because drawable contents are transient.
-- Prototype coalesced or asynchronous Metal presentation so tight redisplay
-  loops do not block the main thread on `CAMetalLayer nextDrawable` for every
-  changed frame.
-- Do not spend more time on display-sync or maximum-drawable-count tuning until
-  the presentation path changes; the current 2026-05-17 benchmark runs did not
-  show meaningful elapsed-time improvement from either knob.
+- Rework the coalesced/asynchronous Metal presentation prototype so drawable
+  acquisition no longer runs as a blocking main-queue task.  The first
+  main-queue version did not remove `CAMetalLayer nextDrawable` wait from the
+  main event loop.
+- Re-measure before spending more time on display-sync or maximum-drawable-count
+  tuning; the 2026-05-17 benchmark runs did not show meaningful elapsed-time
+  improvement from either knob before presentation coalescing.
 - Batch glyph atlas uploads where practical.
 - Track font-generation invalidation instead of relying only on `CTFontRef`
   pointer identity in the glyph cache key.
@@ -92,21 +101,28 @@ Done:
 
 Remaining work:
 
-- Prototype coalesced/asynchronous presentation so redisplay can update the
-  retained backbuffer without synchronously waiting for every layer drawable.
+- Rework and harden the coalesced/asynchronous presentation path so redisplay
+  can update the retained backbuffer without the main event loop synchronously
+  waiting for every layer drawable.  The first main-queue task prototype
+  coalesces requests but still blocks the main queue during drawable acquisition.
 - Render directly to the drawable where possible.
 - Keep the persistent backbuffer only where it materially helps scroll
   preservation.
 
 Recommended next implementation:
 
-- Keep drawing into the retained backbuffer synchronous.  `emacs_metal_frame_end`
+- The first implementation keeps drawing into the retained backbuffer
+  synchronous.  `emacs_metal_frame_end`
   should still flush all pending batches before returning so Emacs redisplay
   state remains deterministic.
-- Split presentation from frame drawing.  After a changed frame is flushed into
-  the retained backbuffer, mark presentation pending and schedule one main-queue
-  presentation task instead of immediately blocking on `CAMetalLayer
-  nextDrawable`.
+- Presentation is now split from frame drawing.  After a changed frame is
+  flushed into the retained backbuffer, mark presentation pending and schedule
+  one presentation task instead of immediately blocking in
+  `emacs_metal_frame_end` on `CAMetalLayer nextDrawable`.
+- The 2026-05-18 benchmark shows that scheduling the task on the main queue is
+  insufficient; the next prototype should keep the same coalescing/final-present
+  state machine but move drawable acquisition and presentation command
+  submission off the main event loop if `CAMetalLayer` usage remains correct.
 - Coalesce bursty redisplay.  If another redisplay cycle updates the retained
   backbuffer before the scheduled presentation task runs, keep one pending task
   and present only the newest retained backbuffer contents.
@@ -390,6 +406,57 @@ Current benchmark status:
   wait for the display layer on every changed frame.  That needs careful
   lifetime handling for the frame/context and a final-present guarantee after a
   burst of updates.
+- A 2026-05-18 120-iteration run of the first main-queue coalesced presentation
+  prototype completed with `--with-metal-rendering --without-rsvg
+  --without-xwidgets --without-mailutils --without-native-compilation`.  It
+  reduced the number of presentation tasks relative to redisplay requests, but
+  elapsed time regressed in text-heavy scenarios because `nextDrawable` still
+  ran on the main event loop:
+
+  | Scenario | 2026-05-17 Metal default | Main-queue coalesced prototype | Prototype/default |
+  | --- | ---: | ---: | ---: |
+  | scroll-source | 0.130 | 0.227 | 1.75x |
+  | mixed-script | 0.171 | 0.320 | 1.87x |
+  | emoji | 0.129 | 0.226 | 1.75x |
+  | inline-images | 0.314 | 0.324 | 1.03x |
+  | modeline-fringe | 1.009 | 1.904 | 1.89x |
+
+  Presentation counters from the same run:
+
+  | Scenario | Requests | Coalesced | Task runs | Final reschedules | `nextDrawable` wait |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | scroll-source | 16 | 1 | 16 | 1 | 86.2 ms |
+  | mixed-script | 22 | 3 | 21 | 2 | 188.5 ms |
+  | emoji | 16 | 1 | 16 | 1 | 131.7 ms |
+  | inline-images | 16 | 1 | 15 | 0 | 0.2 ms |
+  | modeline-fringe | 123 | 13 | 116 | 5 | 1282.6 ms |
+
+  This is useful negative evidence: simply moving presentation out of
+  `emacs_metal_frame_end` is not enough if the scheduled task still performs
+  drawable acquisition on the main queue.  The coalescing state machine and
+  counters are still useful, but the next experiment should move the blocking
+  presentation work off the main event loop or otherwise make `nextDrawable`
+  non-blocking from Emacs's perspective.
+- Follow-up 2026-05-18 variant runs support that diagnosis.  Setting
+  `maximumDrawableCount` to 3 did not materially change the prototype results,
+  while disabling `displaySyncEnabled` made `nextDrawable` wait mostly
+  disappear and reduced text-heavy elapsed time:
+
+  | Scenario | Prototype default | `maximumDrawableCount = 3` | `displaySyncEnabled = nil` |
+  | --- | ---: | ---: | ---: |
+  | scroll-source | 0.227 | 0.226 | 0.126 |
+  | mixed-script | 0.320 | 0.318 | 0.119 |
+  | emoji | 0.226 | 0.210 | 0.108 |
+  | inline-images | 0.324 | 0.324 | 0.338 |
+  | modeline-fringe | 1.904 | 1.956 | 0.660 |
+
+  With display sync disabled, cumulative `nextDrawable` wait fell from
+  86.2/188.5/131.7/1282.6 ms to 9.1/12.1/13.7/2.2 ms for
+  scroll-source/mixed-script/emoji/modeline-fringe respectively, but
+  command-buffer completion time rose sharply.  That makes display sync
+  disabling a diagnostic, not a policy fix: it confirms the main-queue
+  prototype is blocked by display pacing, but it does not preserve the intended
+  synchronized presentation behavior.
 
 Useful counters:
 
@@ -398,7 +465,7 @@ Useful counters:
 - draw time
 - present time
 - `nextDrawable` wait time
-- skipped/coalesced presentation count
+- presentation request, coalesced request, task run, and final-reschedule counts
 - glyph cache hit/miss rate
 - texture upload count and bytes (`29000c3cf02`)
 - batch count (`29000c3cf02`)
@@ -409,9 +476,10 @@ Useful counters:
 
 ## Suggested Order
 
-1. Prototype coalesced/asynchronous Metal presentation while keeping retained
-   backbuffer drawing synchronous.  This directly targets the measured
-   `nextDrawable` wait in text-heavy benchmark scenarios.
+1. Rework the coalesced presentation prototype so `nextDrawable` and the
+   backbuffer-to-drawable presentation command do not block the main event loop,
+   then rerun the 120-iteration benchmark and inspect the existing presentation
+   coalescing counters alongside `nextDrawable` wait time.
 2. Compare bounded direct scroll-copy chunks against the staging path with
    repeated runs and interactive traces.  Keep the chunked path only if the
    lower byte traffic does not regress command-buffer latency on real scrolls.

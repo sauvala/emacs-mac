@@ -8,6 +8,8 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <CoreText/CoreText.h>
 #import <objc/message.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 /* Shared Metal state, initialized once on first context creation.  */
 static id<MTLDevice> shared_device;
@@ -177,11 +179,17 @@ struct emacs_metal_context
   int width, height, scale;
   bool in_frame;
   bool backbuffer_dirty;
+  bool presentation_valid;
+  bool presentation_scheduled;
+  bool presentation_in_flight;
+  bool presentation_needs_reschedule;
 
   id<MTLTexture> scroll_staging;
   int scroll_staging_w, scroll_staging_h;
 
   dispatch_semaphore_t buffer_semaphore;
+  pthread_mutex_t presentation_mutex;
+  atomic_uint ref_count;
 
   struct emacs_metal_glyph_cache *glyph_cache;
   uint8_t *glyph_scratch_pixels;
@@ -193,6 +201,7 @@ struct emacs_metal_context
 
 static void flush_render_batches (emacs_metal_context_t *ctx,
                                   id<MTLCommandBuffer> cmd);
+static void emacs_metal_schedule_presentation (emacs_metal_context_t *ctx);
 
 void
 emacs_metal_get_render_stats (struct emacs_metal_render_stats *stats,
@@ -237,6 +246,45 @@ clear_image_cache_entry (metal_image_cache_entry_t *entry)
   entry->height = 0;
   entry->texture = nil;
   entry->last_used = 0;
+}
+
+static void
+emacs_metal_context_retain (emacs_metal_context_t *ctx)
+{
+  atomic_fetch_add_explicit (&ctx->ref_count, 1, memory_order_relaxed);
+}
+
+static void
+emacs_metal_context_finalize (emacs_metal_context_t *ctx)
+{
+  for (int i = 0; i < METAL_VERTEX_BUFFER_COUNT; i++)
+    ctx->vertex_buffers[i] = nil;
+
+  ctx->backbuffer = nil;
+  ctx->scroll_staging = nil;
+  ctx->command_queue = nil;
+  ctx->layer = nil;
+  free (ctx->glyph_scratch_pixels);
+  for (int i = 0; i < METAL_IMAGE_CACHE_SIZE; i++)
+    clear_image_cache_entry (&ctx->image_cache[i]);
+
+  if (ctx->glyph_cache)
+    {
+      for (int i = 0; i < ctx->glyph_cache->page_count; i++)
+        ctx->glyph_cache->pages[i].texture = nil;
+      free (ctx->glyph_cache);
+    }
+
+  pthread_mutex_destroy (&ctx->presentation_mutex);
+  free (ctx);
+}
+
+static void
+emacs_metal_context_release (emacs_metal_context_t *ctx)
+{
+  if (atomic_fetch_sub_explicit (&ctx->ref_count, 1,
+                                 memory_order_acq_rel) == 1)
+    emacs_metal_context_finalize (ctx);
 }
 
 static bool
@@ -428,11 +476,14 @@ emacs_metal_context_create (void *view, int width, int height, int scale)
   emacs_metal_context_t *ctx = calloc (1, sizeof *ctx);
   if (!ctx)
     return NULL;
+  atomic_init (&ctx->ref_count, 1);
+  pthread_mutex_init (&ctx->presentation_mutex, NULL);
+  ctx->presentation_valid = true;
 
   ctx->command_queue = [shared_device newCommandQueue];
   if (!ctx->command_queue)
     {
-      free (ctx);
+      emacs_metal_context_release (ctx);
       return NULL;
     }
 
@@ -454,20 +505,20 @@ emacs_metal_context_create (void *view, int width, int height, int scale)
 
   if (!create_backbuffer (ctx))
     {
-      free (ctx);
+      emacs_metal_context_release (ctx);
       return NULL;
     }
 
   if (!create_vertex_buffers (ctx))
     {
-      free (ctx);
+      emacs_metal_context_release (ctx);
       return NULL;
     }
 
   ctx->glyph_cache = calloc (1, sizeof (struct emacs_metal_glyph_cache));
   if (!ctx->glyph_cache)
     {
-      free (ctx);
+      emacs_metal_context_release (ctx);
       return NULL;
     }
 
@@ -528,25 +579,13 @@ emacs_metal_context_destroy (emacs_metal_context_t *ctx)
   if (!ctx)
     return;
 
-  for (int i = 0; i < METAL_VERTEX_BUFFER_COUNT; i++)
-    ctx->vertex_buffers[i] = nil;
+  pthread_mutex_lock (&ctx->presentation_mutex);
+  ctx->presentation_valid = false;
+  ctx->presentation_scheduled = false;
+  ctx->presentation_needs_reschedule = false;
+  pthread_mutex_unlock (&ctx->presentation_mutex);
 
-  ctx->backbuffer = nil;
-  ctx->scroll_staging = nil;
-  ctx->command_queue = nil;
-  ctx->layer = nil;
-  free (ctx->glyph_scratch_pixels);
-  for (int i = 0; i < METAL_IMAGE_CACHE_SIZE; i++)
-    clear_image_cache_entry (&ctx->image_cache[i]);
-
-  if (ctx->glyph_cache)
-    {
-      for (int i = 0; i < ctx->glyph_cache->page_count; i++)
-        ctx->glyph_cache->pages[i].texture = nil;
-      free (ctx->glyph_cache);
-    }
-
-  free (ctx);
+  emacs_metal_context_release (ctx);
 }
 
 bool
@@ -697,6 +736,171 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
   ctx->batch_clip_rect_count = 0;
 }
 
+static void
+emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
+{
+  dispatch_async (dispatch_get_main_queue (), ^{
+    id<CAMetalDrawable> drawable = nil;
+    id<MTLCommandBuffer> cmd = nil;
+    bool valid;
+
+    pthread_mutex_lock (&ctx->presentation_mutex);
+    valid = ctx->presentation_valid;
+    if (valid)
+      {
+        ctx->presentation_scheduled = false;
+        ctx->presentation_in_flight = true;
+        render_stats.presentation_task_runs++;
+      }
+    else
+      ctx->presentation_scheduled = false;
+    pthread_mutex_unlock (&ctx->presentation_mutex);
+
+    if (!valid)
+      {
+        emacs_metal_context_release (ctx);
+        return;
+      }
+
+    CAMetalLayer *layer = ctx->layer;
+    id<MTLTexture> backbuffer = ctx->backbuffer;
+    id<MTLCommandQueue> command_queue = ctx->command_queue;
+
+    if (layer)
+      {
+        double next_drawable_start = CACurrentMediaTime ();
+        drawable = [layer nextDrawable];
+        double next_drawable_elapsed =
+          CACurrentMediaTime () - next_drawable_start;
+        if (next_drawable_elapsed < 0.0)
+          next_drawable_elapsed = 0.0;
+        render_stats.next_drawable_calls++;
+        render_stats.next_drawable_seconds += next_drawable_elapsed;
+        if (render_stats.max_next_drawable_seconds < next_drawable_elapsed)
+          render_stats.max_next_drawable_seconds = next_drawable_elapsed;
+      }
+
+    pthread_mutex_lock (&ctx->presentation_mutex);
+    valid = ctx->presentation_valid;
+    pthread_mutex_unlock (&ctx->presentation_mutex);
+
+    if (!valid || !drawable || !backbuffer || !command_queue)
+      goto finish_without_command;
+
+    cmd = [command_queue commandBuffer];
+    if (!cmd)
+      goto finish_without_command;
+
+    {
+      id<MTLTexture> dst = drawable.texture;
+      NSUInteger copy_w = MIN (backbuffer.width, dst.width);
+      NSUInteger copy_h = MIN (backbuffer.height, dst.height);
+
+      if (copy_w > 0 && copy_h > 0)
+        {
+          id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+          [blit copyFromTexture:backbuffer
+                    sourceSlice:0
+                    sourceLevel:0
+                   sourceOrigin:MTLOriginMake (0, 0, 0)
+                     sourceSize:MTLSizeMake (copy_w, copy_h, 1)
+                      toTexture:dst
+               destinationSlice:0
+               destinationLevel:0
+              destinationOrigin:MTLOriginMake (0, 0, 0)];
+          [blit endEncoding];
+          render_stats.blits++;
+          render_stats.blit_bytes += (uintmax_t) copy_w * copy_h * 4;
+          render_stats.present_blits++;
+          render_stats.present_blit_bytes += (uintmax_t) copy_w * copy_h * 4;
+        }
+    }
+
+    [cmd presentDrawable:drawable];
+
+    double command_start = CACurrentMediaTime ();
+    render_stats.frames++;
+    render_stats.command_buffers++;
+    [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull buffer) {
+      double elapsed = CACurrentMediaTime () - command_start;
+      bool schedule_again = false;
+      if (elapsed < 0.0)
+        elapsed = 0.0;
+      render_stats.command_buffer_seconds += elapsed;
+      if (render_stats.max_command_buffer_seconds < elapsed)
+        render_stats.max_command_buffer_seconds = elapsed;
+
+      pthread_mutex_lock (&ctx->presentation_mutex);
+      ctx->presentation_in_flight = false;
+      if (ctx->presentation_valid && ctx->presentation_needs_reschedule)
+        {
+          ctx->presentation_needs_reschedule = false;
+          ctx->presentation_scheduled = true;
+          emacs_metal_context_retain (ctx);
+          render_stats.presentation_final_reschedules++;
+          schedule_again = true;
+        }
+      pthread_mutex_unlock (&ctx->presentation_mutex);
+
+      if (schedule_again)
+        emacs_metal_dispatch_presentation_task (ctx);
+      emacs_metal_context_release (ctx);
+    }];
+
+    [cmd commit];
+    return;
+
+  finish_without_command:
+    {
+      bool schedule_again = false;
+      pthread_mutex_lock (&ctx->presentation_mutex);
+      ctx->presentation_in_flight = false;
+      if (ctx->presentation_valid && ctx->presentation_needs_reschedule)
+        {
+          ctx->presentation_needs_reschedule = false;
+          ctx->presentation_scheduled = true;
+          emacs_metal_context_retain (ctx);
+          render_stats.presentation_final_reschedules++;
+          schedule_again = true;
+        }
+      pthread_mutex_unlock (&ctx->presentation_mutex);
+
+      if (schedule_again)
+        emacs_metal_dispatch_presentation_task (ctx);
+      emacs_metal_context_release (ctx);
+    }
+  });
+}
+
+static void
+emacs_metal_schedule_presentation (emacs_metal_context_t *ctx)
+{
+  bool dispatch_task = false;
+
+  pthread_mutex_lock (&ctx->presentation_mutex);
+  if (ctx->presentation_valid)
+    {
+      render_stats.presentation_requests++;
+      if (ctx->presentation_scheduled)
+        render_stats.presentation_coalesced_requests++;
+      else if (ctx->presentation_in_flight)
+        {
+          ctx->presentation_needs_reschedule = true;
+          render_stats.presentation_coalesced_requests++;
+        }
+      else
+        {
+          ctx->presentation_scheduled = true;
+          emacs_metal_context_retain (ctx);
+          dispatch_task = true;
+        }
+    }
+  pthread_mutex_unlock (&ctx->presentation_mutex);
+
+  if (dispatch_task)
+    emacs_metal_dispatch_presentation_task (ctx);
+}
+
 void
 emacs_metal_frame_end (emacs_metal_context_t *ctx)
 {
@@ -719,62 +923,15 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
       return;
     }
 
-  /* Get the next drawable from the layer only when there is new backbuffer
-     content to present.  CAMetalDrawable contents are transient, so dirty
-     sub-rectangle presentation is unsafe without a retained drawable chain.  */
-  id<CAMetalDrawable> drawable = nil;
-  if (ctx->layer)
-    {
-      double next_drawable_start = CACurrentMediaTime ();
-      drawable = [ctx->layer nextDrawable];
-      double next_drawable_elapsed = CACurrentMediaTime () - next_drawable_start;
-      if (next_drawable_elapsed < 0.0)
-        next_drawable_elapsed = 0.0;
-      render_stats.next_drawable_calls++;
-      render_stats.next_drawable_seconds += next_drawable_elapsed;
-      if (render_stats.max_next_drawable_seconds < next_drawable_elapsed)
-        render_stats.max_next_drawable_seconds = next_drawable_elapsed;
-    }
-
-  if (!drawable)
+  if (!cmd)
     {
       dispatch_semaphore_signal (ctx->buffer_semaphore);
       ctx->frame_command_buffer = nil;
       return;
     }
 
-  /* Blit backbuffer to drawable texture.  */
-  {
-    id<MTLTexture> dst = drawable.texture;
-    NSUInteger copy_w = MIN (ctx->backbuffer.width, dst.width);
-    NSUInteger copy_h = MIN (ctx->backbuffer.height, dst.height);
-
-    if (copy_w > 0 && copy_h > 0)
-      {
-        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-        [blit copyFromTexture:ctx->backbuffer
-                  sourceSlice:0
-                  sourceLevel:0
-                 sourceOrigin:MTLOriginMake (0, 0, 0)
-                   sourceSize:MTLSizeMake (copy_w, copy_h, 1)
-                    toTexture:dst
-             destinationSlice:0
-             destinationLevel:0
-            destinationOrigin:MTLOriginMake (0, 0, 0)];
-        [blit endEncoding];
-        render_stats.blits++;
-        render_stats.blit_bytes += (uintmax_t) copy_w * copy_h * 4;
-        render_stats.present_blits++;
-        render_stats.present_blit_bytes += (uintmax_t) copy_w * copy_h * 4;
-      }
-  }
-
-  /* Present and signal semaphore on completion.  */
-  [cmd presentDrawable:drawable];
-
   __block dispatch_semaphore_t sema = ctx->buffer_semaphore;
   double command_start = CACurrentMediaTime ();
-  render_stats.frames++;
   render_stats.command_buffers++;
   [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull buffer) {
     double elapsed = CACurrentMediaTime () - command_start;
@@ -789,6 +946,7 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
   [cmd commit];
   ctx->backbuffer_dirty = false;
   ctx->frame_command_buffer = nil;
+  emacs_metal_schedule_presentation (ctx);
 }
 
 /* Local MIN/MAX for integer arithmetic if not already defined.  */

@@ -291,6 +291,10 @@ active in Metal rendering builds.  */)
   uintmax_t next_drawable_calls = 0;
   double next_drawable_seconds = 0.0;
   double max_next_drawable_seconds = 0.0;
+  uintmax_t presentation_requests = 0;
+  uintmax_t presentation_coalesced_requests = 0;
+  uintmax_t presentation_task_runs = 0;
+  uintmax_t presentation_final_reschedules = 0;
   uintmax_t command_buffers = 0;
   double command_buffer_seconds = 0.0;
   double max_command_buffer_seconds = 0.0;
@@ -317,6 +321,10 @@ active in Metal rendering builds.  */)
   next_drawable_calls = stats.next_drawable_calls;
   next_drawable_seconds = stats.next_drawable_seconds;
   max_next_drawable_seconds = stats.max_next_drawable_seconds;
+  presentation_requests = stats.presentation_requests;
+  presentation_coalesced_requests = stats.presentation_coalesced_requests;
+  presentation_task_runs = stats.presentation_task_runs;
+  presentation_final_reschedules = stats.presentation_final_reschedules;
   command_buffers = stats.command_buffers;
   command_buffer_seconds = stats.command_buffer_seconds;
   max_command_buffer_seconds = stats.max_command_buffer_seconds;
@@ -345,6 +353,14 @@ active in Metal rendering builds.  */)
       make_float (next_drawable_seconds),
       intern_c_string (":max-next-drawable-seconds"),
       make_float (max_next_drawable_seconds),
+      intern_c_string (":presentation-requests"),
+      make_uint (presentation_requests),
+      intern_c_string (":presentation-coalesced-requests"),
+      make_uint (presentation_coalesced_requests),
+      intern_c_string (":presentation-task-runs"),
+      make_uint (presentation_task_runs),
+      intern_c_string (":presentation-final-reschedules"),
+      make_uint (presentation_final_reschedules),
       intern_c_string (":command-buffers"), make_uint (command_buffers),
       intern_c_string (":command-buffer-seconds"),
       make_float (command_buffer_seconds),

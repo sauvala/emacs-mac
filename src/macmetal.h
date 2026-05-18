@@ -29,6 +29,10 @@ struct emacs_metal_render_stats
   uintmax_t next_drawable_calls;
   double next_drawable_seconds;
   double max_next_drawable_seconds;
+  uintmax_t presentation_requests;
+  uintmax_t presentation_coalesced_requests;
+  uintmax_t presentation_task_runs;
+  uintmax_t presentation_final_reschedules;
   uintmax_t command_buffers;
   double command_buffer_seconds;
   double max_command_buffer_seconds;
