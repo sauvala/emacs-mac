@@ -21,6 +21,11 @@ git push fork HEAD:nemesis
 Do not treat `fork/gnu-master` as the upstream for local `nemesis` work; it is a
 separate fork branch.
 
+When a coding agent discovers repository guidance that is missing, stale, or
+misleading, update this `AGENTS.md` file as part of the same change when
+practical.  Keep these notes concise and focused on durable project workflow or
+architecture facts.
+
 ## Build Commands
 
 ```bash
