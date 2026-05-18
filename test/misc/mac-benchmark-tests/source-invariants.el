@@ -54,10 +54,22 @@
                        ":presentation-task-runs"
                        ":presentation-final-reschedules"))
       (should (string-match-p pattern macterm)))
-    (should (string-match-p "dispatch_async[[:space:]\n]*(dispatch_get_main_queue"
-                            implementation))
     (should (string-match-p "emacs_metal_schedule_presentation"
                             implementation))))
+
+(ert-deftest mac-benchmark-metal-presentation-uses-presenter-queue ()
+  "Metal presentation should not acquire drawables on the main queue."
+  (let ((implementation (mac-benchmark-tests--repo-source "src/macmetal.m")))
+    (dolist (pattern '("presenter_queue"
+                       "emacs_metal_presenter_queue_label"
+                       "dispatch_queue_create"
+                       "dispatch_async[[:space:]\n]*(ctx->presenter_queue"
+                       "@autoreleasepool"))
+      (should (string-match-p pattern implementation)))
+    (should-not
+     (string-match-p
+      "dispatch_async[[:space:]\n]*(dispatch_get_main_queue[[:space:]\n]*()[[:ascii:]]*nextDrawable"
+      implementation))))
 
 (ert-deftest mac-benchmark-has-scheduled-startup-runner ()
   "The benchmark harness should support unattended GUI startup runs."

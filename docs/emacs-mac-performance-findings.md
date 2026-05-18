@@ -47,6 +47,12 @@ Completed:
   prototype is not the right final shape: it coalesces presentations, but
   `nextDrawable` still blocks the main event loop from the scheduled task and
   text-heavy elapsed times regress.
+- Moved the coalesced Metal presentation task to a context-owned serial
+  presenter queue.  The main redisplay path still flushes into the retained
+  backbuffer synchronously, but drawable acquisition and the
+  backbuffer-to-drawable present command no longer run on the main event loop.
+  A 2026-05-18 120-iteration benchmark showed material elapsed-time wins in
+  text-heavy scenarios versus the 2026-05-17 Metal default baseline.
 - `6f888f45119` — added AppKit `mac_select` latency statistics.
 - `29000c3cf02` — exposed Metal renderer counters for frames, flushes, batches,
   vertices, blits, texture uploads, and command-buffer timing.
@@ -65,10 +71,11 @@ Still open:
   after changed frames, or whether some paths can render directly to the
   drawable.  Partial dirty-rect copies to `CAMetalDrawable` are not safe by
   themselves because drawable contents are transient.
-- Rework the coalesced/asynchronous Metal presentation prototype so drawable
-  acquisition no longer runs as a blocking main-queue task.  The first
-  main-queue version did not remove `CAMetalLayer nextDrawable` wait from the
-  main event loop.
+- Harden the presenter-queue Metal presentation prototype.  It has the desired
+  first-order benchmark shape, but render-stat updates now happen from the main
+  thread, presenter queue, and Metal completion handlers, so the diagnostics
+  should be made explicitly thread-safe before treating fine-grained counter
+  values as exact.
 - Re-measure before spending more time on display-sync or maximum-drawable-count
   tuning; the 2026-05-17 benchmark runs did not show meaningful elapsed-time
   improvement from either knob before presentation coalescing.
@@ -101,10 +108,9 @@ Done:
 
 Remaining work:
 
-- Rework and harden the coalesced/asynchronous presentation path so redisplay
-  can update the retained backbuffer without the main event loop synchronously
-  waiting for every layer drawable.  The first main-queue task prototype
-  coalesces requests but still blocks the main queue during drawable acquisition.
+- Harden the coalesced/asynchronous presentation path.  The presenter queue now
+  keeps drawable acquisition out of the main event loop, but it still needs more
+  lifetime and diagnostics review before being considered production-ready.
 - Render directly to the drawable where possible.
 - Keep the persistent backbuffer only where it materially helps scroll
   preservation.
@@ -119,10 +125,10 @@ Recommended next implementation:
   flushed into the retained backbuffer, mark presentation pending and schedule
   one presentation task instead of immediately blocking in
   `emacs_metal_frame_end` on `CAMetalLayer nextDrawable`.
-- The 2026-05-18 benchmark shows that scheduling the task on the main queue is
-  insufficient; the next prototype should keep the same coalescing/final-present
-  state machine but move drawable acquisition and presentation command
-  submission off the main event loop if `CAMetalLayer` usage remains correct.
+- The 2026-05-18 benchmark showed that scheduling the task on the main queue was
+  insufficient, so the current prototype keeps the same coalescing/final-present
+  state machine but moves drawable acquisition and presentation command
+  submission to a context-owned serial presenter queue.
 - Coalesce bursty redisplay.  If another redisplay cycle updates the retained
   backbuffer before the scheduled presentation task runs, keep one pending task
   and present only the newest retained backbuffer contents.
@@ -143,12 +149,12 @@ Recommended next implementation:
 
 Success criteria for the first pass:
 
-- Text-heavy benchmark scenarios should show a material elapsed-time reduction
-  versus the 2026-05-17 Metal default baseline while preserving correct final
-  frame contents.
-- `nextDrawable` wait may still exist, but it should move out of the tight
-  redisplay path enough that mixed-script, emoji, and modeline/fringe get closer
-  to Core Graphics.
+- Text-heavy benchmark scenarios now show a material elapsed-time reduction
+  versus the 2026-05-17 Metal default baseline while preserving the final-present
+  state machine.
+- `nextDrawable` wait still exists, but it has moved out of the tight redisplay
+  path enough that mixed-script, emoji, and modeline/fringe are much closer to
+  Core Graphics in the benchmark harness.
 - No change should rely on disabling display synchronization or forcing
   `maximumDrawableCount` to 3, since those knobs were already measured and did
   not materially close the gap.
@@ -457,6 +463,38 @@ Current benchmark status:
   disabling a diagnostic, not a policy fix: it confirms the main-queue
   prototype is blocked by display pacing, but it does not preserve the intended
   synchronized presentation behavior.
+- A later 2026-05-18 120-iteration run moved the same coalescing state machine
+  to a context-owned serial presenter queue.  This keeps the retained backbuffer
+  update synchronous in redisplay, while `CAMetalLayer nextDrawable`, the
+  backbuffer-to-drawable blit, and `presentDrawable:` run off the main event
+  loop.  Text-heavy elapsed times improved versus the 2026-05-17 Metal default
+  and versus the first main-queue prototype:
+
+  | Scenario | 2026-05-17 Metal default | Presenter-queue prototype | Presenter/default |
+  | --- | ---: | ---: | ---: |
+  | scroll-source | 0.130 | 0.121 | 0.93x |
+  | mixed-script | 0.171 | 0.064 | 0.37x |
+  | emoji | 0.129 | 0.046 | 0.35x |
+  | inline-images | 0.314 | 0.330 | 1.05x |
+  | modeline-fringe | 1.009 | 0.139 | 0.14x |
+
+  Presentation counters from the same run:
+
+  | Scenario | Requests | Coalesced | Task runs | Final reschedules | `nextDrawable` wait |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | scroll-source | 16 | 14 | 8 | 6 | 91.8 ms |
+  | mixed-script | 22 | 21 | 6 | 5 | 52.3 ms |
+  | emoji | 16 | 13 | 5 | 2 | 26.6 ms |
+  | inline-images | 16 | 1 | 16 | 1 | 45.8 ms |
+  | modeline-fringe | 121 | 119 | 10 | 8 | 121.2 ms |
+
+  The important result is that cumulative `nextDrawable` wait still exists, but
+  it no longer dominates elapsed redisplay time because it is paid by the
+  presenter queue instead of the main event loop.  This prototype should be
+  hardened rather than replaced immediately.  The next cleanup should make
+  render-stat updates explicitly thread-safe and add a visual/final-frame check
+  for asynchronous presentation, because counter updates now happen from the
+  presenter queue and Metal completion handlers as well as the main thread.
 
 Useful counters:
 
@@ -476,10 +514,10 @@ Useful counters:
 
 ## Suggested Order
 
-1. Rework the coalesced presentation prototype so `nextDrawable` and the
-   backbuffer-to-drawable presentation command do not block the main event loop,
-   then rerun the 120-iteration benchmark and inspect the existing presentation
-   coalescing counters alongside `nextDrawable` wait time.
+1. Harden the presenter-queue coalesced presentation prototype: make
+   render-stat updates thread-safe, add a final-frame/visual correctness check,
+   and repeat the benchmark enough times to verify the large text-heavy win is
+   stable.
 2. Compare bounded direct scroll-copy chunks against the staging path with
    repeated runs and interactive traces.  Keep the chunked path only if the
    lower byte traffic does not regress command-buffer latency on real scrolls.
