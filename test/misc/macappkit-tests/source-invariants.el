@@ -25,6 +25,15 @@
       (should (string-match (regexp-quote next-marker) source start))
       (substring source start (match-beginning 0)))))
 
+(defun macappkit-tests--method-body (method-name next-marker)
+  "Return METHOD-NAME source body from src/macappkit.m up to NEXT-MARKER."
+  (let ((source (macappkit-tests--source "macappkit.m")))
+    (should (string-match (concat "\n" (regexp-quote method-name) "\n{")
+                          source))
+    (let ((start (match-beginning 0)))
+      (should (string-match (regexp-quote next-marker) source start))
+      (substring source start (match-beginning 0)))))
+
 (ert-deftest macappkit-select-records-latency-stats ()
   "The AppKit select emulation should expose event-loop latency counters."
   (let ((body (macappkit-tests--function-body
@@ -39,5 +48,17 @@
     (should (string-match-p "mac-select-latency-stats" mac-source))
     (should (string-match-p "defsubr (&Smac_select_latency_stats)" mac-source))
     (should (string-match-p "mac_get_select_latency_stats" header-source))))
+
+(ert-deftest macappkit-no-menu-bar-frames-remain-full-screen-primary ()
+  "Normal no-menu-bar mac frames should remain eligible for Split View."
+  (let ((body (macappkit-tests--method-body
+               "- (void)updateCollectionBehavior"
+               "\n- (void)updateWindowLevel")))
+    (should (string-match-p
+             "WM_STATE_NO_MENUBAR\\(?:.\\|\n\\)*NSWindowCollectionBehaviorFullScreenPrimary"
+             body))
+    (should-not (string-match-p
+                 "NSWindowCollectionBehaviorFullScreenAuxiliary"
+                 body))))
 
 ;;; source-invariants.el ends here

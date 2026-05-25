@@ -2948,7 +2948,7 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
       behavior = ((windowManagerState & WM_STATE_STICKY)
 		  ? NSWindowCollectionBehaviorCanJoinAllSpaces
 		  : NSWindowCollectionBehaviorMoveToActiveSpace);
-      behavior |= NSWindowCollectionBehaviorFullScreenAuxiliary;
+      behavior |= NSWindowCollectionBehaviorFullScreenPrimary;
     }
   else
     {
