@@ -5730,7 +5730,7 @@ x_cache_xi_devices (struct x_display_info *dpyinfo)
       return;
     }
 
-  dpyinfo->devices = xzalloc (sizeof *dpyinfo->devices * ndevices);
+  dpyinfo->devices = xcalloc (ndevices, sizeof *dpyinfo->devices);
 
   for (i = 0; i < ndevices; ++i)
     {
@@ -12696,7 +12696,7 @@ x_dnd_process_quit (struct frame *f, Time timestamp)
 Lisp_Object
 x_dnd_begin_drag_and_drop (struct frame *f, Time time, Atom xaction,
 			   Lisp_Object return_frame, Atom *ask_action_list,
-			   const char **ask_action_names, size_t n_ask_actions,
+			   const char **ask_action_names, int n_ask_actions,
 			   bool allow_current_frame, Atom *target_atoms,
 			   int ntargets, Lisp_Object selection_target_list,
 			   bool follow_tooltip)
@@ -12710,7 +12710,7 @@ x_dnd_begin_drag_and_drop (struct frame *f, Time time, Atom xaction,
   char *atom_name, *ask_actions;
   Lisp_Object action, ltimestamp, val;
   specpdl_ref ref, count, base;
-  ptrdiff_t i, end, fill;
+  ptrdiff_t end, fill;
   XTextProperty prop;
   Lisp_Object frame_object, x, y, frame, local_value;
   bool signals_were_pending, need_sync;
@@ -12802,7 +12802,7 @@ x_dnd_begin_drag_and_drop (struct frame *f, Time time, Atom xaction,
       end = 0;
       count = SPECPDL_INDEX ();
 
-      for (i = 0; i < n_ask_actions; ++i)
+      for (int i = 0; i < n_ask_actions; i++)
 	{
 	  fill = end;
 	  end += strlen (ask_action_names[i]) + 1;
@@ -13881,7 +13881,7 @@ xi_disable_devices (struct x_display_info *dpyinfo,
     return;
 
   ndevices = 0;
-  devices = xzalloc (sizeof *devices * dpyinfo->num_devices);
+  devices = xcalloc (dpyinfo->num_devices, sizeof *devices);
 
   /* Loop through every device currently in DPYINFO, and copy it to
      DEVICES if it is not in TO_DISABLE.  Note that this function
@@ -26321,8 +26321,6 @@ x_unwind_errors_to (int depth)
     x_uncatch_errors ();
 }
 
-#define X_ERROR_MESSAGE_SIZE 200
-
 /* An X error handler which stores the error message in the first
    applicable handler in the x_error_message stack.  This is called
    from *x_error_handler if an x_catch_errors for DISPLAY is in
@@ -30991,7 +30989,7 @@ x_term_init (Lisp_Object display_name, char *xrm_option, char *resource_name)
       static char const at[] = " at ";
       ptrdiff_t nbytes = sizeof (title) + sizeof (at);
       if (ckd_add (&nbytes, nbytes, SBYTES (system_name)))
-	memory_full (SIZE_MAX);
+	memory_full_up ();
       dpyinfo->x_id_name = xmalloc (nbytes);
       sprintf (dpyinfo->x_id_name, "%s%s%s", title, at, SDATA (system_name));
     }

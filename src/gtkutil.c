@@ -698,7 +698,7 @@ get_utf8_string (const char *str)
       if (ckd_mul (&alloc, nr_bad, 4)
 	  || ckd_add (&alloc, alloc, len + 1)
 	  || SIZE_MAX < alloc)
-	memory_full (SIZE_MAX);
+	memory_full_up ();
       up = utf8_str = xmalloc (alloc);
       p = (unsigned char *)str;
 
@@ -1352,8 +1352,6 @@ xg_frame_set_size_and_position (struct frame *f, int width, int height)
   gdk_window_move_resize (gwin, x, y, outer_width, outer_height);
   if (FRAME_PARENT_FRAME (f))
     {
-      /* Record the dimensions for GTK to remember after remapping.  */
-      gtk_window_resize (GTK_WINDOW (gwin), outer_width, outer_height);
       /* Resize all inner widgets and Cairo surface right away so the
 	 next redisplay drawing isn't clipped to the old size.  */
       GtkAllocation alloc = {0, 0, outer_width, outer_height};
@@ -4384,7 +4382,7 @@ xg_store_widget_in_map (GtkWidget *w)
     {
       ptrdiff_t new_size;
       if (TYPE_MAXIMUM (Window) - ID_TO_WIDGET_INCR < id_to_widget.max_size)
-	memory_full (SIZE_MAX);
+	memory_full_up ();
 
       new_size = id_to_widget.max_size + ID_TO_WIDGET_INCR;
       id_to_widget.widgets = xnrealloc (id_to_widget.widgets,
