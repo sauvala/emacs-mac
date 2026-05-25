@@ -4435,6 +4435,7 @@ extern void parse_str_as_multibyte (const unsigned char *, ptrdiff_t,
 extern intptr_t garbage_collection_inhibited;
 extern void malloc_warning (const char *);
 extern AVOID memory_full (size_t);
+extern AVOID memory_full_up (void);
 extern AVOID buffer_memory_full (ptrdiff_t);
 extern bool survives_gc_p (Lisp_Object);
 extern void mark_object (Lisp_Object);
@@ -5579,6 +5580,8 @@ extern void *xmalloc (size_t)
   ATTRIBUTE_MALLOC_SIZE ((1)) ATTRIBUTE_RETURNS_NONNULL;
 extern void *xzalloc (size_t)
   ATTRIBUTE_MALLOC_SIZE ((1)) ATTRIBUTE_RETURNS_NONNULL;
+extern void *xcalloc (size_t, size_t)
+  ATTRIBUTE_MALLOC_SIZE ((1,2)) ATTRIBUTE_RETURNS_NONNULL;
 extern void *xrealloc (void *, size_t)
   ATTRIBUTE_ALLOC_SIZE ((2)) ATTRIBUTE_RETURNS_NONNULL;
 extern void xfree (void *);
@@ -5748,7 +5751,7 @@ safe_free_unbind_to (specpdl_ref count, specpdl_ref sa_count, Lisp_Object val)
     ptrdiff_t alloca_nbytes;				       \
     if (ckd_mul (&alloca_nbytes, nelt, word_size)	       \
 	|| SIZE_MAX < alloca_nbytes)			       \
-      memory_full (SIZE_MAX);				       \
+      memory_full_up ();				       \
     else if (alloca_nbytes <= sa_avail)			       \
       (buf) = AVAIL_ALLOCA (alloca_nbytes);		       \
     else						       \

@@ -79,7 +79,7 @@ static size_t max_scanline_buffer_size;
       size_t _size;						\
 								\
       if (ckd_mul (&_size, height, stride))			\
-	memory_full (SIZE_MAX);					\
+	memory_full_up ();					\
 								\
       if (_size < MAX_ALLOCA)					\
 	(buffer) = alloca (_size);				\
@@ -95,7 +95,7 @@ static size_t max_scanline_buffer_size;
 	    }							\
 	  else if (_size <= scanline_buffer.buffer_size)	\
 	    (buffer) = scanline_buffer.buffer_data;		\
-	  /* This is unreachable but clang says it is.  */	\
+	  /* This is unreachable but clang says it is isn't.  */\
 	  else							\
 	    emacs_abort ();					\
 								\
@@ -113,7 +113,7 @@ static size_t max_scanline_buffer_size;
       void *_temp;						\
 								\
       if (ckd_mul (&_size, height, stride))			\
-	memory_full (SIZE_MAX);					\
+	memory_full_up ();					\
 								\
       if (_size > scanline_buffer.buffer_size)			\
 	{							\
@@ -127,7 +127,7 @@ static size_t max_scanline_buffer_size;
 	}							\
       else if (_size <= scanline_buffer.buffer_size)		\
 	(buffer) = scanline_buffer.buffer_data;			\
-      /* This is unreachable but clang says it is.  */		\
+      /* This is unreachable but clang says it isn't.  */	\
       else							\
 	emacs_abort ();						\
 								\
