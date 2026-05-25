@@ -644,7 +644,7 @@ really_commit_text (struct frame *f, EMACS_INT position,
      otherwise.  */
 
   mark = get_mark ();
-  TEXTCONV_DEBUG ("the mark is: %zd", mark);
+  TEXTCONV_DEBUG ("the mark is: %td", mark);
   if (MARKERP (f->conversion.compose_region_start) || mark != -1)
     {
       /* Replace its contents.  Set START and END to the start and end
@@ -662,7 +662,7 @@ really_commit_text (struct frame *f, EMACS_INT position,
 	  end = max (mark, PT);
 	}
 
-      TEXTCONV_DEBUG ("replacing text in composing region: %zd, %zd",
+      TEXTCONV_DEBUG ("replacing text in composing region: %td, %td",
 		      start, end);
 
       /* If it transpires that the start of the compose region is not
@@ -785,7 +785,7 @@ really_commit_text (struct frame *f, EMACS_INT position,
   call0 (Qdeactivate_mark);
 
   /* Print some debugging information.  */
-  TEXTCONV_DEBUG ("text inserted: %s, point now: %zd",
+  TEXTCONV_DEBUG ("text inserted: %s, point now: %td",
 		  SSDATA (text), PT);
 
   /* Update the ephemeral last point.  */
@@ -1449,7 +1449,7 @@ really_replace_text (struct frame *f, ptrdiff_t start, ptrdiff_t end,
     }
 
   /* Print some debugging information.  */
-  TEXTCONV_DEBUG ("text inserted: %s, point now: %zd",
+  TEXTCONV_DEBUG ("text inserted: %s, point now: %td",
 		  SSDATA (text), PT);
 
   /* Update the ephemeral last point.  */
