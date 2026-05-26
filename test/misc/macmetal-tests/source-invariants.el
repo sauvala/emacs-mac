@@ -24,11 +24,13 @@
                           source))
     (let ((start (match-beginning 0)))
       (should (string-match (pcase function-name
-                              ("flush_render_batches"
-                               "\n}\n\nvoid\nemacs_metal_frame_end")
-                              ("glyph_cache_rasterize"
-                               (regexp-quote "\n}\n\n/* Draw an array"))
-                              (_ "\n}\n\n"))
+	      ("flush_render_batches"
+	       "\n}\n\nvoid\nemacs_metal_frame_end")
+	      ("emacs_metal_dispatch_presentation_task"
+	       "\n}\n\nstatic void\nemacs_metal_schedule_presentation")
+	      ("glyph_cache_rasterize"
+	       (regexp-quote "\n}\n\n/* Draw an array"))
+	      (_ "\n}\n\n"))
                             source start))
       (substring source start (match-beginning 0)))))
 
@@ -62,11 +64,11 @@
 (ert-deftest macmetal-records-render-counters ()
   "Metal should count hot renderer operations for performance analysis."
   (let ((source (macmetal-tests--source))
-        (flush-body (macmetal-tests--function-body "flush_render_batches"))
-        (frame-end-body (macmetal-tests--function-body
-                         "emacs_metal_frame_end"))
-        (upload-body (macmetal-tests--function-body
-                      "emacs_metal_upload_cg_image")))
+	(flush-body (macmetal-tests--function-body "flush_render_batches"))
+	(presentation-body
+	 (macmetal-tests--function-body "emacs_metal_dispatch_presentation_task"))
+	(upload-body (macmetal-tests--function-body
+		      "emacs_metal_upload_cg_image")))
     (should (string-match-p "emacs_metal_render_stats" source))
     (should (string-match-p "emacs_metal_get_render_stats" source))
     (should (string-match-p "render_stats.flushes" flush-body))
@@ -75,8 +77,10 @@
     (should (string-match-p "render_stats.texture_uploads" upload-body))
     (should (string-match-p "render_stats.texture_upload_bytes" upload-body))
     (should (string-match-p "next_drawable_seconds" source))
-    (should (string-match-p "render_stats.next_drawable_calls" frame-end-body))
-    (should (string-match-p "render_stats.next_drawable_seconds" frame-end-body))
+    (should (string-match-p "render_stats.next_drawable_calls"
+			    presentation-body))
+    (should (string-match-p "render_stats.next_drawable_seconds"
+			    presentation-body))
     (should (string-match-p "command_buffer_seconds" source))))
 
 (ert-deftest macmetal-can-toggle-layer-display-sync ()
@@ -96,15 +100,16 @@
 (ert-deftest macmetal-records-present-and-scroll-blits-separately ()
   "Metal should distinguish presentation blits from scroll-preservation blits."
   (let ((source (macmetal-tests--source))
-        (frame-end-body (macmetal-tests--function-body
-                         "emacs_metal_frame_end"))
-        (scroll-body (macmetal-tests--function-body "emacs_metal_scroll")))
+	(presentation-body
+	 (macmetal-tests--function-body "emacs_metal_dispatch_presentation_task"))
+	(scroll-body (macmetal-tests--function-body "emacs_metal_scroll")))
     (should (string-match-p "present_blits" source))
     (should (string-match-p "present_blit_bytes" source))
     (should (string-match-p "scroll_blits" source))
     (should (string-match-p "scroll_blit_bytes" source))
-    (should (string-match-p "render_stats.present_blits" frame-end-body))
-    (should (string-match-p "render_stats.present_blit_bytes" frame-end-body))
+    (should (string-match-p "render_stats.present_blits" presentation-body))
+    (should (string-match-p "render_stats.present_blit_bytes"
+			    presentation-body))
     (should (string-match-p "render_stats.scroll_blits" scroll-body))
     (should (string-match-p "render_stats.scroll_blit_bytes" scroll-body))))
 
@@ -121,8 +126,8 @@
     (should (string-match-p "ctx->backbuffer_dirty = true" scroll-body))
     (should (string-match-p "ctx->backbuffer_dirty = false" frame-end-body))
     (should (string-match-p
-             "if (!ctx->backbuffer_dirty)[\0-\377]*nextDrawable"
-             frame-end-body))))
+	     "if (!ctx->backbuffer_dirty)[\0-\377]*return;[^\0]*emacs_metal_schedule_presentation"
+	     frame-end-body))))
 
 (ert-deftest macmetal-scroll-can-avoid-staging-for-bounded-axis-aligned-copies ()
   "Axis-aligned scrolls should avoid staging when ordered direct chunks are bounded."
