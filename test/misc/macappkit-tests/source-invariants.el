@@ -61,4 +61,44 @@
                  "NSWindowCollectionBehaviorFullScreenAuxiliary"
                  body))))
 
+(ert-deftest macappkit-metal-size-and-scale-changes-sync-drawable ()
+  "Metal drawing should keep the backbuffer and layer matched to the view."
+  (let ((sync-body (macappkit-tests--method-body
+                    "- (void)syncMetalDrawableSize"
+                    "\n#else  /* !USE_METAL_RENDERING */"))
+        (backing-body (macappkit-tests--method-body
+                       "- (void)viewDidChangeBackingProperties"
+                       "\n- (void)viewFrameDidChange"))
+        (frame-body (macappkit-tests--method-body
+                     "- (void)viewFrameDidChange:(NSNotification *)notification"
+                     "\n@end"))
+        (live-resize-body (macappkit-tests--method-body
+                           "- (void)viewDidEndLiveResize"
+                           "\n- (void)viewFrameDidChange:(NSNotification *)notification"))
+        (scale-factor-body (macappkit-tests--method-body
+                            "- (void)updateBackingScaleFactor"
+                            "\n- (BOOL)emacsViewIsHiddenOrHasHiddenAncestor"))
+        (app-screen-body (macappkit-tests--method-body
+                          "- (void)applicationDidChangeScreenParameters:(NSNotification *)notification"
+                          "\n#endif"))
+        (window-screen-body (macappkit-tests--method-body
+                             "- (void)windowDidChangeScreen:(NSNotification *)notification"
+                             "\n- (void)windowDidChangeBackingProperties")))
+    (should (string-match-p "FRAME_METAL_CTX" sync-body))
+    (should (string-match-p "CAMetalLayer" sync-body))
+    (should (string-match-p "backingScaleFactor" sync-body))
+    (should (string-match-p "drawableSize" sync-body))
+    (should (string-match-p "emacs_metal_context_resize" sync-body))
+    (should (string-match-p "\\[self syncMetalDrawableSize\\]" backing-body))
+    (should (string-match-p "\\[self syncMetalDrawableSize\\]" frame-body))
+    (should (string-match-p "\\[self syncMetalDrawableSize\\]" live-resize-body))
+    (should (string-match-p "emacsView\\.needsDisplay = YES"
+                            scale-factor-body))
+    (should (string-match-p "USE_METAL_RENDERING" app-screen-body))
+    (should (string-match-p "\\[frameController updateBackingScaleFactor\\]"
+                            app-screen-body))
+    (should (string-match-p "USE_METAL_RENDERING" window-screen-body))
+    (should (string-match-p "\\[self updateBackingScaleFactor\\]"
+                            window-screen-body))))
+
 ;;; source-invariants.el ends here

@@ -853,6 +853,9 @@ typedef NSInteger NSGlyphProperty;
 }
 - (struct frame *)emacsFrame;
 + (void)globallyDisableUpdateLayer:(BOOL)flag;
+#ifdef USE_METAL_RENDERING
+- (void)syncMetalDrawableSize;
+#endif
 - (void)lockFocusOnBacking;
 - (void)unlockFocusOnBacking;
 #ifndef USE_METAL_RENDERING

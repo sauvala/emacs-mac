@@ -1307,7 +1307,7 @@ static bool handling_queued_nsevents_p;
     }
 }
 
-#if HAVE_MAC_METAL
+#if HAVE_MAC_METAL || defined (USE_METAL_RENDERING)
 - (void)applicationDidChangeScreenParameters:(NSNotification *)notification
 {
   Lisp_Object tail, frame;
@@ -1320,7 +1320,11 @@ static bool handling_queued_nsevents_p;
 	{
 	  EmacsFrameController *frameController = FRAME_CONTROLLER (f);
 
+#ifdef USE_METAL_RENDERING
+	  [frameController updateBackingScaleFactor];
+#else
 	  [frameController updateEmacsViewMTLObjects];
+#endif
 	}
     }
 }
@@ -3159,15 +3163,8 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 #ifdef USE_METAL_RENDERING
   if (FRAME_METAL_CTX (f))
     {
-      CAMetalLayer *metalLayer = (CAMetalLayer *)emacsView.layer;
-      int scale = (int)emacsWindow.backingScaleFactor;
-      if (scale < 1) scale = 1;
-      NSRect bounds = [emacsView bounds];
-      int width = (int)NSWidth (bounds);
-      int height = (int)NSHeight (bounds);
-      metalLayer.contentsScale = scale;
-      metalLayer.drawableSize = CGSizeMake (width * scale, height * scale);
-      emacs_metal_context_resize (FRAME_METAL_CTX (f), width, height, scale);
+      [emacsView syncMetalDrawableSize];
+      emacsView.needsDisplay = YES;
     }
 #endif
 }
@@ -3374,8 +3371,12 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
   /* We used to update the presentation options for the key window
      here.  But it makes application switching impossible in Split
      View on macOS 10.14 and later.  */
+#ifdef USE_METAL_RENDERING
+  [self updateBackingScaleFactor];
+#else
 #if HAVE_MAC_METAL
   [self updateEmacsViewMTLObjects];
+#endif
 #endif
 }
 
@@ -6475,6 +6476,31 @@ static BOOL emacsViewUpdateLayerDisabled;
   /* Under Metal, presentation is handled by emacs_metal_frame_end.
      Nothing to do here.  */
 }
+
+- (void)syncMetalDrawableSize
+{
+  struct frame *f = self.emacsFrame;
+
+  if (!f || !FRAME_METAL_CTX (f))
+    return;
+
+  CALayer *layer = self.layer;
+  if (![layer isKindOfClass:[CAMetalLayer class]])
+    return;
+
+  int scale = (int) self.window.backingScaleFactor;
+  if (scale < 1)
+    scale = 1;
+
+  NSRect bounds = [self bounds];
+  int width = max (0, (int) NSWidth (bounds));
+  int height = max (0, (int) NSHeight (bounds));
+  CAMetalLayer *metalLayer = (CAMetalLayer *) layer;
+
+  metalLayer.contentsScale = scale;
+  metalLayer.drawableSize = CGSizeMake (width * scale, height * scale);
+  emacs_metal_context_resize (FRAME_METAL_CTX (f), width, height, scale);
+}
 #else  /* !USE_METAL_RENDERING */
 
 #if HAVE_MAC_METAL
@@ -6628,7 +6654,9 @@ static BOOL emacsViewUpdateLayerDisabled;
 
 - (void)viewDidChangeBackingProperties
 {
-#ifndef USE_METAL_RENDERING
+#ifdef USE_METAL_RENDERING
+  [self syncMetalDrawableSize];
+#else
   MRC_RELEASE (backing);
   backing = nil;
 #endif
@@ -6638,19 +6666,7 @@ static BOOL emacsViewUpdateLayerDisabled;
 - (void)viewFrameDidChange:(NSNotification *)notification
 {
 #ifdef USE_METAL_RENDERING
-  struct frame *f = self.emacsFrame;
-  if (f && FRAME_METAL_CTX (f))
-    {
-      CAMetalLayer *metalLayer = (CAMetalLayer *)self.layer;
-      int scale = (int)self.window.backingScaleFactor;
-      if (scale < 1) scale = 1;
-      NSRect bounds = [self bounds];
-      int width = (int)NSWidth (bounds);
-      int height = (int)NSHeight (bounds);
-      metalLayer.contentsScale = scale;
-      metalLayer.drawableSize = CGSizeMake (width * scale, height * scale);
-      emacs_metal_context_resize (FRAME_METAL_CTX (f), width, height, scale);
-    }
+  [self syncMetalDrawableSize];
 #else
   backingSizeOutOfSync = YES;
 #endif
@@ -7753,6 +7769,8 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
   [self synchronizeChildFrameOrigins];
 #ifndef USE_METAL_RENDERING
   backingSizeOutOfSync = YES;
+#else
+  [self syncMetalDrawableSize];
 #endif
   mac_handle_size_change (f, NSWidth (frameRect), NSHeight (frameRect));
   /* Exit from mac_select so as to react to the frame size change,
