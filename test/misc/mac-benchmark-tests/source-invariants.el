@@ -83,4 +83,25 @@
                        "kill-emacs 1"))
       (should (string-match-p pattern source)))))
 
+(ert-deftest mac-benchmark-gc-clip-hot-path-has-inline-storage ()
+  "Mac GC clipping should avoid heap storage for common small clip lists."
+  (let ((header (mac-benchmark-tests--repo-source "src/macgui.h"))
+        (macterm (mac-benchmark-tests--repo-source "src/macterm.c"))
+        (macappkit (mac-benchmark-tests--repo-source "src/macappkit.m"))
+        (benchmark (mac-benchmark-tests--source)))
+    (dolist (pattern '("MAC_GC_INLINE_CLIP_RECTANGLES"
+                       "clip_rects_count"
+                       "CGRect clip_rects\\[MAC_GC_INLINE_CLIP_RECTANGLES\\]"
+                       "mac_gc_clip_rects"))
+      (should (string-match-p pattern header)))
+    (dolist (pattern '("mac-gc-clip-stats"
+                       ":set-calls"
+                       ":inline-sets"
+                       ":heap-sets"
+                       ":redundant-sets"
+                       ":reset-calls"))
+      (should (string-match-p pattern macterm)))
+    (should (string-match-p "mac_gc_clip_rects" macappkit))
+    (should (string-match-p "mac-gc-clip-stats" benchmark))))
+
 ;;; source-invariants.el ends here

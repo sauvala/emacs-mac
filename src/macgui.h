@@ -80,6 +80,8 @@ typedef const struct _EmacsDocument *EmacsDocumentRef; /* opaque */
 #define DRAWING_USE_GCD 1
 #endif
 
+#define MAC_GC_INLINE_CLIP_RECTANGLES 2
+
 /* Emulate X GC's by keeping color info in a structure.  */
 typedef struct _XGCValues
 {
@@ -113,7 +115,39 @@ typedef struct _XGC
   /* Data consisting of clipping rectangles used in Quartz 2D drawing.
      The y-coordinate is in the flipped coordinates.  */
   CFDataRef clip_rects_data;
+
+  /* Number of active clipping rectangles.  When this is at most
+     MAC_GC_INLINE_CLIP_RECTANGLES, clip_rects_data is null and clip_rects
+     contains the active rectangles.  Larger clip lists are stored in
+     clip_rects_data.  */
+  CFIndex clip_rects_count;
+  CGRect clip_rects[MAC_GC_INLINE_CLIP_RECTANGLES];
 } *GC;
+
+static inline const CGRect *
+mac_gc_clip_rects (GC gc, CFIndex *count)
+{
+  if (gc == NULL || gc->clip_rects_count <= 0)
+    {
+      *count = 0;
+      return NULL;
+    }
+
+  if (gc->clip_rects_data)
+    {
+      *count = CFDataGetLength (gc->clip_rects_data) / sizeof (CGRect);
+      return (const CGRect *) CFDataGetBytePtr (gc->clip_rects_data);
+    }
+
+  if (gc->clip_rects_count <= MAC_GC_INLINE_CLIP_RECTANGLES)
+    {
+      *count = gc->clip_rects_count;
+      return gc->clip_rects;
+    }
+
+  *count = 0;
+  return NULL;
+}
 
 #define GCForeground            (1L<<2)
 #define GCBackground            (1L<<3)

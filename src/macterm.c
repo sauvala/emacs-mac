@@ -143,15 +143,15 @@ mac_metal_rect_area (CGRect rect)
 void
 mac_metal_apply_gc_clip (struct frame *f, GC gc)
 {
+  CFIndex count;
+  const CGRect *rects;
+
   if (!FRAME_METAL_CTX (f))
     return;
 
-  if (gc && gc->clip_rects_data
-      && CFDataGetLength (gc->clip_rects_data) >= (CFIndex) sizeof (CGRect))
+  rects = mac_gc_clip_rects (gc, &count);
+  if (rects && count > 0)
     {
-      const CGRect *rects =
-        (const CGRect *) CFDataGetBytePtr (gc->clip_rects_data);
-      CFIndex count = CFDataGetLength (gc->clip_rects_data) / sizeof (CGRect);
       CGRect union_rect = rects[0];
       double exact_area = mac_metal_rect_area (rects[0]);
 
@@ -210,6 +210,48 @@ mac_metal_background_color (struct frame *f, GC gc, bool respect_alpha_backgroun
   return (alpha << 24) | (gc->xgcv.background & 0x00FFFFFFu);
 }
 #endif
+
+static uintmax_t mac_gc_clip_set_calls;
+static uintmax_t mac_gc_clip_inline_sets;
+static uintmax_t mac_gc_clip_heap_sets;
+static uintmax_t mac_gc_clip_redundant_sets;
+static uintmax_t mac_gc_clip_reset_calls;
+static uintmax_t mac_gc_clip_redundant_resets;
+
+DEFUN ("mac-gc-clip-stats", Fmac_gc_clip_stats,
+       Smac_gc_clip_stats, 0, 1, 0,
+       doc: /* Return mac GC clip storage statistics.
+If optional RESET is non-nil, reset the counters after reading them.
+
+The returned value is a plist with keys `:set-calls', `:inline-sets',
+`:heap-sets', `:redundant-sets', `:reset-calls', and
+`:redundant-resets'.  */)
+  (Lisp_Object reset)
+{
+  Lisp_Object result[] =
+    {
+      intern_c_string (":set-calls"), make_uint (mac_gc_clip_set_calls),
+      intern_c_string (":inline-sets"), make_uint (mac_gc_clip_inline_sets),
+      intern_c_string (":heap-sets"), make_uint (mac_gc_clip_heap_sets),
+      intern_c_string (":redundant-sets"),
+      make_uint (mac_gc_clip_redundant_sets),
+      intern_c_string (":reset-calls"), make_uint (mac_gc_clip_reset_calls),
+      intern_c_string (":redundant-resets"),
+      make_uint (mac_gc_clip_redundant_resets),
+    };
+
+  if (!NILP (reset))
+    {
+      mac_gc_clip_set_calls = 0;
+      mac_gc_clip_inline_sets = 0;
+      mac_gc_clip_heap_sets = 0;
+      mac_gc_clip_redundant_sets = 0;
+      mac_gc_clip_reset_calls = 0;
+      mac_gc_clip_redundant_resets = 0;
+    }
+
+  return Flist (ARRAYELTS (result), result);
+}
 
 DEFUN ("mac-metal-clip-overdraw-stats", Fmac_metal_clip_overdraw_stats,
        Smac_metal_clip_overdraw_stats, 0, 1, 0,
@@ -967,13 +1009,52 @@ mac_set_background (GC gc, unsigned long color)
 
 /* Mac replacement for XSetClipRectangles.  */
 
+static void mac_reset_clip_rectangles (struct frame *, GC);
+
+static bool
+mac_clip_rects_equal (const CGRect *a, const CGRect *b, CFIndex count)
+{
+  for (CFIndex i = 0; i < count; i++)
+    if (!CGRectEqualToRect (a[i], b[i]))
+      return false;
+
+  return true;
+}
+
+static bool
+mac_gc_clip_rects_equal (GC gc, const CGRect *rects, CFIndex count)
+{
+  CFIndex old_count;
+  const CGRect *old_rects = mac_gc_clip_rects (gc, &old_count);
+
+  if (old_count != count)
+    return false;
+  if (count == 0)
+    return true;
+
+  return old_rects && mac_clip_rects_equal (old_rects, rects, count);
+}
+
 static void
 mac_set_clip_rectangles (struct frame *f, GC gc,
 			 NativeRectangle *rectangles, int n)
 {
-  CFIndex length = n * sizeof (CGRect);
-  CGRect *clip_rects = alloca (length);
+  CFIndex count = n;
+  CGRect inline_clip_rects[MAC_GC_INLINE_CLIP_RECTANGLES];
+  CGRect *clip_rects;
   int i;
+
+  mac_gc_clip_set_calls++;
+
+  if (n <= 0)
+    {
+      mac_reset_clip_rectangles (f, gc);
+      return;
+    }
+
+  clip_rects = (count <= MAC_GC_INLINE_CLIP_RECTANGLES
+		? inline_clip_rects
+		: alloca (count * sizeof *clip_rects));
 
   for (i = 0; i < n; i++)
     {
@@ -982,9 +1063,34 @@ mac_set_clip_rectangles (struct frame *f, GC gc,
       clip_rects[i] = CGRectMake (rect->x, rect->y, rect->width, rect->height);
     }
 
+  if (mac_gc_clip_rects_equal (gc, clip_rects, count))
+    {
+      mac_gc_clip_redundant_sets++;
+      return;
+    }
+
   if (gc->clip_rects_data)
-    CFRelease (gc->clip_rects_data);
-  gc->clip_rects_data = CFDataCreate (NULL, (const UInt8 *) clip_rects, length);
+    {
+      CFRelease (gc->clip_rects_data);
+      gc->clip_rects_data = NULL;
+    }
+
+  gc->clip_rects_count = count;
+  if (count <= MAC_GC_INLINE_CLIP_RECTANGLES)
+    {
+      memcpy (gc->clip_rects, clip_rects, count * sizeof *clip_rects);
+      mac_gc_clip_inline_sets++;
+    }
+  else
+    {
+      gc->clip_rects_data =
+	CFDataCreate (NULL, (const UInt8 *) clip_rects,
+		      count * sizeof *clip_rects);
+      if (gc->clip_rects_data)
+	mac_gc_clip_heap_sets++;
+      else
+	gc->clip_rects_count = 0;
+    }
 }
 
 /* Mac replacement for XSetClipMask.  */
@@ -992,11 +1098,19 @@ mac_set_clip_rectangles (struct frame *f, GC gc,
 static void
 mac_reset_clip_rectangles (struct frame *f, GC gc)
 {
+  bool had_clip = gc->clip_rects_count > 0 || gc->clip_rects_data;
+
+  mac_gc_clip_reset_calls++;
+
   if (gc->clip_rects_data)
     {
       CFRelease (gc->clip_rects_data);
       gc->clip_rects_data = NULL;
     }
+  gc->clip_rects_count = 0;
+
+  if (!had_clip)
+    mac_gc_clip_redundant_resets++;
 }
 
 /* Mac replacement for XSetFillStyle.  */
@@ -6414,6 +6528,7 @@ mac_initialize (void)
 void
 syms_of_macterm (void)
 {
+  defsubr (&Smac_gc_clip_stats);
   defsubr (&Smac_metal_clip_overdraw_stats);
   defsubr (&Smac_metal_render_stats);
   defsubr (&Smac_metal_set_display_sync_enabled);

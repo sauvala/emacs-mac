@@ -56,9 +56,13 @@ redisplay."
   :type 'number)
 
 (defvar mac-performance--modeline-tick 0)
+(defvar mac-performance--collect-latency nil)
+(defvar mac-performance--latency-samples nil)
+(defvar mac-performance--command-loop-command-start nil)
 
 (defconst mac-performance--counter-functions
-  '(mac-metal-render-stats
+  '(mac-gc-clip-stats
+    mac-metal-render-stats
     mac-metal-clip-overdraw-stats
     mac-select-latency-stats)
   "Optional mac-port counter functions sampled by the benchmark harness.")
@@ -77,6 +81,80 @@ If RESET is non-nil, reset each counter while reading it."
   (cond ((numberp iterations) iterations)
         ((consp iterations) (prefix-numeric-value iterations))
         (t mac-performance-benchmark-iterations)))
+
+(defun mac-performance--record-latency (name seconds)
+  "Record latency sample SECONDS under NAME when latency collection is active."
+  (when mac-performance--collect-latency
+    (let ((cell (assq name mac-performance--latency-samples)))
+      (if cell
+          (setcdr cell (cons seconds (cdr cell)))
+        (push (list name seconds) mac-performance--latency-samples)))))
+
+(defun mac-performance--time-latency (name function)
+  "Call FUNCTION and record its elapsed time under latency bucket NAME."
+  (if (not mac-performance--collect-latency)
+      (funcall function)
+    (let ((start (float-time)))
+      (unwind-protect
+          (funcall function)
+        (mac-performance--record-latency name (- (float-time) start))))))
+
+(defun mac-performance--command-loop-pre-command ()
+  "Record the start time for one command-loop command."
+  (setq mac-performance--command-loop-command-start (float-time)))
+
+(defun mac-performance--command-loop-post-command ()
+  "Record elapsed time for one command-loop command."
+  (when mac-performance--command-loop-command-start
+    (mac-performance--record-latency
+     'command-loop-command
+     (- (float-time) mac-performance--command-loop-command-start))
+    (setq mac-performance--command-loop-command-start nil)))
+
+(defun mac-performance--execute-kbd-macro-with-command-latency (macro)
+  "Execute keyboard MACRO while recording command-loop latency."
+  (let ((pre-command-hook
+         (cons #'mac-performance--command-loop-pre-command
+               pre-command-hook))
+        (post-command-hook
+         (cons #'mac-performance--command-loop-post-command
+               post-command-hook))
+        mac-performance--command-loop-command-start)
+    (mac-performance--time-latency
+     'command-loop-macro
+     (lambda ()
+       (execute-kbd-macro macro)))))
+
+(defun mac-performance--latency-percentile (sorted-samples percentile)
+  "Return nearest-rank PERCENTILE from SORTED-SAMPLES."
+  (let* ((count (length sorted-samples))
+         (index (max 0 (min (1- count)
+                            (1- (ceiling (* percentile count)))))))
+    (nth index sorted-samples)))
+
+(defun mac-performance--latency-summary (samples)
+  "Return summary statistics for latency SAMPLES.
+SAMPLES is an alist whose entries are shaped like (NAME SAMPLE...)."
+  (let (summary)
+    (dolist (entry (sort (cl-remove-if-not #'cdr (copy-sequence samples))
+                         (lambda (a b)
+                           (string< (symbol-name (car a))
+                                    (symbol-name (car b))))))
+      (let* ((name (car entry))
+             (sorted (sort (copy-sequence (cdr entry)) #'<))
+             (count (length sorted))
+             (total (apply #'+ sorted)))
+        (push (cons name
+                    (list :count count
+                          :total-seconds total
+                          :average-seconds (/ total count)
+                          :p50-seconds (mac-performance--latency-percentile
+                                         sorted 0.50)
+                          :p95-seconds (mac-performance--latency-percentile
+                                         sorted 0.95)
+                          :max-seconds (car (last sorted))))
+              summary)))
+    (nreverse summary)))
 
 (defun mac-performance--record-progress (progress-file event)
   "Append EVENT to PROGRESS-FILE when PROGRESS-FILE is non-nil."
@@ -100,15 +178,21 @@ If RESET is non-nil, reset each counter while reading it."
 
 (defun mac-performance--redisplay ()
   "Force redisplay for GUI benchmark scenarios."
-  (redisplay 'force))
+  (mac-performance--time-latency
+   'redisplay
+   (lambda ()
+     (redisplay 'force))))
 
 (defun mac-performance--scroll-window (iterations)
   "Scroll the selected window for ITERATIONS steps."
   (dotimes (i iterations)
-    (condition-case nil
-        (scroll-up-command)
-      (end-of-buffer
-       (goto-char (point-min))))
+    (mac-performance--time-latency
+     'scroll-command
+     (lambda ()
+       (condition-case nil
+           (scroll-up-command)
+         (end-of-buffer
+          (goto-char (point-min))))))
     (when (zerop (mod i 8))
       (mac-performance--redisplay))))
 
@@ -118,7 +202,7 @@ ITERATIONS is passed to EXERCISE.  Return a plist with timing and counters."
   (let ((buffer (get-buffer-create (format " *mac-performance-%s*" name)))
         (old-buffer (current-buffer))
         (old-gcs gcs-done)
-        start seconds counters)
+        start seconds counters latency)
     (unwind-protect
         (progn
           (switch-to-buffer buffer)
@@ -130,14 +214,20 @@ ITERATIONS is passed to EXERCISE.  Return a plist with timing and counters."
           (garbage-collect)
           (mac-performance--counter-snapshot t)
           (setq old-gcs gcs-done)
-          (setq start (float-time))
-          (funcall exercise iterations)
-          (mac-performance--redisplay)
-          (setq seconds (- (float-time) start))
+          (let ((mac-performance--collect-latency t)
+                mac-performance--latency-samples)
+            (setq start (float-time))
+            (funcall exercise iterations)
+            (mac-performance--redisplay)
+            (setq seconds (- (float-time) start))
+            (setq latency
+                  (mac-performance--latency-summary
+                   mac-performance--latency-samples)))
           (setq counters (mac-performance--counter-snapshot))
           (list :name name
                 :seconds seconds
                 :gc-count (- gcs-done old-gcs)
+                :latency latency
                 :counters counters))
       (when (buffer-live-p buffer)
         (kill-buffer buffer))
@@ -160,6 +250,94 @@ ITERATIONS is passed to EXERCISE.  Return a plist with timing and counters."
       mac-performance-benchmark-source-lines)
      (font-lock-ensure))
    #'mac-performance--scroll-window
+   iterations))
+
+(defun mac-performance--scenario-typing-source (iterations)
+  "Run source-like edit latency scenario for ITERATIONS."
+  (mac-performance--run-scenario
+   "typing-source"
+   (lambda ()
+     (emacs-lisp-mode)
+     (mac-performance--insert-source-lines
+      mac-performance-benchmark-source-lines)
+     (font-lock-ensure))
+   (lambda (n)
+     (let ((line-count (max 1 (1- mac-performance-benchmark-source-lines))))
+       (dotimes (i n)
+         (goto-char (point-min))
+         (forward-line (mod (* i 17) line-count))
+         (end-of-line)
+         (mac-performance--time-latency
+          'typing-command
+          (lambda ()
+            (insert "x")
+            (delete-region (1- (point)) (point))))
+         (when (zerop (mod i 4))
+           (mac-performance--redisplay)))))
+   iterations))
+
+(defun mac-performance--scenario-command-loop-input (iterations)
+  "Run keyboard-macro command-loop input scenario for ITERATIONS."
+  (mac-performance--run-scenario
+   "command-loop-input"
+   (lambda ()
+     (emacs-lisp-mode)
+     (mac-performance--insert-source-lines
+      mac-performance-benchmark-source-lines)
+     (font-lock-ensure))
+   (lambda (n)
+     (goto-char (point-min))
+     (mac-performance--execute-kbd-macro-with-command-latency
+      (make-vector n ?a)))
+   iterations))
+
+(defun mac-performance--process-output-command ()
+  "Return a command list that echoes stdin to stdout."
+  (list (or (executable-find "cat") "cat")))
+
+(defun mac-performance--scenario-process-output (iterations)
+  "Run asynchronous process-output latency scenario for ITERATIONS."
+  (mac-performance--run-scenario
+   "process-output"
+   (lambda ()
+     (fundamental-mode))
+   (lambda (n)
+     (let* ((chunk
+             "mac-bench process output line with enough text to decode\n")
+            (proc (make-process
+                   :name "mac-performance-process-output"
+                   :buffer (current-buffer)
+                   :command (mac-performance--process-output-command)
+                   :connection-type 'pipe
+                   :noquery t)))
+       (unwind-protect
+           (progn
+             (dotimes (i n)
+               (mac-performance--time-latency
+                'process-send
+                (lambda ()
+                  (process-send-string proc chunk)))
+               (when (zerop (mod i 8))
+                 (mac-performance--time-latency
+                  'process-output-drain
+                  (lambda ()
+                    (accept-process-output proc 0.02 nil t))))
+               (when (zerop (mod i 16))
+                 (mac-performance--redisplay)))
+             (process-send-eof proc)
+             (let ((waits 0))
+               (while (and (process-live-p proc) (< waits 200))
+                 (setq waits (1+ waits))
+                 (mac-performance--time-latency
+                  'process-output-drain
+                  (lambda ()
+                    (accept-process-output proc 0.05 nil t)))))
+             (while (mac-performance--time-latency
+                     'process-output-drain
+                     (lambda ()
+                       (accept-process-output proc 0 nil t)))))
+         (when (process-live-p proc)
+           (delete-process proc)))))
    iterations))
 
 (defun mac-performance--mixed-script-line ()
@@ -257,6 +435,9 @@ static unsigned char mac_bench_bits[] = {
 
 (defconst mac-performance--scenarios
   '(("scroll-source" . mac-performance--scenario-scroll-source)
+    ("typing-source" . mac-performance--scenario-typing-source)
+    ("command-loop-input" . mac-performance--scenario-command-loop-input)
+    ("process-output" . mac-performance--scenario-process-output)
     ("mixed-script" . mac-performance--scenario-mixed-script)
     ("emoji" . mac-performance--scenario-emoji)
     ("inline-images" . mac-performance--scenario-inline-images)
@@ -298,6 +479,14 @@ called interactively with a prefix argument, use that numeric prefix."
                             (plist-get result :name)
                             (plist-get result :seconds)
                             (plist-get result :gc-count)))
+            (dolist (latency (plist-get result :latency))
+              (let ((stats (cdr latency)))
+                (insert (format "  latency %-24S count=%d p50=%.4fs p95=%.4fs max=%.4fs\n"
+                                (car latency)
+                                (plist-get stats :count)
+                                (plist-get stats :p50-seconds)
+                                (plist-get stats :p95-seconds)
+                                (plist-get stats :max-seconds)))))
             (dolist (counter (plist-get result :counters))
               (insert (format "  %-32S %S\n" (car counter) (cdr counter)))))
           (special-mode))

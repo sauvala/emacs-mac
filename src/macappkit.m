@@ -7974,16 +7974,7 @@ mac_begin_cg_clip (struct frame *f, GC gc, CGRect invalid_rect)
   const CGRect *clip_rects;
   CFIndex n_clip_rects;
 
-  if (gc->clip_rects_data)
-    {
-      clip_rects = (const CGRect *) CFDataGetBytePtr (gc->clip_rects_data);
-      n_clip_rects = CFDataGetLength (gc->clip_rects_data) / sizeof (CGRect);
-    }
-  else
-    {
-      clip_rects = NULL;       /* Just to avoid uninitialized use.  */
-      n_clip_rects = 0;
-    }
+  clip_rects = mac_gc_clip_rects (gc, &n_clip_rects);
 
   if (global_focus_view_frame != f)
     {
@@ -8052,20 +8043,9 @@ mac_draw_to_frame (struct frame *f, GC gc, CGRect invalid_rect,
       const CGRect *clip_rects;
       CFIndex n_clip_rects;
 
-      if (gc->clip_rects_data)
-	{
-	  clip_rects = (const CGRect *) CFDataGetBytePtr (gc->clip_rects_data);
-	  n_clip_rects = (CFDataGetLength (gc->clip_rects_data)
-			  / sizeof (CGRect));
-	}
-      else
-	{
-	  clip_rects = NULL;   /* Just to avoid uninitialized use.  */
-	  n_clip_rects = 0;
-	}
-
       context = FRAME_CG_CONTEXT (f);
       gc = mac_duplicate_gc (gc);
+      clip_rects = mac_gc_clip_rects (gc, &n_clip_rects);
 
       dispatch_async (global_focus_drawing_queue, ^{
 	  CGContextSaveGState (context);
