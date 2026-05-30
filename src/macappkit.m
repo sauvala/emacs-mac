@@ -6368,6 +6368,8 @@ static BOOL emacsViewUpdateLayerDisabled;
   if (self == nil)
     return nil;
 
+  [self setPostsFrameChangedNotifications:YES];
+
   [[NSNotificationCenter defaultCenter]
     addObserver:self
        selector:@selector(viewFrameDidChange:)

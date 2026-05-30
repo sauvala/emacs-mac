@@ -101,4 +101,12 @@
     (should (string-match-p "\\[self updateBackingScaleFactor\\]"
                             window-screen-body))))
 
+(ert-deftest macappkit-emacs-view-posts-frame-change-notifications ()
+  "Emacs frame dimensions must be updated when the AppKit view frame changes."
+  (let ((body (macappkit-tests--method-body
+               "- (instancetype)initWithFrame:(NSRect)frameRect"
+               "\n- (void)dealloc")))
+    (should (string-match-p "setPostsFrameChangedNotifications:YES" body))
+    (should (string-match-p "NSViewFrameDidChangeNotification" body))))
+
 ;;; source-invariants.el ends here
