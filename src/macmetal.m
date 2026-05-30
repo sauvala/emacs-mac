@@ -32,6 +32,7 @@ typedef struct {
     CTFontRef font;
     uint16_t glyph_id;
     uint8_t subpixel;
+    uint8_t scale;
     uint16_t atlas_page;
     uint16_t atlas_x, atlas_y;
     uint16_t atlas_w, atlas_h;
@@ -1244,12 +1245,14 @@ glyph_cache_get_page (emacs_metal_context_t *ctx,
 
 /* FNV-1a hash for glyph cache lookup.  */
 static uint32_t
-glyph_cache_hash (CTFontRef font, uint16_t glyph_id, uint8_t subpixel)
+glyph_cache_hash (CTFontRef font, uint16_t glyph_id, uint8_t subpixel,
+                  uint8_t scale)
 {
   uint64_t h = 14695981039346656037ULL;
   h ^= (uintptr_t)font;  h *= 1099511628211ULL;
   h ^= glyph_id;          h *= 1099511628211ULL;
   h ^= subpixel;          h *= 1099511628211ULL;
+  h ^= scale;             h *= 1099511628211ULL;
   return (uint32_t)(h & (GLYPH_CACHE_SIZE - 1));
 }
 
@@ -1287,10 +1290,11 @@ glyph_cache_evict_entries (struct emacs_metal_glyph_cache *gc)
 /* Look up a cached glyph entry.  Returns NULL on miss.  */
 static glyph_cache_entry_t *
 glyph_cache_lookup (emacs_metal_context_t *ctx,
-                    CTFontRef font, uint16_t glyph_id, uint8_t subpixel)
+                    CTFontRef font, uint16_t glyph_id, uint8_t subpixel,
+                    uint8_t scale)
 {
   struct emacs_metal_glyph_cache *gc = ctx->glyph_cache;
-  uint32_t idx = glyph_cache_hash (font, glyph_id, subpixel);
+  uint32_t idx = glyph_cache_hash (font, glyph_id, subpixel, scale);
 
   for (int probe = 0; probe < 16; probe++)
     {
@@ -1303,7 +1307,7 @@ glyph_cache_lookup (emacs_metal_context_t *ctx,
           continue;
         }
       if (e->font == font && e->glyph_id == glyph_id
-          && e->subpixel == subpixel)
+          && e->subpixel == subpixel && e->scale == scale)
         {
           e->last_used = ++gc->clock;
           render_stats.glyph_cache_hits++;
@@ -1438,7 +1442,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
     }
 
   /* Insert into the hash table using open addressing.  */
-  uint32_t idx = glyph_cache_hash (font, glyph_id, subpixel);
+  uint32_t idx = glyph_cache_hash (font, glyph_id, subpixel, (uint8_t)ctx->scale);
   glyph_cache_entry_t *entry = NULL;
   glyph_cache_entry_t *deleted_entry = NULL;
   for (int probe = 0; probe < GLYPH_CACHE_SIZE; probe++)
@@ -1467,6 +1471,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   entry->deleted = false;
   entry->glyph_id = glyph_id;
   entry->subpixel = subpixel;
+  entry->scale = ctx->scale;
   entry->atlas_page = (uint16_t)page;
   entry->atlas_x = (uint16_t)atlas_x;
   entry->atlas_y = (uint16_t)atlas_y;
@@ -1521,7 +1526,7 @@ emacs_metal_draw_glyphs (emacs_metal_context_t *ctx,
 
       /* Look up or rasterize the glyph.  */
       glyph_cache_entry_t *entry
-        = glyph_cache_lookup (ctx, font, glyphs[i], subpixel);
+        = glyph_cache_lookup (ctx, font, glyphs[i], subpixel, (uint8_t)s);
       if (!entry)
         entry = glyph_cache_rasterize (ctx, font, glyphs[i], subpixel);
       if (!entry)

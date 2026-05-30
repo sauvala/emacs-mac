@@ -157,6 +157,18 @@
     (should (string-match-p "render_stats.glyph_cache_hits" lookup-body))
     (should (string-match-p "render_stats.glyph_cache_misses" rasterize-body))))
 
+(ert-deftest macmetal-glyph-cache-is-keyed-by-backing-scale ()
+  "Glyphs rasterized for one backing scale must not be reused at another scale."
+  (let ((source (macmetal-tests--source))
+        (hash-body (macmetal-tests--function-body "glyph_cache_hash"))
+        (lookup-body (macmetal-tests--function-body "glyph_cache_lookup"))
+        (rasterize-body (macmetal-tests--function-body
+                         "glyph_cache_rasterize")))
+    (should (string-match-p "uint8_t scale" source))
+    (should (string-match-p "scale" hash-body))
+    (should (string-match-p "scale" lookup-body))
+    (should (string-match-p "entry->scale = ctx->scale" rasterize-body))))
+
 (ert-deftest macmetal-glyph-cache-evicts-entries-instead-of-resetting ()
   "Glyph cache pressure should evict entries without resetting all atlas pages."
   (let ((source (macmetal-tests--source))
