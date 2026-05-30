@@ -101,6 +101,19 @@ many faces, cursor highlights, overlays, or composition boundaries.
 First test: add counters for clip changes requested, clip changes applied, and
 identical clips skipped.
 
+Initial renderer-level clip result: Metal now skips identical depth-1 clip
+regions and exposes `:clip-set-rect-calls`, `:clip-set-rect-skips`,
+`:clip-set-rects-calls`, `:clip-set-rects-skips`, `:clip-reset-calls`, and
+`:clip-reset-skips` through `mac-metal-render-stats`.  Two local
+120-iteration GUI runs on 2026-05-30 showed stable skip counts:
+`scroll-source` skipped 3103 of 4572 `set_clip_rect` calls,
+`typing-source` skipped about 5670 of about 8260 calls, and
+`modeline-fringe` skipped 3709 of 5689 calls.  No `set_clip_rects` calls were
+hit in these workloads, which confirms the current benchmark mostly uses the
+single-rect text clip path.  Wall-clock timing still varied enough that this
+should be treated as confirmed state-churn reduction rather than a proven
+end-user speedup.
+
 ### 3. Make input-aware fontification easier to enable
 
 `redisplay-skip-fontification-on-input` is exactly the kind of tradeoff that

@@ -104,4 +104,28 @@
     (should (string-match-p "mac_gc_clip_rects" macappkit))
     (should (string-match-p "mac-gc-clip-stats" benchmark))))
 
+(ert-deftest mac-benchmark-metal-skips-redundant-clip-state ()
+  "Metal rendering should count and skip redundant clip state updates."
+  (let ((header (mac-benchmark-tests--repo-source "src/macmetal.h"))
+        (implementation (mac-benchmark-tests--repo-source "src/macmetal.m"))
+        (macterm (mac-benchmark-tests--repo-source "src/macterm.c")))
+    (dolist (pattern '("clip_set_rect_calls"
+                       "clip_set_rect_skips"
+                       "clip_set_rects_calls"
+                       "clip_set_rects_skips"
+                       "clip_reset_calls"
+                       "clip_reset_skips"))
+      (should (string-match-p pattern header))
+      (should (string-match-p pattern implementation)))
+    (dolist (pattern '("clip_regions_equal"
+                       "clip_set_region_if_changed"))
+      (should (string-match-p pattern implementation)))
+    (dolist (pattern '(":clip-set-rect-calls"
+                       ":clip-set-rect-skips"
+                       ":clip-set-rects-calls"
+                       ":clip-set-rects-skips"
+                       ":clip-reset-calls"
+                       ":clip-reset-skips"))
+      (should (string-match-p pattern macterm)))))
+
 ;;; source-invariants.el ends here

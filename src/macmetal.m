@@ -981,6 +981,32 @@ clip_rects_equal (metal_clip_rect_t a, metal_clip_rect_t b)
   return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
 }
 
+static bool
+clip_regions_equal (metal_clip_region_t *a, metal_clip_region_t *b)
+{
+  if (a->count != b->count)
+    return false;
+
+  for (int i = 0; i < a->count; i++)
+    if (!clip_rects_equal (a->rects[i], b->rects[i]))
+      return false;
+
+  return true;
+}
+
+static bool
+clip_set_region_if_changed (emacs_metal_context_t *ctx,
+                            metal_clip_region_t *clip)
+{
+  if (ctx->clip_depth == 1
+      && clip_regions_equal (&ctx->clip_stack[0], clip))
+    return false;
+
+  ctx->clip_depth = 1;
+  ctx->clip_stack[0] = *clip;
+  return true;
+}
+
 static metal_clip_rect_t
 intersect_clip_rects (metal_clip_rect_t a, metal_clip_rect_t b)
 {
@@ -1716,6 +1742,8 @@ emacs_metal_set_clip_rect (emacs_metal_context_t *ctx,
   if (!ctx)
     return;
 
+  render_stats.clip_set_rect_calls++;
+
   int s = ctx->scale;
   int nx = x * s;
   int ny = y * s;
@@ -1729,13 +1757,17 @@ emacs_metal_set_clip_rect (emacs_metal_context_t *ctx,
   int ix2 = METAL_MIN (fw, nx + nw);
   int iy2 = METAL_MIN (fh, ny + nh);
 
-  ctx->clip_depth = 1;
-  ctx->clip_stack[0].count = 1;
-  ctx->clip_stack[0].rects[0] = (metal_clip_rect_t){
-    .x = ix, .y = iy,
-    .w = METAL_MAX (0, ix2 - ix),
-    .h = METAL_MAX (0, iy2 - iy)
+  metal_clip_region_t clip = {
+    .count = 1,
+    .rects = {{
+      .x = ix, .y = iy,
+      .w = METAL_MAX (0, ix2 - ix),
+      .h = METAL_MAX (0, iy2 - iy)
+    }}
   };
+
+  if (!clip_set_region_if_changed (ctx, &clip))
+    render_stats.clip_set_rect_skips++;
 }
 
 void
@@ -1744,6 +1776,8 @@ emacs_metal_set_clip_rects (emacs_metal_context_t *ctx,
 {
   if (!ctx)
     return;
+
+  render_stats.clip_set_rects_calls++;
 
   if (!rects || count <= 0)
     {
@@ -1763,10 +1797,9 @@ emacs_metal_set_clip_rects (emacs_metal_context_t *ctx,
     .w = ctx->width * s,
     .h = ctx->height * s
   };
-  metal_clip_region_t *clip = &ctx->clip_stack[0];
+  metal_clip_region_t clip;
 
-  ctx->clip_depth = 1;
-  clip->count = 0;
+  clip.count = 0;
 
   for (int i = 0; i < count; i++)
     {
@@ -1784,10 +1817,10 @@ emacs_metal_set_clip_rects (emacs_metal_context_t *ctx,
       candidate = intersect_clip_rects (frame_clip, candidate);
       if (candidate.w > 0 && candidate.h > 0)
         {
-          for (int j = 0; j < clip->count; j++)
+          for (int j = 0; j < clip.count; j++)
             {
               metal_clip_rect_t intersection =
-                intersect_clip_rects (clip->rects[j], candidate);
+                intersect_clip_rects (clip.rects[j], candidate);
               if (intersection.w > 0 && intersection.h > 0)
                 {
                   set_clip_to_cg_rect_union (ctx, rects, count);
@@ -1795,13 +1828,16 @@ emacs_metal_set_clip_rects (emacs_metal_context_t *ctx,
                 }
             }
 
-          clip->rects[clip->count++] = candidate;
+          clip.rects[clip.count++] = candidate;
         }
     }
 
-  if (clip->count == 0)
-    clip->rects[clip->count++] = (metal_clip_rect_t){ .x = 0, .y = 0,
-                                                      .w = 0, .h = 0 };
+  if (clip.count == 0)
+    clip.rects[clip.count++] = (metal_clip_rect_t){ .x = 0, .y = 0,
+                                                    .w = 0, .h = 0 };
+
+  if (!clip_set_region_if_changed (ctx, &clip))
+    render_stats.clip_set_rects_skips++;
 }
 
 void
@@ -1810,13 +1846,19 @@ emacs_metal_reset_clip (emacs_metal_context_t *ctx)
   if (!ctx)
     return;
 
-  ctx->clip_depth = 1;
-  ctx->clip_stack[0].count = 1;
-  ctx->clip_stack[0].rects[0] = (metal_clip_rect_t){
-    .x = 0, .y = 0,
-    .w = ctx->width * ctx->scale,
-    .h = ctx->height * ctx->scale
+  render_stats.clip_reset_calls++;
+
+  metal_clip_region_t clip = {
+    .count = 1,
+    .rects = {{
+      .x = 0, .y = 0,
+      .w = ctx->width * ctx->scale,
+      .h = ctx->height * ctx->scale
+    }}
   };
+
+  if (!clip_set_region_if_changed (ctx, &clip))
+    render_stats.clip_reset_skips++;
 }
 
 static void

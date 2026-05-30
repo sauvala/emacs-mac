@@ -26,6 +26,12 @@ struct emacs_metal_render_stats
   uintmax_t texture_upload_bytes;
   uintmax_t glyph_cache_hits;
   uintmax_t glyph_cache_misses;
+  uintmax_t clip_set_rect_calls;
+  uintmax_t clip_set_rect_skips;
+  uintmax_t clip_set_rects_calls;
+  uintmax_t clip_set_rects_skips;
+  uintmax_t clip_reset_calls;
+  uintmax_t clip_reset_skips;
   uintmax_t next_drawable_calls;
   double next_drawable_seconds;
   double max_next_drawable_seconds;

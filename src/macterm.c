@@ -330,6 +330,12 @@ active in Metal rendering builds.  */)
   uintmax_t texture_upload_bytes = 0;
   uintmax_t glyph_cache_hits = 0;
   uintmax_t glyph_cache_misses = 0;
+  uintmax_t clip_set_rect_calls = 0;
+  uintmax_t clip_set_rect_skips = 0;
+  uintmax_t clip_set_rects_calls = 0;
+  uintmax_t clip_set_rects_skips = 0;
+  uintmax_t clip_reset_calls = 0;
+  uintmax_t clip_reset_skips = 0;
   uintmax_t next_drawable_calls = 0;
   double next_drawable_seconds = 0.0;
   double max_next_drawable_seconds = 0.0;
@@ -360,6 +366,12 @@ active in Metal rendering builds.  */)
   texture_upload_bytes = stats.texture_upload_bytes;
   glyph_cache_hits = stats.glyph_cache_hits;
   glyph_cache_misses = stats.glyph_cache_misses;
+  clip_set_rect_calls = stats.clip_set_rect_calls;
+  clip_set_rect_skips = stats.clip_set_rect_skips;
+  clip_set_rects_calls = stats.clip_set_rects_calls;
+  clip_set_rects_skips = stats.clip_set_rects_skips;
+  clip_reset_calls = stats.clip_reset_calls;
+  clip_reset_skips = stats.clip_reset_skips;
   next_drawable_calls = stats.next_drawable_calls;
   next_drawable_seconds = stats.next_drawable_seconds;
   max_next_drawable_seconds = stats.max_next_drawable_seconds;
@@ -390,6 +402,16 @@ active in Metal rendering builds.  */)
       make_uint (texture_upload_bytes),
       intern_c_string (":glyph-cache-hits"), make_uint (glyph_cache_hits),
       intern_c_string (":glyph-cache-misses"), make_uint (glyph_cache_misses),
+      intern_c_string (":clip-set-rect-calls"),
+      make_uint (clip_set_rect_calls),
+      intern_c_string (":clip-set-rect-skips"),
+      make_uint (clip_set_rect_skips),
+      intern_c_string (":clip-set-rects-calls"),
+      make_uint (clip_set_rects_calls),
+      intern_c_string (":clip-set-rects-skips"),
+      make_uint (clip_set_rects_skips),
+      intern_c_string (":clip-reset-calls"), make_uint (clip_reset_calls),
+      intern_c_string (":clip-reset-skips"), make_uint (clip_reset_skips),
       intern_c_string (":next-drawable-calls"), make_uint (next_drawable_calls),
       intern_c_string (":next-drawable-seconds"),
       make_float (next_drawable_seconds),
