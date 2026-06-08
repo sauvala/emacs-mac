@@ -3256,7 +3256,7 @@ funcall_subr_1 (struct Lisp_Subr *subr, ptrdiff_t numargs, Lisp_Object *args)
 	  Lisp_Object *a;
 	  if (numargs < maxargs)
 	    {
-	      eassume (maxargs <= ARRAYELTS (argbuf));
+	      eassume (maxargs <= countof (argbuf));
 	      a = argbuf;
 	      memcpy (a, args, numargs * word_size);
 	      memclear (a + numargs, (maxargs - numargs) * word_size);

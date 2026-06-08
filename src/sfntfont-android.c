@@ -95,7 +95,7 @@ static size_t max_scanline_buffer_size;
 	    }							\
 	  else if (_size <= scanline_buffer.buffer_size)	\
 	    (buffer) = scanline_buffer.buffer_data;		\
-	  /* This is unreachable but clang says it is isn't.  */\
+	  /* This is unreachable but clang says it isn't.  */	\
 	  else							\
 	    emacs_abort ();					\
 								\
@@ -701,7 +701,7 @@ loaded before character sets are made available.  */)
 
   /* Scan through each of the system font directories.  Enumerate each
      font that looks like a TrueType font.  */
-  for (i = 0; i < ARRAYELTS (system_font_directories); ++i)
+  for (i = 0; i < countof (system_font_directories); ++i)
     {
       dir = opendir (system_font_directories[i]);
 
