@@ -4150,7 +4150,7 @@ memory_full (size_t nbytes)
       consing_until_gc = min (consing_until_gc, memory_full_cons_threshold);
 
       /* The first time we get here, free the spare memory.  */
-      for (int i = 0; i < ARRAYELTS (spare_memory); i++)
+      for (int i = 0; i < countof (spare_memory); i++)
 	if (spare_memory[i])
 	  {
 	    if (i == 0)
@@ -5679,7 +5679,7 @@ visit_static_gc_roots (struct gc_root_visitor visitor)
                      &buffer_local_symbols,
                      GC_ROOT_BUFFER_LOCAL_NAME);
 
-  for (int i = 0; i < ARRAYELTS (lispsym); i++)
+  for (int i = 0; i < countof (lispsym); i++)
     {
       Lisp_Object sptr = builtin_lisp_symbol (i);
       visitor.visit (&sptr, GC_ROOT_C_SYMBOL, visitor.data);
@@ -6609,7 +6609,7 @@ process_mark_stack (ptrdiff_t base_sp)
 
 	      case PVEC_CHAR_TABLE:
 	      case PVEC_SUB_CHAR_TABLE:
-		mark_char_table (ptr, (enum pvec_type) pvectype);
+		mark_char_table (ptr, pvectype);
 		break;
 
 	      case PVEC_BOOL_VECTOR:
@@ -7035,11 +7035,11 @@ sweep_symbols (void)
   struct symbol_block *sblk;
   struct symbol_block **sprev = &symbol_block;
   int lim = symbol_block_index;
-  object_ct num_free = 0, num_used = ARRAYELTS (lispsym);
+  object_ct num_free = 0, num_used = countof (lispsym);
 
   symbol_free_list = NULL;
 
-  for (int i = 0; i < ARRAYELTS (lispsym); i++)
+  for (int i = 0; i < countof (lispsym); i++)
     lispsym[i].u.s.gcmarkbit = 0;
 
   for (sblk = symbol_block; sblk; sblk = *sprev)
@@ -7177,28 +7177,28 @@ respective remote host.  */)
 #else
   units = 1;
 #endif
-  return list4i ((uintmax_t) si.totalram * units / 1024,
-		 (uintmax_t) si.freeram * units / 1024,
-		 (uintmax_t) si.totalswap * units / 1024,
-		 (uintmax_t) si.freeswap * units / 1024);
+  return list4i ((uintmax_t) {si.totalram} * units / 1024,
+		 (uintmax_t) {si.freeram} * units / 1024,
+		 (uintmax_t) {si.totalswap} * units / 1024,
+		 (uintmax_t) {si.freeswap} * units / 1024);
 #elif defined WINDOWSNT
   unsigned long long totalram, freeram, totalswap, freeswap;
 
   if (w32_memory_info (&totalram, &freeram, &totalswap, &freeswap) == 0)
-    return list4i ((uintmax_t) totalram / 1024,
-		   (uintmax_t) freeram / 1024,
-		   (uintmax_t) totalswap / 1024,
-		   (uintmax_t) freeswap / 1024);
+    return list4i ((uintmax_t) {totalram} / 1024,
+		   (uintmax_t) {freeram} / 1024,
+		   (uintmax_t) {totalswap} / 1024,
+		   (uintmax_t) {freeswap} / 1024);
   else
     return Qnil;
 #elif defined MSDOS
   unsigned long totalram, freeram, totalswap, freeswap;
 
   if (dos_memory_info (&totalram, &freeram, &totalswap, &freeswap) == 0)
-    return list4i ((uintmax_t) totalram / 1024,
-		   (uintmax_t) freeram / 1024,
-		   (uintmax_t) totalswap / 1024,
-		   (uintmax_t) freeswap / 1024);
+    return list4i ((uintmax_t) {totalram} / 1024,
+		   (uintmax_t) {freeram} / 1024,
+		   (uintmax_t) {totalswap} / 1024,
+		   (uintmax_t) {freeswap} / 1024);
   else
     return Qnil;
 #else /* not HAVE_LINUX_SYSINFO, not WINDOWSNT, not MSDOS */
@@ -7305,7 +7305,7 @@ which_symbols (Lisp_Object obj, EMACS_INT find_max)
 
    if (! deadp (obj))
      {
-       for (int i = 0; i < ARRAYELTS (lispsym); i++)
+       for (int i = 0; i < countof (lispsym); i++)
 	 {
 	   Lisp_Object sym = builtin_lisp_symbol (i);
 	   if (symbol_uses_obj (sym, obj))
@@ -7473,7 +7473,7 @@ If this portion is smaller than `gc-cons-threshold', this is ignored.  */);
 
   DEFVAR_INT ("symbols-consed", symbols_consed,
 	      doc: /* Number of symbols that have been consed so far.  */);
-  symbols_consed += ARRAYELTS (lispsym);
+  symbols_consed += countof (lispsym);
 
   DEFVAR_INT ("string-chars-consed", string_chars_consed,
 	      doc: /* Number of string characters that have been consed so far.  */);
