@@ -70,6 +70,7 @@ typedef Lisp_Object XrmDatabase;
 #endif
 
 typedef void *Window;
+#define WINDOW_HANDLE_UINTPTR(h) ((uintptr_t) (h))
 typedef void *Selection;
 
 typedef const struct _EmacsDocument *EmacsDocumentRef; /* opaque */

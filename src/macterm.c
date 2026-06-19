@@ -250,7 +250,7 @@ The returned value is a plist with keys `:set-calls', `:inline-sets',
       mac_gc_clip_redundant_resets = 0;
     }
 
-  return Flist (ARRAYELTS (result), result);
+  return Flist (countof (result), result);
 }
 
 DEFUN ("mac-metal-clip-overdraw-stats", Fmac_metal_clip_overdraw_stats,
@@ -301,7 +301,7 @@ These counters are only active in Metal rendering builds.  */)
     }
 #endif
 
-  return Flist (ARRAYELTS (result), result);
+  return Flist (countof (result), result);
 }
 
 DEFUN ("mac-metal-render-stats", Fmac_metal_render_stats,
@@ -432,7 +432,7 @@ active in Metal rendering builds.  */)
       make_float (max_command_buffer_seconds),
     };
 
-  return Flist (ARRAYELTS (result), result);
+  return Flist (countof (result), result);
 }
 
 DEFUN ("mac-metal-set-display-sync-enabled",
@@ -5435,7 +5435,7 @@ mac_cgevent_to_input_event (CGEventRef cgevent, struct input_event *buf)
 
   if (flags & kCGEventFlagMaskShift)
     emacs_modifiers |= shift_modifier;
-  for (i = 0; i < ARRAYELTS (mask_table); i++)
+  for (i = 0; i < countof (mask_table); i++)
     if (flags & mask_table[i].device_indep)
       {
 	Lisp_Object modifier_symbols[NSIDES];
