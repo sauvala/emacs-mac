@@ -4694,13 +4694,19 @@ add_driver_options (void)
 #if defined (LIBGCCJIT_HAVE_gcc_jit_context_add_driver_option)
   load_gccjit_if_necessary (true);
   if (!NILP (Fcomp_native_driver_options_effective_p ()))
-    FOR_EACH_TAIL (options)
-      gcc_jit_context_add_driver_option (comp.ctxt,
-					 /* FIXME: Need to encode
-					    this, but how? either
-					    ENCODE_FILE or
-					    ENCODE_SYSTEM.  */
-					 SSDATA (XCAR (options)));
+    {
+#if defined (DARWIN_OS) && defined (MAC_NATIVE_COMP_DRIVER_LIBDIR)
+      gcc_jit_context_add_driver_option
+	(comp.ctxt, "-L" MAC_NATIVE_COMP_DRIVER_LIBDIR);
+#endif
+      FOR_EACH_TAIL (options)
+	gcc_jit_context_add_driver_option (comp.ctxt,
+					   /* FIXME: Need to encode
+					      this, but how? either
+					      ENCODE_FILE or
+					      ENCODE_SYSTEM.  */
+					   SSDATA (XCAR (options)));
+    }
 #endif
   if (CONSP (options))
     xsignal1 (Qnative_compiler_error,

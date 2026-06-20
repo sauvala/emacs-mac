@@ -5237,6 +5237,7 @@ source on this site:
 HAVE_NATIVE_COMP=no
 LIBGCCJIT_LIBS=
 LIBGCCJIT_CFLAGS=
+MAC_NATIVE_COMP_DRIVER_LIBDIR=
 if test "$canonical" = i686-pc-cygwin; then
   if test "${with_cygwin32_native_compilation}" = yes; then
     with_native_compilation=yes
@@ -5295,6 +5296,13 @@ if test "${with_native_compilation}" != "no"; then
           MAC_LIBS="-L$(dirname $($BREW ls -v libgccjit \
                                   | grep -m1 -E 'libgccjit\.(so|dylib)$'))"
         fi
+        if test -n "`$BREW --prefix --installed gcc 2>/dev/null`"; then
+          emacs_val=`find -L "$($BREW --prefix gcc)" -name libemutls_w.a \
+                     -print -quit 2>/dev/null`
+          if test -n "$emacs_val"; then
+            MAC_NATIVE_COMP_DRIVER_LIBDIR=`dirname "$emacs_val"`
+          fi
+        fi
       fi
 
       if test -n "$HAVE_MACPORTS"; then
@@ -5313,6 +5321,10 @@ if test "${with_native_compilation}" != "no"; then
 	  emacs_val=`port contents $PORT_PACKAGE | grep libgccjit.dylib`
 	  emacs_val=`dirname $emacs_val`
           MAC_LIBS="-L$emacs_val"
+	  emacs_val=`port contents $PORT_PACKAGE | grep libemutls_w.a`
+	  if test -n "$emacs_val"; then
+	    MAC_NATIVE_COMP_DRIVER_LIBDIR=`dirname $emacs_val`
+	  fi
         fi
       fi
 
@@ -5372,6 +5384,11 @@ if test "${with_native_compilation}" != "no"; then
     NEED_DYNLIB=yes
     AC_DEFINE([HAVE_NATIVE_COMP], [1],
       [Define to 1 if native compiler is available.])
+    if test -n "$MAC_NATIVE_COMP_DRIVER_LIBDIR"; then
+      AC_DEFINE_UNQUOTED([MAC_NATIVE_COMP_DRIVER_LIBDIR],
+        ["$MAC_NATIVE_COMP_DRIVER_LIBDIR"],
+        [Directory containing GCC runtime libraries needed by libgccjit.])
+    fi
 
     CFLAGS=$SAVE_CFLAGS
     LIBS=$SAVE_LIBS
