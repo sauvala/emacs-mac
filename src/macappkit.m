@@ -6458,7 +6458,7 @@ static BOOL emacsViewUpdateLayerDisabled;
 {
   CAMetalLayer *layer = [CAMetalLayer layer];
   layer.device = MTLCreateSystemDefaultDevice ();
-  layer.pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
+  layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
   layer.framebufferOnly = YES;
   return layer;
 }

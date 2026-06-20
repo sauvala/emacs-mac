@@ -339,7 +339,7 @@ create_pipelines (void)
       = [[MTLRenderPipelineDescriptor alloc] init];
     desc.vertexFunction = vertex_fn;
     desc.fragmentFunction = fragment_solid_fn;
-    desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
+    desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
     desc.colorAttachments[0].blendingEnabled = YES;
     desc.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
     desc.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
@@ -367,7 +367,7 @@ create_pipelines (void)
       = [[MTLRenderPipelineDescriptor alloc] init];
     desc.vertexFunction = vertex_fn;
     desc.fragmentFunction = fragment_textured_fn;
-    desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
+    desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
     desc.colorAttachments[0].blendingEnabled = YES;
     desc.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
     desc.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
@@ -399,7 +399,7 @@ create_backbuffer (emacs_metal_context_t *ctx)
 {
   MTLTextureDescriptor *desc
     = [MTLTextureDescriptor
-        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm_sRGB
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                      width:(NSUInteger)(ctx->width * ctx->scale)
                                     height:(NSUInteger)(ctx->height * ctx->scale)
                                  mipmapped:NO];

@@ -129,6 +129,12 @@
 	     "if (!ctx->backbuffer_dirty)[\0-\377]*return;[^\0]*emacs_metal_schedule_presentation"
 	     frame-end-body))))
 
+(ert-deftest macmetal-uses-byte-exact-color-render-targets ()
+  "Metal render targets should preserve Emacs sRGB color bytes."
+  (let ((source (macmetal-tests--source)))
+    (should (string-match-p "MTLPixelFormatBGRA8Unorm" source))
+    (should-not (string-match-p "MTLPixelFormatBGRA8Unorm_sRGB" source))))
+
 (ert-deftest macmetal-scroll-can-avoid-staging-for-bounded-axis-aligned-copies ()
   "Axis-aligned scrolls should avoid staging when ordered direct chunks are bounded."
   (let ((source (macmetal-tests--source))

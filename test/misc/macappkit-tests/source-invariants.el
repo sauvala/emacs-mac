@@ -101,6 +101,14 @@
     (should (string-match-p "\\[self updateBackingScaleFactor\\]"
                             window-screen-body))))
 
+(ert-deftest macappkit-metal-layer-uses-byte-exact-pixel-format ()
+  "Metal layer should preserve Emacs sRGB color bytes without re-encoding."
+  (let ((body (macappkit-tests--method-body
+               "- (CALayer *)makeBackingLayer"
+               "\n- (BOOL)wantsLayer")))
+    (should (string-match-p "MTLPixelFormatBGRA8Unorm" body))
+    (should-not (string-match-p "MTLPixelFormatBGRA8Unorm_sRGB" body))))
+
 (ert-deftest macappkit-emacs-view-posts-frame-change-notifications ()
   "Emacs frame dimensions must be updated when the AppKit view frame changes."
   (let ((body (macappkit-tests--method-body
