@@ -122,7 +122,6 @@ static NSString *const metal_shader_source = @
 #define METAL_MAX_ACTIVE_CLIP_RECTS (128)
 #define METAL_MAX_BATCH_CLIP_RECTS (16384)
 #define METAL_IMAGE_CACHE_SIZE (64)
-#define METAL_SCROLL_DIRECT_MAX_BLITS (16)
 
 typedef struct {
     float position[2];
@@ -1861,92 +1860,6 @@ emacs_metal_reset_clip (emacs_metal_context_t *ctx)
     render_stats.clip_reset_skips++;
 }
 
-static void
-scroll_copy_region (id<MTLBlitCommandEncoder> blit,
-                    id<MTLTexture> texture,
-                    int src_x, int src_y, int width, int height,
-                    int dest_x, int dest_y)
-{
-  [blit copyFromTexture:texture
-            sourceSlice:0
-            sourceLevel:0
-           sourceOrigin:MTLOriginMake (src_x, src_y, 0)
-             sourceSize:MTLSizeMake (width, height, 1)
-              toTexture:texture
-       destinationSlice:0
-       destinationLevel:0
-      destinationOrigin:MTLOriginMake (dest_x, dest_y, 0)];
-}
-
-/* Metal does not guarantee useful results for overlapping same-texture blits.
-   For bounded axis-aligned scrolls, split the copy into ordered bands or
-   columns whose individual source and destination rectangles do not overlap.
-   Fall back to staging when this would require too many copy commands.  */
-static bool
-scroll_backbuffer_in_place (emacs_metal_context_t *ctx,
-                            id<MTLCommandBuffer> cmd,
-                            int sx, int sy, int sw, int sh,
-                            int sdx, int sdy,
-                            uintmax_t *scroll_blit_count,
-                            uintmax_t *scroll_blit_bytes)
-{
-  if ((sdx != 0 && sdy != 0) || (sdx == 0 && sdy == 0))
-    return false;
-
-  int step = sdy != 0 ? abs (sdy) : abs (sdx);
-  int extent = sdy != 0 ? sh : sw;
-  if (step <= 0 || extent <= 0)
-    return false;
-
-  int chunk_count = (extent + step - 1) / step;
-  if (chunk_count > METAL_SCROLL_DIRECT_MAX_BLITS)
-    return false;
-
-  id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-
-  if (sdy > 0)
-    for (int offset = sh; offset > 0; offset -= step)
-      {
-        int chunk = MIN (step, offset);
-        int chunk_y = sy + offset - chunk;
-        scroll_copy_region (blit, ctx->backbuffer,
-                            sx, chunk_y, sw, chunk,
-                            sx, chunk_y + sdy);
-      }
-  else if (sdy < 0)
-    for (int offset = 0; offset < sh; offset += step)
-      {
-        int chunk = MIN (step, sh - offset);
-        int chunk_y = sy + offset;
-        scroll_copy_region (blit, ctx->backbuffer,
-                            sx, chunk_y, sw, chunk,
-                            sx, chunk_y + sdy);
-      }
-  else if (sdx > 0)
-    for (int offset = sw; offset > 0; offset -= step)
-      {
-        int chunk = MIN (step, offset);
-        int chunk_x = sx + offset - chunk;
-        scroll_copy_region (blit, ctx->backbuffer,
-                            chunk_x, sy, chunk, sh,
-                            chunk_x + sdx, sy);
-      }
-  else
-    for (int offset = 0; offset < sw; offset += step)
-      {
-        int chunk = MIN (step, sw - offset);
-        int chunk_x = sx + offset;
-        scroll_copy_region (blit, ctx->backbuffer,
-                            chunk_x, sy, chunk, sh,
-                            chunk_x + sdx, sy);
-      }
-
-  [blit endEncoding];
-  *scroll_blit_count = (uintmax_t) chunk_count;
-  *scroll_blit_bytes = (uintmax_t) sw * sh * 4;
-  return true;
-}
-
 void
 emacs_metal_scroll (emacs_metal_context_t *ctx,
                     int x, int y, int w, int h,
@@ -1967,46 +1880,44 @@ emacs_metal_scroll (emacs_metal_context_t *ctx,
     return;
   flush_render_batches (ctx, cmd);
 
-  if (!scroll_backbuffer_in_place (ctx, cmd, sx, sy, sw, sh, sdx, sdy,
-                                   &scroll_blit_count, &scroll_blit_bytes))
+  /* Metal does not guarantee useful results for overlapping same-texture
+     blits.  Always stage scroll copies through a separate texture so scroll
+     preservation behaves like the Core Graphics backing-store path.  */
+  if (!ctx->scroll_staging
+      || ctx->scroll_staging_w < sw
+      || ctx->scroll_staging_h < sh)
     {
-      /* Ensure staging texture is large enough.  */
-      if (!ctx->scroll_staging
-          || ctx->scroll_staging_w < sw
-          || ctx->scroll_staging_h < sh)
-        {
-          MTLTextureDescriptor *desc =
-            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:ctx->backbuffer.pixelFormat
-                                                              width:sw height:sh
-                                                          mipmapped:NO];
-          desc.storageMode = MTLStorageModePrivate;
-          desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-          ctx->scroll_staging = [shared_device newTextureWithDescriptor:desc];
-          ctx->scroll_staging_w = sw;
-          ctx->scroll_staging_h = sh;
-        }
-
-      id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-      /* Copy source region to staging.  */
-      [blit copyFromTexture:ctx->backbuffer
-                sourceSlice:0 sourceLevel:0
-               sourceOrigin:MTLOriginMake (sx, sy, 0)
-                 sourceSize:MTLSizeMake (sw, sh, 1)
-                  toTexture:ctx->scroll_staging
-           destinationSlice:0 destinationLevel:0
-          destinationOrigin:MTLOriginMake (0, 0, 0)];
-      /* Copy staging to destination.  */
-      [blit copyFromTexture:ctx->scroll_staging
-                sourceSlice:0 sourceLevel:0
-               sourceOrigin:MTLOriginMake (0, 0, 0)
-                 sourceSize:MTLSizeMake (sw, sh, 1)
-                  toTexture:ctx->backbuffer
-           destinationSlice:0 destinationLevel:0
-          destinationOrigin:MTLOriginMake (sx + sdx, sy + sdy, 0)];
-      [blit endEncoding];
-      scroll_blit_count = 2;
-      scroll_blit_bytes = (uintmax_t) sw * sh * 4 * 2;
+      MTLTextureDescriptor *desc =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:ctx->backbuffer.pixelFormat
+                                                          width:sw height:sh
+                                                      mipmapped:NO];
+      desc.storageMode = MTLStorageModePrivate;
+      desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+      ctx->scroll_staging = [shared_device newTextureWithDescriptor:desc];
+      ctx->scroll_staging_w = sw;
+      ctx->scroll_staging_h = sh;
     }
+  if (!ctx->scroll_staging)
+    return;
+
+  id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+  [blit copyFromTexture:ctx->backbuffer
+            sourceSlice:0 sourceLevel:0
+           sourceOrigin:MTLOriginMake (sx, sy, 0)
+             sourceSize:MTLSizeMake (sw, sh, 1)
+              toTexture:ctx->scroll_staging
+       destinationSlice:0 destinationLevel:0
+      destinationOrigin:MTLOriginMake (0, 0, 0)];
+  [blit copyFromTexture:ctx->scroll_staging
+            sourceSlice:0 sourceLevel:0
+           sourceOrigin:MTLOriginMake (0, 0, 0)
+             sourceSize:MTLSizeMake (sw, sh, 1)
+              toTexture:ctx->backbuffer
+       destinationSlice:0 destinationLevel:0
+      destinationOrigin:MTLOriginMake (sx + sdx, sy + sdy, 0)];
+  [blit endEncoding];
+  scroll_blit_count = 2;
+  scroll_blit_bytes = (uintmax_t) sw * sh * 4 * 2;
 
   render_stats.blits += scroll_blit_count;
   render_stats.blit_bytes += scroll_blit_bytes;

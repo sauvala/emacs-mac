@@ -135,13 +135,14 @@
     (should (string-match-p "MTLPixelFormatBGRA8Unorm" source))
     (should-not (string-match-p "MTLPixelFormatBGRA8Unorm_sRGB" source))))
 
-(ert-deftest macmetal-scroll-can-avoid-staging-for-bounded-axis-aligned-copies ()
-  "Axis-aligned scrolls should avoid staging when ordered direct chunks are bounded."
+(ert-deftest macmetal-scrolls-through-staging-texture ()
+  "Scroll preservation should avoid same-texture overlapping blits."
   (let ((source (macmetal-tests--source))
         (scroll-body (macmetal-tests--function-body "emacs_metal_scroll")))
-    (should (string-match-p "METAL_SCROLL_DIRECT_MAX_BLITS" source))
-    (should (string-match-p "scroll_backbuffer_in_place" source))
-    (should (string-match-p "scroll_backbuffer_in_place" scroll-body))
+    (should (string-match-p "scroll_staging" scroll-body))
+    (should (string-match-p "ctx->scroll_staging" scroll-body))
+    (should-not (string-match-p "scroll_backbuffer_in_place" source))
+    (should-not (string-match-p "METAL_SCROLL_DIRECT_MAX_BLITS" source))
     (should (string-match-p
              (regexp-quote "render_stats.scroll_blits += scroll_blit_count")
              scroll-body))
@@ -149,8 +150,8 @@
              (regexp-quote "render_stats.scroll_blit_bytes += scroll_blit_bytes")
              scroll-body))
     (should (string-match-p
-             "scroll_blit_bytes = (uintmax_t) sw \\* sh \\* 4"
-             source))))
+             "scroll_blit_bytes = (uintmax_t) sw \\* sh \\* 4 \\* 2"
+             scroll-body))))
 
 (ert-deftest macmetal-records-glyph-cache-counters ()
   "Metal should count glyph cache hits and misses for tuning atlas behavior."
