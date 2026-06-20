@@ -55,6 +55,12 @@ If you'd like to build with tree-sitter support, native-compilation, and RSVG (a
 brew install tree-sitter libgccjit librsvg
 ```
 
+Native compilation on macOS uses `libgccjit` and GCC runtime support
+libraries.  Nemesis records the GCC runtime library directory during
+configure when Homebrew or MacPorts provides it, so Finder-launched
+self-contained apps can compile ELN trampolines without relying on shell
+startup files to put Homebrew paths in the environment.
+
 #### Tree Sitter in Emacs 30
 
 If you'd like to build Emacs 30 (build on [this branch](https://github.com/jdtsmith/emacs-mac/tree/emacs-mac-30_1_exp)) with tree-sitter support, you'll need to install the older version `tree-sitter-0.25` to maintain compatibility.  For example:
@@ -182,7 +188,9 @@ The `nemesis` branch tracks GNU Emacs master and adds the following on top of th
 - **Scroll path optimization**: Try reusing the current glyph matrix before falling back to full window redisplay during scrolling, significantly reducing per-scroll cost for long wrapped continuation lines.
 - **Long-line bidi optimization**: Disable bidi reordering when long-line optimizations are active, preventing O(n) bidi cache degradation on large single-line files.
 - **Metal renderer instrumentation**: Added render counters for batches, vertices, texture uploads, blits, clip overdraw, glyph cache hits/misses, and drawable wait timing so performance work can be measured rather than guessed.
-- **Metal renderer optimizations**: Reduced transient Metal allocations, reused glyph raster scratch buffers, preserved multi-rect clipping through batching, and added bounded scroll-copy and presentation blit paths.
+- **Metal renderer optimizations**: Reduced transient Metal allocations, reused glyph raster scratch buffers, preserved multi-rect clipping through batching, and added staged scroll-copy and presentation blit paths.
+- **Metal color fidelity**: Use byte-exact BGRA render targets for the Metal layer, pipelines, and backbuffer so Metal rendering preserves the same face color values as the Core Graphics path.
+- **Metal scroll artifact fix**: Stage scroll-preservation copies through a separate Metal texture instead of relying on overlapping same-texture blits, avoiding moving horizontal artifacts while scrolling.
 - **Metal presentation coalescing**: Split backbuffer flush from presentation, added coalesced and final-present scheduling, and moved presentation work to a context-owned serial presenter queue so `nextDrawable` no longer blocks the main event loop.
 - **Metal benchmark harness**: Added automated GUI benchmark runs and source-invariant tests to compare renderer behavior across redisplay scenarios.
 - **Rope data structure** (experimental, `--with-rope`): Alternative text storage backend using a B-tree sumtree rope with 128-byte leaf chunks. Provides O(log n) insert/delete/replace and O(log n) line counting via aggregated summaries at each tree node. Per-buffer opt-in via `(buffer-enable-rope)` or `(rope-enable-default)` for new buffers. Build with `./configure --with-rope` to enable.
