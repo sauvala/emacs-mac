@@ -1158,11 +1158,11 @@ hg binary."
         (t
          ;; We can't simply decrement by 1, because that revision might
          ;; be e.g. on a different branch (bug#22032).
-         (with-temp-buffer
-           (and (zerop (vc-hg-command t nil nil "id" "-n"
-                                      "-r" (concat rev "~1")))
-                ;; Trim the trailing newline.
-                (buffer-substring (point-min) (1- (point-max))))))))
+         (with-output-to-string
+           (vc-hg-command standard-output 0 nil "log"
+                          "-r" (format "revset(%s~1)" rev)
+                          "--template" (if vc-use-short-revision
+                                           "{node|short}" "{node}"))))))
 
 (defun vc-hg-next-revision (_file rev)
   (let ((newrev (1+ (string-to-number rev)))
@@ -2014,6 +2014,11 @@ This is based on the following assumptions:
     whatever the remote head is
 (ii) there is only one remote head for the current branch."
   (cdr (assq 'branch (vc-hg--working-branch))))
+
+(declare-function vc-standard-log-outgoing "vc")
+
+(defun vc-hg-log-outgoing (buffer upstream-location)
+  (vc-standard-log-outgoing 'Hg buffer upstream-location 'skip-mergebase))
 
 (provide 'vc-hg)
 
