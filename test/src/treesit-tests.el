@@ -20,6 +20,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'elisp-worker)
 (require 'treesit)
 
 (declare-function treesit-language-available-p "treesit.c")
@@ -38,6 +39,12 @@
 (declare-function treesit-query-expand "treesit.c")
 (declare-function treesit-query-compile "treesit.c")
 (declare-function treesit-query-capture "treesit.c")
+
+(defvar treesit--async-worker-pool)
+
+(declare-function treesit--async-query-string-spans "treesit"
+                  (string query language &rest args))
+(declare-function treesit--async-shutdown-workers "treesit" ())
 
 (declare-function treesit-node-type "treesit.c")
 (declare-function treesit-node-start "treesit.c")
@@ -67,6 +74,30 @@
 
 
 ;;; Basic API
+
+(ert-deftest treesit-async-query-string-spans ()
+  "Tree-sitter query captures can be computed in a worker process."
+  (skip-unless (treesit-language-available-p 'json))
+  (let ((old-pool treesit--async-worker-pool)
+        result)
+    (setq treesit--async-worker-pool nil)
+    (unwind-protect
+        (progn
+          (treesit--async-query-string-spans
+           "{\"name\":\"Bob\"}"
+           '((string) @font-lock-string-face)
+           'json
+           :success-fn (lambda (spans)
+                         (setq result spans)))
+          (with-timeout (3 (ert-fail "Timed out waiting for async tree-sitter query"))
+            (while (not result)
+              (accept-process-output nil 0.01)))
+          (should (equal result
+                         '((font-lock-string-face 2 8)
+                           (font-lock-string-face 9 14)))))
+      (when treesit--async-worker-pool
+        (treesit--async-shutdown-workers))
+      (setq treesit--async-worker-pool old-pool))))
 
 (ert-deftest treesit-basic-parsing ()
   "Test basic parsing routines."

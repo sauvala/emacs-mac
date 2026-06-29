@@ -60,6 +60,11 @@
 (require 'seq)
 (require 'prog-mode) ; For `prog--text-at-point-p'.
 
+(declare-function elisp-worker-pool-start "elisp-worker" (size &optional name))
+(declare-function elisp-worker-pool-shutdown "elisp-worker" (pool))
+(declare-function elisp-worker-pool-async-eval "elisp-worker"
+                  (pool form &rest args))
+
 ;;; Function declarations
 
 (defmacro treesit-declare-unavailable-functions ()
@@ -166,6 +171,14 @@ buffer it parses.  Also, the tree-sitter library has a hard limit
 of max unsigned 32-bit value for byte offsets into buffer text."
   :type 'integer
   :version "29.1")
+
+(defcustom treesit-async-worker-pool-size 2
+  "Number of helper Emacs processes used for async tree-sitter work."
+  :type 'natnum
+  :safe (lambda (value)
+          (and (integerp value) (> value 0)))
+  :group 'treesit
+  :version "31.1")
 
 ;;; Parser API supplement
 
@@ -549,6 +562,64 @@ See `treesit-query-capture' for QUERY."
       (treesit-query-capture
        (treesit-parser-root-node parser)
        query))))
+
+(defvar treesit--async-worker-pool nil
+  "Worker pool used for async tree-sitter work.")
+
+(defun treesit--async-worker-pool ()
+  "Return the lazy async tree-sitter worker pool."
+  (require 'elisp-worker)
+  (unless treesit--async-worker-pool
+    (setq treesit--async-worker-pool
+          (elisp-worker-pool-start treesit-async-worker-pool-size
+                                   "treesit-worker")))
+  treesit--async-worker-pool)
+
+(defun treesit--async-shutdown-workers ()
+  "Shut down async tree-sitter worker processes."
+  (when treesit--async-worker-pool
+    (elisp-worker-pool-shutdown treesit--async-worker-pool)
+    (setq treesit--async-worker-pool nil)))
+
+(defun treesit--async-query-string-spans-form
+    (string query language &optional offset)
+  "Return a worker form querying STRING with QUERY in LANGUAGE.
+The returned worker value is a list of (CAPTURE START END), where START
+and END are adjusted by OFFSET."
+  `(progn
+     (require 'treesit)
+     (with-temp-buffer
+       (insert ,string)
+       (let* ((parser (treesit-parser-create ',language))
+              (captures (treesit-query-capture
+                         (treesit-parser-root-node parser)
+                         ',query))
+              (offset ,(or offset 0))
+              spans)
+         (dolist (capture captures)
+           (let ((node (cdr capture)))
+             (push (list (car capture)
+                         (+ offset (treesit-node-start node))
+                         (+ offset (treesit-node-end node)))
+                   spans)))
+         (nreverse spans)))))
+
+(cl-defun treesit--async-query-string-spans
+    (string query language &key success-fn error-fn offset)
+  "Asynchronously query STRING with QUERY in LANGUAGE.
+SUCCESS-FN is called with a list of (CAPTURE START END).  ERROR-FN,
+when non-nil, is called with the worker error message and data.  OFFSET
+is added to each returned position."
+  (let ((form (treesit--async-query-string-spans-form
+               string query language offset))
+        (pool (treesit--async-worker-pool)))
+    (elisp-worker-pool-async-eval
+     pool form
+     :success-fn success-fn
+     :error-fn (or error-fn
+                   (lambda (message _data)
+                     (message "Async tree-sitter worker failed: %s"
+                              message))))))
 
 (defsubst treesit--range-start (range)
   "Return the start of RANGE.
