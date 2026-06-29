@@ -177,7 +177,9 @@
 ;;
 ;;   If a command needs to be run to compute this list, it should be
 ;;   run asynchronously using (current-buffer) as the buffer for the
-;;   command.
+;;   command.  It should respect `vc-dir-process-output-limit', usually
+;;   by calling `vc-dir-maybe-narrow-and-show-more-button' to narrow the
+;;   output buffer before processing it.
 ;;
 ;;   When RESULT is computed, it should be passed back by doing:
 ;;   (funcall UPDATE-FUNCTION RESULT nil).  If the backend uses a
@@ -4779,8 +4781,9 @@ mark."
   (interactive "r")
   (let* ((lfrom (line-number-at-pos from t))
          (lto   (line-number-at-pos (1- to) t))
-         (file buffer-file-name)
-         (backend (vc-backend file))
+         (fileset (vc-deduce-fileset t))
+         (backend (car fileset))
+         (file (caadr fileset))
          (buf (get-buffer-create "*VC-history*")))
     (unless backend
       (error "Buffer is not version controlled"))
@@ -4790,7 +4793,7 @@ mark."
     (with-current-buffer buf
       (vc-call-backend backend 'region-history-mode)
       (setq-local log-view-vc-backend backend)
-      (setq-local log-view-vc-fileset (list file))
+      (setq-local log-view-vc-fileset (cadr fileset))
       (setq-local revert-buffer-function
                   (lambda (_ignore-auto _noconfirm)
                     (with-current-buffer buf
@@ -4856,6 +4859,8 @@ to the working revision (except for keyword expansion)."
 ;;;###autoload
 (defalias 'vc-restore #'vc-revert)
 
+(declare-function vc-dir--refresh-headers "vc-dir")
+
 ;;;###autoload
 (defun vc-pull (&optional arg)
   "Update the current fileset or branch.
@@ -4893,7 +4898,9 @@ tip revision are merged into the working file."
       ;; FIXME: Ideally we would only clear out the stored value for the
       ;; REMOTE-LOCATION from which we are pulling.
       (vc-run-delayed
-        (vc--repo-setprop backend 'vc-incoming-revision nil)))
+        (vc--repo-setprop backend 'vc-incoming-revision nil)
+        (when vc-dir-buffers
+          (vc-dir--refresh-headers (vc-root-dir backend)))))
      ;; If VCS has `merge-news' functionality (CVS and SVN), use it.
      ((vc-find-backend-function backend 'merge-news)
       (save-some-buffers                ; save buffers visiting files
@@ -4936,7 +4943,9 @@ It also signals an error in a Bazaar bound branch."
                ;; FIXME: Ideally we would only clear out the
                ;; REMOTE-LOCATION to which we are pushing.
                (vc-run-delayed
-                 (vc--repo-setprop backend 'vc-incoming-revision nil)))
+                 (vc--repo-setprop backend 'vc-incoming-revision nil)
+                 (when vc-dir-buffers
+                   (vc-dir--refresh-headers (vc-root-dir backend)))))
       (user-error "VC push is unsupported for `%s'" backend))))
 
 ;;;###autoload
@@ -4993,11 +5002,11 @@ If FILE is a directory, revert all files inside that directory."
                            (vc-responsible-backend file)
                          (vc-backend file))
                        'revert file backup-file))
-    `((vc-state . ,(if (eq (vc-state file) 'added)
-                       'unregistered
-                     'up-to-date))
-      (vc-checkout-time
-       . ,(file-attribute-modification-time (file-attributes file)))))
+    (let ((state (vc-state file)))
+      `(,@(and (eq state 'added) '((vc-backend . nil)))
+        (vc-state . ,(if (eq state 'added) 'unregistered 'up-to-date))
+        (vc-checkout-time
+         . ,(file-attribute-modification-time (file-attributes file))))))
   (vc-resynch-buffer file t t))
 
 (defun vc-revert-files (backend files)
@@ -5013,7 +5022,7 @@ For entries in FILES that are directories, revert all files inside them."
         ;; Use `vc-file-getprop' directly here because we may be
         ;; handling very many files and do not want to hit the disk.
         `(,@(pcase (vc-file-getprop file 'vc-state)
-              ('added '((vc-state . unregistered)))
+              ('added '((vc-backend . nil) (vc-state . unregistered)))
               ;; If we have no known state for the file somehow, leave
               ;; it that way.
               ('nil nil)
