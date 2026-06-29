@@ -507,26 +507,53 @@ Return a plist with commit progress metrics."
     (elisp-worker-pool-shutdown font-lock--async-worker-pool)
     (setq font-lock--async-worker-pool nil)))
 
-(defun font-lock--async-simple-keywords-p (keywords)
-  "Return non-nil if KEYWORDS can be prepared asynchronously."
-  (and (consp keywords)
-       (not (eq (car keywords) t))
-       (catch 'unsupported
-         (dolist (spec keywords t)
-           (unless (or (and (consp spec)
-                            (stringp (car spec))
-                            (symbolp (cdr spec)))
-                       (and (consp spec)
-                            (stringp (car spec))
-                            (consp (cdr spec))
-                            (numberp (cadr spec))
-                            (symbolp (nth 2 spec))))
-             (throw 'unsupported nil))))))
+(defun font-lock--async-normalize-simple-keywords (keywords)
+  "Return worker-safe simple KEYWORDS, or nil if unsupported.
+The returned value contains only elements of the form (REGEXP SUBEXP FACE)."
+  (catch 'unsupported
+    (cond
+     ((not (consp keywords))
+      nil)
+     ((eq (car keywords) t)
+      (let (normalized)
+        (dolist (keyword (cddr keywords))
+          (unless (and (consp keyword)
+                       (stringp (car keyword)))
+            (throw 'unsupported nil))
+          (dolist (highlight (cdr keyword))
+            (unless (and (consp highlight)
+                         (numberp (car highlight))
+                         (symbolp (cadr highlight))
+                         (not (nth 2 highlight)))
+              (throw 'unsupported nil))
+            (push (list (car keyword)
+                        (car highlight)
+                        (cadr highlight))
+                  normalized)))
+        (nreverse normalized)))
+     (t
+      (let (normalized)
+        (dolist (spec keywords)
+          (cond
+           ((and (consp spec)
+                 (stringp (car spec))
+                 (symbolp (cdr spec)))
+            (push (list (car spec) 0 (cdr spec)) normalized))
+           ((and (consp spec)
+                 (stringp (car spec))
+                 (consp (cdr spec))
+                 (numberp (cadr spec))
+                 (symbolp (nth 2 spec))
+                 (not (nth 3 spec)))
+            (push (list (car spec) (cadr spec) (nth 2 spec)) normalized))
+           (t
+            (throw 'unsupported nil))))
+        (nreverse normalized))))))
 
 (defun font-lock--async-simple-span-form (text keywords case-fold offset)
   "Return a worker form computing simple font-lock spans.
-TEXT is the immutable buffer snapshot.  KEYWORDS currently supports simple
-regexp-face specs of the form (REGEXP . FACE) and (REGEXP SUBEXP FACE).
+TEXT is the immutable buffer snapshot.  KEYWORDS contains simple
+regexp-face specs of the form (REGEXP SUBEXP FACE).
 OFFSET converts worker-buffer positions to source-buffer positions."
   `(let ((text ,text)
          (keywords ',keywords)
@@ -537,19 +564,9 @@ OFFSET converts worker-buffer positions to source-buffer positions."
        (insert text)
        (dolist (spec keywords)
          (let (regexp subexp face)
-           (cond
-            ((and (consp spec)
-                  (stringp (car spec))
-                  (consp (cdr spec))
-                  (numberp (cadr spec)))
-             (setq regexp (car spec)
-                   subexp (cadr spec)
-                   face (nth 2 spec)))
-            ((and (consp spec)
-                  (stringp (car spec)))
-             (setq regexp (car spec)
-                   subexp 0
-                   face (cdr spec))))
+           (setq regexp (car spec)
+                 subexp (cadr spec)
+                 face (nth 2 spec))
            (when (and regexp face)
              (goto-char (point-min))
              (while (re-search-forward regexp nil t)
@@ -574,23 +591,24 @@ OFFSET converts worker-buffer positions to source-buffer positions."
 This is an internal, snapshot-based path for async font-lock preparation.
 It currently supports simple regexp-face specs of the form (REGEXP . FACE)
 and (REGEXP SUBEXP FACE)."
-  (let* ((buffer (current-buffer))
-         (tick (buffer-chars-modified-tick))
-         (text (buffer-substring-no-properties beg end))
-         (case-fold font-lock-keywords-case-fold-search)
-         (form (font-lock--async-simple-span-form text keywords
-                                                  case-fold (1- beg)))
-         (pool (font-lock--async-worker-pool)))
-    (elisp-worker-pool-async-eval
-     pool
-     form
-     :success-fn
-     (lambda (spans)
-       (font-lock--queue-commit
-        buffer tick #'font-lock--apply-async-spans spans))
-     :error-fn
-     (lambda (message _data)
-       (message "Async font-lock worker failed: %s" message)))))
+  (when-let* ((keywords (font-lock--async-normalize-simple-keywords keywords)))
+    (let* ((buffer (current-buffer))
+           (tick (buffer-chars-modified-tick))
+           (text (buffer-substring-no-properties beg end))
+           (case-fold font-lock-keywords-case-fold-search)
+           (form (font-lock--async-simple-span-form text keywords
+                                                    case-fold (1- beg)))
+           (pool (font-lock--async-worker-pool)))
+      (elisp-worker-pool-async-eval
+       pool
+       form
+       :success-fn
+       (lambda (spans)
+         (font-lock--queue-commit
+          buffer tick #'font-lock--apply-async-spans spans))
+       :error-fn
+       (lambda (message _data)
+         (message "Async font-lock worker failed: %s" message))))))
 
 (defvar font-lock-keywords nil
   "A list of keywords and corresponding font-lock highlighting rules.
@@ -1421,9 +1439,11 @@ This function is the default `font-lock-fontify-region-function'."
          (font-lock-fontify-syntactic-keywords-region start end)))
      (unless font-lock-keywords-only
        (font-lock-fontify-syntactically-region beg end loudly))
-     (if (and font-lock-async-keywords
-              (font-lock--async-simple-keywords-p font-lock-keywords))
-         (font-lock--async-fontify-region beg end font-lock-keywords)
+     (if-let* ((async-keywords
+                (and font-lock-async-keywords
+                     (font-lock--async-normalize-simple-keywords
+                      font-lock-keywords))))
+         (font-lock--async-fontify-region beg end async-keywords)
        (font-lock-fontify-keywords-region beg end loudly))
      `(jit-lock-bounds ,beg . ,end))))
 
