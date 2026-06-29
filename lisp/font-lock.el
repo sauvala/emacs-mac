@@ -209,6 +209,11 @@
 (require 'syntax)
 (eval-when-compile (require 'subr-x))
 
+(declare-function elisp-worker-pool-start "elisp-worker" (size &optional name))
+(declare-function elisp-worker-pool-shutdown "elisp-worker" (pool))
+(declare-function elisp-worker-pool-async-eval "elisp-worker"
+                  (pool form &rest args))
+
 ;; Define core `font-lock' group.
 (defgroup font-lock '((jit-lock custom-group))
   "Font Lock mode text highlighting package."
@@ -317,6 +322,14 @@ queued commit and then yield once the budget is exhausted."
   :group 'font-lock
   :version "31.1")
 
+(defcustom font-lock-async-worker-pool-size 2
+  "Number of helper Emacs processes used for async font-lock preparation."
+  :type 'natnum
+  :safe (lambda (value)
+          (and (integerp value) (> value 0)))
+  :group 'font-lock
+  :version "31.1")
+
 
 ;; Obsolete face variables.
 
@@ -414,6 +427,9 @@ This can be an \"!\" or the \"n\" in \"ifndef\".")
 (defvar font-lock--commit-timer nil
   "Timer used to dispatch `font-lock--commit-queue'.")
 
+(defvar font-lock--async-worker-pool nil
+  "Worker pool used for async font-lock preparation.")
+
 (defun font-lock--commit-dispatch-budget ()
   "Return the active font-lock commit dispatch budget, or nil."
   (and (numberp font-lock-commit-dispatch-budget)
@@ -466,6 +482,89 @@ Return a plist with commit progress metrics."
               :remaining (length font-lock--commit-queue)))
     (when font-lock--commit-queue
       (font-lock--ensure-commit-timer))))
+
+(defun font-lock--async-worker-pool ()
+  "Return the lazy async font-lock worker pool."
+  (require 'elisp-worker)
+  (unless font-lock--async-worker-pool
+    (setq font-lock--async-worker-pool
+          (elisp-worker-pool-start font-lock-async-worker-pool-size
+                                   "font-lock-worker")))
+  font-lock--async-worker-pool)
+
+(defun font-lock--async-shutdown-workers ()
+  "Shut down async font-lock worker processes."
+  (when font-lock--async-worker-pool
+    (elisp-worker-pool-shutdown font-lock--async-worker-pool)
+    (setq font-lock--async-worker-pool nil)))
+
+(defun font-lock--async-simple-span-form (text keywords case-fold offset)
+  "Return a worker form computing simple font-lock spans.
+TEXT is the immutable buffer snapshot.  KEYWORDS currently supports simple
+regexp-face specs of the form (REGEXP . FACE) and (REGEXP SUBEXP FACE).
+OFFSET converts worker-buffer positions to source-buffer positions."
+  `(let ((text ,text)
+         (keywords ',keywords)
+         (case-fold-search ,case-fold)
+         (offset ,offset)
+         spans)
+     (with-temp-buffer
+       (insert text)
+       (dolist (spec keywords)
+         (let (regexp subexp face)
+           (cond
+            ((and (consp spec)
+                  (stringp (car spec))
+                  (consp (cdr spec))
+                  (numberp (cadr spec)))
+             (setq regexp (car spec)
+                   subexp (cadr spec)
+                   face (nth 2 spec)))
+            ((and (consp spec)
+                  (stringp (car spec)))
+             (setq regexp (car spec)
+                   subexp 0
+                   face (cdr spec))))
+           (when (and regexp face)
+             (goto-char (point-min))
+             (while (re-search-forward regexp nil t)
+               (let ((start (match-beginning subexp))
+                     (end (match-end subexp)))
+                 (when (and start end (< start end))
+                   (push (list (+ offset start)
+                               (+ offset end)
+                               face)
+                         spans)))))))
+       (nreverse spans))))
+
+(defun font-lock--apply-async-spans (spans)
+  "Apply async font-lock SPANS in the current buffer."
+  (dolist (span spans)
+    (pcase-let ((`(,start ,end ,face) span))
+      (put-text-property start end 'face face))))
+
+(defun font-lock--async-fontify-region (beg end keywords)
+  "Prepare simple KEYWORDS for BEG..END in a worker and commit later.
+This is an internal, snapshot-based path for async font-lock preparation.
+It currently supports simple regexp-face specs of the form (REGEXP . FACE)
+and (REGEXP SUBEXP FACE)."
+  (let* ((buffer (current-buffer))
+         (tick (buffer-chars-modified-tick))
+         (text (buffer-substring-no-properties beg end))
+         (case-fold font-lock-keywords-case-fold-search)
+         (form (font-lock--async-simple-span-form text keywords
+                                                  case-fold (1- beg)))
+         (pool (font-lock--async-worker-pool)))
+    (elisp-worker-pool-async-eval
+     pool
+     form
+     :success-fn
+     (lambda (spans)
+       (font-lock--queue-commit
+        buffer tick #'font-lock--apply-async-spans spans))
+     :error-fn
+     (lambda (message _data)
+       (message "Async font-lock worker failed: %s" message)))))
 
 (defvar font-lock-keywords nil
   "A list of keywords and corresponding font-lock highlighting rules.

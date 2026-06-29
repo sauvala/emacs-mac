@@ -19,7 +19,38 @@
 
 ;;; Code:
 (require 'ert)
+(require 'elisp-worker)
 (require 'font-lock)
+
+(defvar font-lock--async-worker-pool)
+(defvar font-lock--commit-queue)
+(defvar font-lock--commit-timer)
+(defvar font-lock-commit-dispatch-budget)
+
+(declare-function font-lock--async-fontify-region "font-lock"
+                  (beg end keywords))
+(declare-function font-lock--async-shutdown-workers "font-lock" ())
+(declare-function font-lock--dispatch-commits "font-lock" ())
+(declare-function font-lock--queue-commit "font-lock"
+                  (buffer tick function &rest args))
+
+(defun font-lock-tests--async-workers-idle-p ()
+  "Return non-nil if async font-lock workers have no outstanding callbacks."
+  (and font-lock--async-worker-pool
+       (let ((idle t))
+         (dolist (worker (elisp-worker-pool-workers font-lock--async-worker-pool))
+           (when (elisp-worker-callbacks worker)
+             (setq idle nil)))
+         idle)))
+
+(defun font-lock-tests--wait-for-async-font-lock-idle ()
+  "Wait for async font-lock workers and queued commits to become idle."
+  (with-timeout (3 (ert-fail "Timed out waiting for async font-lock"))
+    (while (not (and (font-lock-tests--async-workers-idle-p)
+                     (not font-lock--commit-queue)))
+      (accept-process-output nil 0.01)
+      (when font-lock--commit-queue
+        (font-lock--dispatch-commits)))))
 
 (ert-deftest font-lock-test-append-anonymous-face ()
   "Ensure `font-lock-append-text-property' does not splice anonymous faces."
@@ -101,6 +132,63 @@
       (when (timerp font-lock--commit-timer)
         (cancel-timer font-lock--commit-timer))
       (setq font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
+(ert-deftest font-lock-async-fontifies-simple-regexp-from-worker ()
+  "Worker-computed font-lock spans are committed to an unchanged buffer."
+  (let ((old-pool font-lock--async-worker-pool)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq font-lock--async-worker-pool nil
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "alpha beta alpha")
+          (font-lock--async-fontify-region
+           (point-min) (point-max)
+           '(("alpha" . font-lock-keyword-face)))
+          (with-timeout (3 (ert-fail "Timed out waiting for async font-lock"))
+            (while (not (get-text-property 1 'face))
+              (accept-process-output nil 0.01)
+              (when font-lock--commit-queue
+                (font-lock--dispatch-commits))))
+          (should (eq (get-text-property 1 'face)
+                      'font-lock-keyword-face))
+          (should-not (get-text-property 7 'face))
+          (should (eq (get-text-property 12 'face)
+                      'font-lock-keyword-face)))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when font-lock--async-worker-pool
+        (font-lock--async-shutdown-workers))
+      (setq font-lock--async-worker-pool old-pool
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
+(ert-deftest font-lock-async-drops-stale-worker-result ()
+  "Worker-computed font-lock spans are dropped after buffer mutation."
+  (let ((old-pool font-lock--async-worker-pool)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq font-lock--async-worker-pool nil
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "alpha")
+          (font-lock--async-fontify-region
+           (point-min) (point-max)
+           '(("alpha" . font-lock-keyword-face)))
+          (insert " changed")
+          (font-lock-tests--wait-for-async-font-lock-idle)
+          (should-not (get-text-property 1 'face)))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when font-lock--async-worker-pool
+        (font-lock--async-shutdown-workers))
+      (setq font-lock--async-worker-pool old-pool
+            font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
 
 ;; font-lock-tests.el ends here
