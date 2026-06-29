@@ -303,6 +303,20 @@ If a number, only buffers greater than this size have fontification messages."
   :group 'font-lock
   :version "24.1")
 
+(defcustom font-lock-commit-dispatch-budget 0.005
+  "Maximum seconds spent committing queued font-lock work per timer.
+The default is a small positive budget so large font-lock commit bursts
+yield back to the command loop.  If nil, drain the commit queue in one
+timer callback.  When this is a positive number, process at least one
+queued commit and then yield once the budget is exhausted."
+  :type '(choice (const :tag "Drain queue in one timer" nil)
+                 (number :tag "Seconds"))
+  :safe (lambda (value)
+          (or (null value)
+              (and (numberp value) (>= value 0))))
+  :group 'font-lock
+  :version "31.1")
+
 
 ;; Obsolete face variables.
 
@@ -393,6 +407,65 @@ This can be an \"!\" or the \"n\" in \"ifndef\".")
 
 
 ;; Fontification variables:
+
+(defvar font-lock--commit-queue nil
+  "Queued font-lock commits waiting to run in timer context.")
+
+(defvar font-lock--commit-timer nil
+  "Timer used to dispatch `font-lock--commit-queue'.")
+
+(defun font-lock--commit-dispatch-budget ()
+  "Return the active font-lock commit dispatch budget, or nil."
+  (and (numberp font-lock-commit-dispatch-budget)
+       (> font-lock-commit-dispatch-budget 0)
+       font-lock-commit-dispatch-budget))
+
+(defun font-lock--ensure-commit-timer ()
+  "Ensure a font-lock commit dispatch timer is active."
+  (unless (timerp font-lock--commit-timer)
+    (let ((timer (timer-create)))
+      (setq font-lock--commit-timer timer)
+      (timer-set-time timer (current-time))
+      (timer-set-function timer #'font-lock--dispatch-commits)
+      (timer-activate timer))))
+
+(defun font-lock--queue-commit (buffer tick function &rest args)
+  "Queue a font-lock commit for BUFFER if its modified TICK still matches.
+FUNCTION is called in BUFFER with ARGS.  If TICK is non-nil and BUFFER's
+modified tick changes before dispatch, the queued commit is dropped."
+  (setq font-lock--commit-queue
+        (nconc font-lock--commit-queue
+               (list (list buffer tick function args))))
+  (font-lock--ensure-commit-timer))
+
+(defun font-lock--dispatch-commits ()
+  "Dispatch queued font-lock commits.
+Return a plist with commit progress metrics."
+  (setq font-lock--commit-timer nil)
+  (unwind-protect
+      (let ((budget (font-lock--commit-dispatch-budget))
+            (started (float-time))
+            (processed 0)
+            (dropped 0))
+        (while (and font-lock--commit-queue
+                    (or (zerop (+ processed dropped))
+                        (not budget)
+                        (< (- (float-time) started) budget)))
+          (pcase-let ((`(,buffer ,tick ,function ,args)
+                       (pop font-lock--commit-queue)))
+            (if (and (buffer-live-p buffer)
+                     (or (not tick)
+                         (with-current-buffer buffer
+                           (= tick (buffer-chars-modified-tick)))))
+                (with-current-buffer buffer
+                  (apply function args)
+                  (setq processed (1+ processed)))
+              (setq dropped (1+ dropped)))))
+        (list :processed processed
+              :dropped dropped
+              :remaining (length font-lock--commit-queue)))
+    (when font-lock--commit-queue
+      (font-lock--ensure-commit-timer))))
 
 (defvar font-lock-keywords nil
   "A list of keywords and corresponding font-lock highlighting rules.
