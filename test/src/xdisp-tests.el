@@ -179,7 +179,6 @@ int main () {
         (buffer-string)))
     "foo\n")))
 
-<<<<<<< HEAD
 (ert-deftest xdisp-tests--long-line-redisplay-preserves-bidi-setting ()
   "Long-line redisplay should not mutate `bidi-display-reordering'."
   (let ((old-buffer (window-buffer)))
@@ -196,7 +195,7 @@ int main () {
             (should (eq bidi-display-reordering t))))
       (when (buffer-live-p old-buffer)
         (switch-to-buffer old-buffer)))))
-=======
+
 (ert-deftest xdisp-test-format-mode-line ()
   ;; 'format-mode-line' returns an empty string with no properties in
   ;; noninteractive sessions.
@@ -209,6 +208,5 @@ int main () {
              (propertize "x" 'face 'bold-italic)
              1200000000000000000000000000))
     (should (null (get-text-property 1 'face)))))
->>>>>>> gnu/master
 
 ;;; xdisp-tests.el ends here

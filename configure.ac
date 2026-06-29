@@ -5234,23 +5234,6 @@ You can find the instructions on how to compile and install libgccjit from
 source on this site:
 <https://gcc.gnu.org/wiki/JIT>.])])
 
-<<<<<<< HEAD
-HAVE_NATIVE_COMP=no
-LIBGCCJIT_LIBS=
-LIBGCCJIT_CFLAGS=
-MAC_NATIVE_COMP_DRIVER_LIBDIR=
-if test "$canonical" = i686-pc-cygwin; then
-  if test "${with_cygwin32_native_compilation}" = yes; then
-    with_native_compilation=yes
-  elif test "${with_native_compilation}" != no; then
-    AC_MSG_ERROR([Native compilation is not supported on 32-bit Cygwin.
-If you really want to try it anyway, use the configure option
-'--with-cygwin32-native-compilation'.])
-  fi
-fi
-
-=======
->>>>>>> gnu/master
 AC_DEFUN([libgccjit_not_found], [
   AC_MSG_WARN([Elisp native compiler can't be enabled as libgccjit was not
 found.
@@ -5287,6 +5270,7 @@ source on this site:
 HAVE_NATIVE_COMP=no
 LIBGCCJIT_LIBS=
 LIBGCCJIT_CFLAGS=
+MAC_NATIVE_COMP_DRIVER_LIBDIR=
 if test "$canonical" = i686-pc-cygwin; then
   if test "${with_cygwin32_native_compilation}" = yes; then
     with_native_compilation=yes
