@@ -330,6 +330,15 @@ queued commit and then yield once the budget is exhausted."
   :group 'font-lock
   :version "31.1")
 
+(defcustom font-lock-async-keywords nil
+  "If non-nil, schedule eligible keyword fontification in worker processes.
+Only simple regexp-face keyword specs are eligible.  Other keyword forms
+continue to use the synchronous font-lock path."
+  :type 'boolean
+  :safe 'booleanp
+  :group 'font-lock
+  :version "31.1")
+
 
 ;; Obsolete face variables.
 
@@ -498,6 +507,22 @@ Return a plist with commit progress metrics."
     (elisp-worker-pool-shutdown font-lock--async-worker-pool)
     (setq font-lock--async-worker-pool nil)))
 
+(defun font-lock--async-simple-keywords-p (keywords)
+  "Return non-nil if KEYWORDS can be prepared asynchronously."
+  (and (consp keywords)
+       (not (eq (car keywords) t))
+       (catch 'unsupported
+         (dolist (spec keywords t)
+           (unless (or (and (consp spec)
+                            (stringp (car spec))
+                            (symbolp (cdr spec)))
+                       (and (consp spec)
+                            (stringp (car spec))
+                            (consp (cdr spec))
+                            (numberp (cadr spec))
+                            (symbolp (nth 2 spec))))
+             (throw 'unsupported nil))))))
+
 (defun font-lock--async-simple-span-form (text keywords case-fold offset)
   "Return a worker form computing simple font-lock spans.
 TEXT is the immutable buffer snapshot.  KEYWORDS currently supports simple
@@ -539,9 +564,10 @@ OFFSET converts worker-buffer positions to source-buffer positions."
 
 (defun font-lock--apply-async-spans (spans)
   "Apply async font-lock SPANS in the current buffer."
-  (dolist (span spans)
-    (pcase-let ((`(,start ,end ,face) span))
-      (put-text-property start end 'face face))))
+  (with-silent-modifications
+    (dolist (span spans)
+      (pcase-let ((`(,start ,end ,face) span))
+        (put-text-property start end 'face face)))))
 
 (defun font-lock--async-fontify-region (beg end keywords)
   "Prepare simple KEYWORDS for BEG..END in a worker and commit later.
@@ -1395,7 +1421,10 @@ This function is the default `font-lock-fontify-region-function'."
          (font-lock-fontify-syntactic-keywords-region start end)))
      (unless font-lock-keywords-only
        (font-lock-fontify-syntactically-region beg end loudly))
-     (font-lock-fontify-keywords-region beg end loudly)
+     (if (and font-lock-async-keywords
+              (font-lock--async-simple-keywords-p font-lock-keywords))
+         (font-lock--async-fontify-region beg end font-lock-keywords)
+       (font-lock-fontify-keywords-region beg end loudly))
      `(jit-lock-bounds ,beg . ,end))))
 
 ;; The following must be rethought, since keywords can override fontification.
