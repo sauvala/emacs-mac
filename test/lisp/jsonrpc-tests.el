@@ -104,6 +104,56 @@ INITARGS are passed to `make-instance' for `jsonrpc--test-client'."
       ("jsonrpc-resources/server-emacsrpc.py" conn)
     (should (= 3 (jsonrpc-request conn '+ [1 2])))))
 
+(ert-deftest process-message-dispatch-budget-reschedules-backlog ()
+  "Budgeted process message dispatch leaves backlog for a later turn."
+  (skip-unless (executable-find "cat"))
+  (let ((jsonrpc-process-message-dispatch-budget 0.000001)
+        (seen nil)
+        proc conn)
+    (unwind-protect
+        (progn
+          (setq proc (make-process
+                      :name "jsonrpc-dispatch-test"
+                      :buffer (generate-new-buffer " *jsonrpc-dispatch-test*")
+                      :command (list "cat")
+                      :connection-type 'pipe
+                      :noquery t)
+                conn (make-instance
+                      'jsonrpc-process-connection
+                      :name "jsonrpc-dispatch-test"
+                      :process proc
+                      :notification-dispatcher
+                      (lambda (_conn method _params)
+                        (sit-for 0.001)
+                        (push method seen))))
+          (jsonrpc--enqueue-process-messages
+           proc
+           (list '(:jsonrpc "2.0" :method "one")
+                 '(:jsonrpc "2.0" :method "two")))
+          (should (timerp (process-get proc 'jsonrpc-dispatch-timer)))
+          (cancel-timer (process-get proc 'jsonrpc-dispatch-timer))
+          (process-put proc 'jsonrpc-dispatch-timer nil)
+          (should (equal (jsonrpc--dispatch-process-messages proc)
+                         '(:processed 1 :remaining 1)))
+          (when-let* ((timer (process-get proc 'jsonrpc-dispatch-timer)))
+            (cancel-timer timer)
+            (process-put proc 'jsonrpc-dispatch-timer nil))
+          (let ((jsonrpc-process-message-dispatch-budget nil))
+            (should (equal (jsonrpc--dispatch-process-messages proc)
+                           '(:processed 1 :remaining 0))))
+          (should (equal '(two one) seen)))
+      (when proc
+        (when-let* ((timer (process-get proc 'jsonrpc-dispatch-timer)))
+          (cancel-timer timer))
+        (when (process-live-p proc)
+          (set-process-sentinel proc #'ignore)
+          (delete-process proc)))
+      (dolist (buffer (delq nil (list (and proc (process-buffer proc))
+                                      (and conn (jsonrpc--events-buffer conn))
+                                      (and conn (jsonrpc-stderr-buffer conn)))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest times-out ()
   "Request for 3-sec sit-for with 1-sec timeout times out."
   (skip-when (eq system-type 'windows-nt))

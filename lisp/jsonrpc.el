@@ -554,6 +554,20 @@ CONNECTION, METHOD and PARAMS as in `jsonrpc-async-request' (which see)."
   :safe 'numberp
   :group 'jsonrpc)
 
+(defcustom jsonrpc-process-message-dispatch-budget 0.005
+  "Maximum seconds spent dispatching process messages per timer.
+The default is a small positive budget so large process message bursts
+yield back to the command loop.  If nil, drain each process message queue
+in one timer callback.  When this is a positive number, process at least
+one queued message and then yield once the budget is exhausted."
+  :version "31.1"
+  :type '(choice (const :tag "Drain queue in one timer" nil)
+                 (number :tag "Seconds"))
+  :safe (lambda (value)
+          (or (null value)
+              (and (numberp value) (>= value 0))))
+  :group 'jsonrpc)
+
 
 ;;; Specific to `jsonrpc-process-connection'
 ;;;
@@ -785,6 +799,55 @@ Move point to end of buffer.")
 (defvar jsonrpc--in-process-filter nil
   "Non-nil if inside `jsonrpc--process-filter'.")
 
+(defun jsonrpc--process-message-dispatch-budget ()
+  "Return the active process message dispatch budget, or nil."
+  (and (numberp jsonrpc-process-message-dispatch-budget)
+       (> jsonrpc-process-message-dispatch-budget 0)
+       jsonrpc-process-message-dispatch-budget))
+
+(defun jsonrpc--ensure-process-dispatch-timer (proc)
+  "Ensure PROC has one active JSON-RPC dispatch timer."
+  (unless (timerp (process-get proc 'jsonrpc-dispatch-timer))
+    (let ((timer (timer-create)))
+      (process-put proc 'jsonrpc-dispatch-timer timer)
+      (timer-set-time timer (current-time))
+      (timer-set-function timer #'jsonrpc--dispatch-process-messages
+                          (list proc))
+      (timer-activate timer))))
+
+(defun jsonrpc--enqueue-process-messages (proc messages)
+  "Append MESSAGES to PROC's JSON-RPC dispatch queue and schedule dispatch."
+  (when messages
+    (process-put proc 'jsonrpc-dispatch-queue
+                 (nconc (process-get proc 'jsonrpc-dispatch-queue)
+                        messages))
+    (jsonrpc--ensure-process-dispatch-timer proc)))
+
+(defun jsonrpc--dispatch-process-messages (proc)
+  "Dispatch queued JSON-RPC messages for PROC.
+Return a plist with dispatch progress metrics when PROC has a connection."
+  (process-put proc 'jsonrpc-dispatch-timer nil)
+  (when-let* ((conn (process-get proc 'jsonrpc-connection)))
+    (unwind-protect
+        (let ((budget (jsonrpc--process-message-dispatch-budget))
+              (started (float-time))
+              (processed 0))
+          (while (and (process-get proc 'jsonrpc-dispatch-queue)
+                      (or (zerop processed)
+                          (not budget)
+                          (< (- (float-time) started) budget)))
+            (let* ((queue (process-get proc 'jsonrpc-dispatch-queue))
+                   (msg (car queue)))
+              (process-put proc 'jsonrpc-dispatch-queue (cdr queue))
+              (setq processed (1+ processed))
+              (with-temp-buffer
+                (jsonrpc-connection-receive conn msg))))
+          (list :processed processed
+                :remaining (length (process-get proc
+                                                 'jsonrpc-dispatch-queue))))
+      (when (process-get proc 'jsonrpc-dispatch-queue)
+        (jsonrpc--ensure-process-dispatch-timer proc)))))
+
 (cl-defun jsonrpc--process-filter (proc string)
   "Called when new data STRING has arrived for PROC."
   (when jsonrpc--in-process-filter
@@ -876,23 +939,11 @@ Move point to end of buffer.")
           (setf (jsonrpc--expected-bytes conn) expected-bytes)
           ;; Now, time to notify user code of one or more messages in
           ;; order.  Very often `jsonrpc-connection-receive' will exit
-          ;; non-locally (typically the reply to a request), so do
-          ;; this all this processing in top-level loops timer.
-          (cl-loop
-           ;; `timer-activate' orders timers by time, which is an
-           ;; very expensive operation when jsonrpc-mqueue is large,
-           ;; therefore the time object is reused for each timer
-           ;; created.
-           with time = (current-time)
-           for msg = (pop (process-get proc 'jsonrpc-mqueue)) while msg
-           do (let ((timer (timer-create)))
-                (timer-set-time timer time)
-                (timer-set-function timer
-                                    (lambda (conn msg)
-                                      (with-temp-buffer
-                                        (jsonrpc-connection-receive conn msg)))
-                                    (list conn msg))
-                (timer-activate timer))))))))
+          ;; non-locally (typically the reply to a request), so do this
+          ;; processing in top-level loop timers.
+          (when-let* ((messages (process-get proc 'jsonrpc-mqueue)))
+            (process-put proc 'jsonrpc-mqueue nil)
+            (jsonrpc--enqueue-process-messages proc (nreverse messages))))))))
 
 (defun jsonrpc--remove (conn id &optional deferred-spec)
   "Cancel CONN's continuations for ID, including its timer, if it exists.
