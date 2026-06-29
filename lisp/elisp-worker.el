@@ -42,6 +42,11 @@
   (partial-output "")
   (next-id 0))
 
+(cl-defstruct (elisp-worker-pool
+               (:constructor elisp-worker-pool--make))
+  workers
+  (cursor 0))
+
 (defconst elisp-worker--loaded-file (or load-file-name buffer-file-name)
   "File from which `elisp-worker' was loaded.")
 
@@ -174,6 +179,42 @@ data object.  FORM and its result must be printable and readable."
     (setf (elisp-worker-callbacks worker) nil
           (elisp-worker-process worker) nil
           (elisp-worker-stderr-buffer worker) nil)))
+
+(defun elisp-worker-pool-start (size &optional name)
+  "Start and return an Emacs Lisp worker pool with SIZE workers.
+Optional NAME is used as the process name prefix."
+  (unless (and (integerp size) (> size 0))
+    (error "Worker pool size must be a positive integer"))
+  (let ((name (or name "elisp-worker-pool")))
+    (elisp-worker-pool--make
+     :workers (cl-loop for i from 1 to size
+                       collect (elisp-worker-start
+                                (format "%s-%d" name i))))))
+
+(defun elisp-worker-pool--next-worker (pool)
+  "Return the next worker from POOL and advance its cursor."
+  (let* ((workers (elisp-worker-pool-workers pool))
+         (length (length workers))
+         (cursor (mod (elisp-worker-pool-cursor pool) length))
+         (worker (nth cursor workers)))
+    (setf (elisp-worker-pool-cursor pool) (mod (1+ cursor) length))
+    worker))
+
+(cl-defun elisp-worker-pool-async-eval
+    (pool form &key success-fn error-fn)
+  "Evaluate FORM asynchronously on the next worker in POOL.
+SUCCESS-FN and ERROR-FN are interpreted as in
+`elisp-worker-async-eval'."
+  (elisp-worker-async-eval
+   (elisp-worker-pool--next-worker pool)
+   form
+   :success-fn success-fn
+   :error-fn error-fn))
+
+(defun elisp-worker-pool-shutdown (pool)
+  "Shut down all workers in POOL."
+  (mapc #'elisp-worker-shutdown (elisp-worker-pool-workers pool))
+  (setf (elisp-worker-pool-workers pool) nil))
 
 (defun elisp-worker--write-response (response)
   "Write one worker protocol RESPONSE to standard output."

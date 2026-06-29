@@ -63,4 +63,28 @@
           (should (string-match-p "worker failed" error-message)))
       (elisp-worker-shutdown worker))))
 
+(ert-deftest elisp-worker-pool-runs-jobs-concurrently ()
+  "A worker pool can run independent Lisp jobs in parallel processes."
+  (let ((pool (elisp-worker-pool-start 2))
+        (results nil)
+        elapsed)
+    (unwind-protect
+        (progn
+          (setq elapsed
+                (benchmark-elapse
+                  (dotimes (i 2)
+                    (elisp-worker-pool-async-eval
+                     pool
+                     `(progn
+                        (sleep-for 0.25)
+                        ,i)
+                     :success-fn (lambda (value)
+                                   (push value results))))
+                  (with-timeout (4 (ert-fail "Timed out waiting for pool"))
+                    (while (< (length results) 2)
+                      (accept-process-output nil 0.01)))))
+          (should (< elapsed 0.45))
+          (should (equal (sort results #'<) '(0 1))))
+      (elisp-worker-pool-shutdown pool))))
+
 ;;; elisp-worker-tests.el ends here
