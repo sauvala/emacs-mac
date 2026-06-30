@@ -67,6 +67,8 @@
                   (pool form &rest args))
 (declare-function font-lock--buffer-tick-current-p "font-lock"
                   (buffer tick))
+(declare-function font-lock--queue-commit "font-lock"
+                  (buffer tick function &rest args))
 (declare-function font-lock--queue-span-commits "font-lock"
                   (buffer tick function spans &rest args))
 
@@ -195,6 +197,17 @@ objects from the current buffer."
   :safe #'booleanp
   :group 'treesit
   :version "31.1")
+
+(defcustom treesit-font-lock-defer-on-input t
+  "Non-nil means tree-sitter font-lock yields between settings on input.
+When this is non-nil, tree-sitter font-lock visits at least one setting
+and then leaves remaining settings for a commit timer if input is
+pending.  This keeps redisplay-time font-lock setup bounded while
+preserving the existing async worker path for compatible queries."
+  :type 'boolean
+  :safe #'booleanp
+  :group 'treesit
+  :version "32.1")
 
 (defcustom treesit-pre-redisplay-defer-on-input t
   "Non-nil means defer tree-sitter pre-redisplay reparsing on pending input.
@@ -2352,33 +2365,37 @@ detail.")
 ;; the node, because it could (and often do) fontify the relatives of
 ;; the captured node, not just the node itself.  If we took out those
 ;; nodes author of those functions would be very confused.
-(defun treesit-font-lock-fontify-region (start end &optional loudly)
-  "Fontify the region between START and END.
-If LOUDLY is non-nil, display some debugging information."
-  (when (or loudly treesit--font-lock-verbose)
-    (message "Fontifying region: %s-%s" start end))
+(defun treesit--font-lock-fontify-settings (start end settings loudly)
+  "Fontify START..END with tree-sitter font-lock SETTINGS.
+If input is pending and `treesit-font-lock-defer-on-input' is non-nil,
+process at least one setting and queue the remaining settings for a
+later font-lock commit turn."
   (let ((local-parsers (treesit-local-parsers-on start end)))
     (when (or treesit-range-settings local-parsers)
       (treesit-update-ranges start end)
       (setq local-parsers (treesit-local-parsers-on start end)))
-    (font-lock-unfontify-region start end)
     (let* ((global-parsers (treesit-parser-list))
            (root-nodes
             (mapcar #'treesit-parser-root-node
-                    (append local-parsers global-parsers))))
+                    (append local-parsers global-parsers)))
+           redisplay-start
+           redisplay-end
+           yielded)
       ;; Can't we combine all the queries in each setting into one big
       ;; query? That should make font-lock faster? I tried, it shaved off
       ;; 1ms in xdisp.c, and 0.3ms in a small C file (for typing a single
       ;; character), not worth it.  --yuan
-      (dolist (setting treesit-font-lock-settings)
-        (let* ((query (treesit-font-lock-setting-query setting))
+      (while (and settings (not yielded))
+        (let* ((setting (car settings))
+               (query (treesit-font-lock-setting-query setting))
                (enable (treesit-font-lock-setting-enable setting))
                (override (treesit-font-lock-setting-override setting))
                (language (treesit-font-lock-setting-language setting))
-               (root-nodes (cl-remove-if-not
-                            (lambda (node)
-                              (eq (treesit-node-language node) language))
-                            root-nodes)))
+               (setting-root-nodes
+                (cl-remove-if-not
+                 (lambda (node)
+                   (eq (treesit-node-language node) language))
+                 root-nodes)))
 
           ;; Use deterministic way to decide whether to turn on "fast
           ;; mode". (See bug#60691, bug#60223.)
@@ -2398,8 +2415,8 @@ If LOUDLY is non-nil, display some debugging information."
                            (lambda (node)
                              (treesit--children-covering-range-recurse
                               node start end (* 4 jit-lock-chunk-size)))
-                           root-nodes)
-                        root-nodes)))
+                           setting-root-nodes)
+                        setting-root-nodes)))
             (ignore activate)
 
             ;; Query each node.
@@ -2416,7 +2433,29 @@ If LOUDLY is non-nil, display some debugging information."
                    start end query language override query-beg query-end)
                 (dolist (sub-node nodes)
                   (treesit--font-lock-fontify-region-1
-                   sub-node query start end override loudly)))))))))
+                   sub-node query start end override loudly))
+                (setq redisplay-start (min (or redisplay-start start) start)
+                      redisplay-end (max (or redisplay-end end) end))))))
+        (setq settings (cdr settings))
+        (setq yielded
+              (and settings
+                   treesit-font-lock-defer-on-input
+                   (input-pending-p))))
+      (when settings
+        (font-lock--queue-commit
+         (current-buffer) (buffer-chars-modified-tick)
+         #'treesit--font-lock-fontify-settings start end settings loudly))
+      (when (and redisplay-start redisplay-end)
+        `(font-lock-redisplay ,redisplay-start . ,redisplay-end)))))
+
+(defun treesit-font-lock-fontify-region (start end &optional loudly)
+  "Fontify the region between START and END.
+If LOUDLY is non-nil, display some debugging information."
+  (when (or loudly treesit--font-lock-verbose)
+    (message "Fontifying region: %s-%s" start end))
+  (font-lock-unfontify-region start end)
+  (treesit--font-lock-fontify-settings
+   start end treesit-font-lock-settings loudly)
   `(jit-lock-bounds ,start . ,end))
 
 (defun treesit--font-lock-fontify-region-1 (node query start end override loudly)
