@@ -182,6 +182,17 @@ of max unsigned 32-bit value for byte offsets into buffer text."
   :group 'treesit
   :version "31.1")
 
+(defcustom treesit-font-lock-async nil
+  "Non-nil means tree-sitter font-lock may prepare face spans asynchronously.
+This only applies to font-lock settings that can be represented as
+plain face spans.  Settings with function captures continue to run
+synchronously, because those functions require live tree-sitter node
+objects from the current buffer."
+  :type 'boolean
+  :safe #'booleanp
+  :group 'treesit
+  :version "31.1")
+
 ;;; Parser API supplement
 
 ;; The primary parser will be accessed frequently (after each re-parse,
@@ -565,6 +576,12 @@ See `treesit-query-capture' for QUERY."
        (treesit-parser-root-node parser)
        query))))
 
+(defun treesit--query-source-or-self (query)
+  "Return the source of compiled QUERY, or QUERY itself."
+  (condition-case nil
+      (treesit-query-source query)
+    (wrong-type-argument query)))
+
 (defvar treesit--async-worker-pool nil
   "Worker pool used for async tree-sitter work.")
 
@@ -613,7 +630,9 @@ SUCCESS-FN is called with a list of (CAPTURE START END).  ERROR-FN,
 when non-nil, is called with the worker error message and data.  OFFSET
 is added to each returned position."
   (let ((form (treesit--async-query-string-spans-form
-               string query language offset))
+               string
+               (treesit--query-source-or-self query)
+               language offset))
         (pool (treesit--async-worker-pool)))
     (elisp-worker-pool-async-eval
      pool form
@@ -623,30 +642,36 @@ is added to each returned position."
                      (message "Async tree-sitter worker failed: %s"
                               message))))))
 
-(defun treesit--async-font-lock-apply-spans (spans override)
+(defun treesit--async-font-lock-apply-spans
+    (spans override &optional bound-start bound-end)
   "Apply tree-sitter font-lock SPANS with OVERRIDE in the current buffer."
   (with-silent-modifications
     (dolist (span spans)
       (pcase-let ((`(,capture ,start ,end) span))
         (when (facep capture)
-          (treesit-fontify-with-override start end capture override))))))
+          (treesit-fontify-with-override
+           start end capture override bound-start bound-end))))))
 
-(defun treesit--async-font-lock-region (beg end query language override)
+(defun treesit--async-font-lock-region
+    (beg end query language override &optional query-beg query-end)
   "Query BEG..END with tree-sitter in a worker and commit font-lock spans.
 QUERY and LANGUAGE are passed to tree-sitter in a helper Emacs process.
 OVERRIDE is interpreted as in `treesit-fontify-with-override'.  The
 resulting spans are committed in the source buffer only if its modified
 tick still matches the snapshot."
-  (let ((buffer (current-buffer))
-        (tick (buffer-chars-modified-tick))
-        (text (buffer-substring-no-properties beg end)))
+  (let* ((query-beg (or query-beg beg))
+         (query-end (or query-end end))
+         (buffer (current-buffer))
+         (tick (buffer-chars-modified-tick))
+         (text (buffer-substring-no-properties query-beg query-end)))
     (treesit--async-query-string-spans
      text query language
-     :offset (1- beg)
+     :offset (1- query-beg)
      :success-fn
      (lambda (spans)
        (font-lock--queue-commit
-        buffer tick #'treesit--async-font-lock-apply-spans spans override))
+        buffer tick #'treesit--async-font-lock-apply-spans
+        spans override beg end))
      :error-fn
      (lambda (message _data)
        (message "Async tree-sitter font-lock worker failed: %s" message)))))
@@ -2206,6 +2231,39 @@ This is not a general optimization and should be RARELY needed!
 See comments in `treesit-font-lock-fontify-region' for more
 detail.")
 
+(defun treesit--font-lock-query-captures (query)
+  "Return capture symbols used by QUERY."
+  (let ((source (treesit--query-source-or-self query)))
+    (cond
+     ((stringp source)
+      (let (captures
+            (start 0))
+        (while (string-match "@\\([[:alnum:]_.-]+\\)" source start)
+          (push (intern (match-string 1 source)) captures)
+          (setq start (match-end 0)))
+        captures))
+     (t
+      (let (captures)
+        (cl-labels
+            ((walk (form)
+               (cond
+                ((symbolp form)
+                 (let ((name (symbol-name form)))
+                   (when (string-prefix-p "@" name)
+                     (push (intern (substring name 1)) captures))))
+                ((consp form)
+                 (walk (car form))
+                 (walk (cdr form))))))
+          (walk source))
+        captures)))))
+
+(defun treesit--font-lock-query-async-compatible-p (query)
+  "Return non-nil if QUERY can be represented as async face spans."
+  (cl-every (lambda (capture)
+              (or (facep capture)
+                  (not (functionp capture))))
+            (treesit--font-lock-query-captures query)))
+
 ;; Some details worth explaining:
 ;;
 ;; 1. When we apply face to a node, we clip the face into the
@@ -2294,9 +2352,22 @@ If LOUDLY is non-nil, display some debugging information."
           (ignore activate)
 
           ;; Query each node.
-          (dolist (sub-node nodes)
-            (treesit--font-lock-fontify-region-1
-             sub-node query start end override loudly))))))
+          (let ((query-beg (max (- start
+                                   (car treesit--font-lock-query-expand-range))
+                                (point-min)))
+                (query-end (min (+ end
+                                   (cdr treesit--font-lock-query-expand-range))
+                                (point-max))))
+            (if (and treesit-font-lock-async
+                     (null local-parsers)
+                     (not (eq t treesit--font-lock-fast-mode))
+                     (null (cdr nodes))
+                     (treesit--font-lock-query-async-compatible-p query))
+                (treesit--async-font-lock-region
+                 start end query language override query-beg query-end)
+              (dolist (sub-node nodes)
+                (treesit--font-lock-fontify-region-1
+                 sub-node query start end override loudly))))))))
   `(jit-lock-bounds ,start . ,end))
 
 (defun treesit--font-lock-fontify-region-1 (node query start end override loudly)

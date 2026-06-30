@@ -43,6 +43,8 @@
 (defvar treesit--async-worker-pool)
 (defvar font-lock--commit-queue)
 (defvar font-lock--commit-timer)
+(defvar treesit-font-lock-async)
+(defvar treesit-tests--function-capture-called)
 
 (declare-function treesit--async-query-string-spans "treesit"
                   (string query language &rest args))
@@ -76,6 +78,11 @@
 (declare-function treesit--linecol-at "treesit.c")
 (declare-function treesit--linecol-cache-set "treesit.c")
 (declare-function treesit--linecol-cache "treesit.c")
+
+(defun treesit-tests--function-capture (node _override start end &rest _)
+  "Record NODE and fontify START..END for function-capture tests."
+  (setq treesit-tests--function-capture-called node)
+  (put-text-property start end 'face 'font-lock-warning-face))
 
 
 ;;; Basic API
@@ -137,6 +144,69 @@
       (setq treesit--async-worker-pool old-pool
             font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
+
+(ert-deftest treesit-font-lock-fontify-region-can-schedule-async-spans ()
+  "Tree-sitter font-lock can schedule face-only queries asynchronously."
+  (skip-unless (treesit-language-available-p 'json))
+  (let ((old-pool treesit--async-worker-pool)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq treesit--async-worker-pool nil
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "{\"name\":\"Bob\"}")
+          (let ((treesit-primary-parser (treesit-parser-create 'json))
+                (treesit-font-lock-settings
+                 (treesit-font-lock-rules
+                  :language 'json
+                  :feature 'string
+                  '((string) @font-lock-string-face)))
+                (treesit-font-lock-async t))
+            (treesit-font-lock-fontify-region (point-min) (point-max))
+            (should-not (get-text-property 2 'face))
+            (with-timeout (3 (ert-fail "Timed out waiting for async tree-sitter font-lock"))
+              (while (not (get-text-property 2 'face))
+                (accept-process-output nil 0.01)
+                (when font-lock--commit-queue
+                  (font-lock--dispatch-commits))))
+            (should (eq (get-text-property 2 'face)
+                        'font-lock-string-face))
+            (should (eq (get-text-property 9 'face)
+                        'font-lock-string-face))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when treesit--async-worker-pool
+        (treesit--async-shutdown-workers))
+      (setq treesit--async-worker-pool old-pool
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
+(ert-deftest treesit-font-lock-async-keeps-function-captures-synchronous ()
+  "Function captures are not scheduled on the async face-span path."
+  (skip-unless (treesit-language-available-p 'json))
+  (let ((old-pool treesit--async-worker-pool)
+        (treesit-tests--function-capture-called nil))
+    (setq treesit--async-worker-pool nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "{\"name\":\"Bob\"}")
+          (let ((treesit-primary-parser (treesit-parser-create 'json))
+                (treesit-font-lock-settings
+                 (treesit-font-lock-rules
+                  :language 'json
+                  :feature 'string
+                  '((string) @treesit-tests--function-capture)))
+                (treesit-font-lock-async t))
+            (treesit-font-lock-fontify-region (point-min) (point-max))
+            (should treesit-tests--function-capture-called)
+            (should-not treesit--async-worker-pool)
+            (should (eq (get-text-property 2 'face)
+                        'font-lock-warning-face))))
+      (when treesit--async-worker-pool
+        (treesit--async-shutdown-workers))
+      (setq treesit--async-worker-pool old-pool))))
 
 (ert-deftest treesit-async-font-lock-region-drops-stale-spans ()
   "Async tree-sitter font-lock spans are dropped after buffer mutation."
