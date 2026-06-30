@@ -459,6 +459,9 @@ This can be an \"!\" or the \"n\" in \"ifndef\".")
 (defvar font-lock--commit-timer nil
   "Timer used to dispatch `font-lock--commit-queue'.")
 
+(defvar font-lock--pending-redisplay-requests nil
+  "Redisplay requests waiting for a later font-lock commit dispatch.")
+
 (defvar font-lock--async-worker-pool nil
   "Worker pool used for async font-lock preparation.")
 
@@ -546,7 +549,8 @@ Return a plist with commit progress metrics."
             (started (float-time))
             (processed 0)
             (dropped 0)
-            redisplay-requests)
+            (redisplay-requests font-lock--pending-redisplay-requests))
+        (setq font-lock--pending-redisplay-requests nil)
         (while (and font-lock--commit-queue
                     (or (zerop (+ processed dropped))
                         (and (not (and font-lock-commit-defer-on-input
@@ -565,11 +569,16 @@ Return a plist with commit progress metrics."
                          redisplay-requests buffer (apply function args)))
                   (setq processed (1+ processed)))
               (setq dropped (1+ dropped)))))
-        (font-lock--flush-redisplay-requests redisplay-requests)
+        (if (and redisplay-requests
+                 font-lock-commit-defer-on-input
+                 (input-pending-p))
+            (setq font-lock--pending-redisplay-requests redisplay-requests)
+          (font-lock--flush-redisplay-requests redisplay-requests))
         (list :processed processed
               :dropped dropped
               :remaining (length font-lock--commit-queue)))
-    (when font-lock--commit-queue
+    (when (or font-lock--commit-queue
+              font-lock--pending-redisplay-requests)
       (font-lock--ensure-commit-timer))))
 
 (defun font-lock--async-worker-pool ()
