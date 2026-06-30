@@ -568,6 +568,16 @@ one queued message and then yield once the budget is exhausted."
               (and (numberp value) (>= value 0))))
   :group 'jsonrpc)
 
+(defcustom jsonrpc-process-message-dispatch-defer-on-input t
+  "Non-nil means process message dispatch yields while input is pending.
+When this is non-nil, `jsonrpc--dispatch-process-messages' dispatches at
+least one queued process message and then leaves any remaining messages
+for a later timer turn if input is pending."
+  :version "32.1"
+  :type 'boolean
+  :safe #'booleanp
+  :group 'jsonrpc)
+
 (defcustom jsonrpc-process-message-parse-budget 0.005
   "Maximum seconds spent parsing process messages per filter call.
 The default is a small positive budget so bursts of complete JSON-RPC
@@ -879,8 +889,10 @@ Return a plist with dispatch progress metrics when PROC has a connection."
               (processed 0))
           (while (and (process-get proc 'jsonrpc-dispatch-queue)
                       (or (zerop processed)
-                          (not budget)
-                          (< (- (float-time) started) budget)))
+                          (and (not (and jsonrpc-process-message-dispatch-defer-on-input
+                                         (input-pending-p)))
+                               (or (not budget)
+                                   (< (- (float-time) started) budget)))))
             (let* ((queue (process-get proc 'jsonrpc-dispatch-queue))
                    (msg (car queue)))
               (process-put proc 'jsonrpc-dispatch-queue (cdr queue))

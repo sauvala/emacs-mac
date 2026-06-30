@@ -154,6 +154,54 @@ INITARGS are passed to `make-instance' for `jsonrpc--test-client'."
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest process-message-dispatch-yields-while-input-is-pending ()
+  "JSON-RPC process message dispatch leaves backlog while input is pending."
+  (skip-unless (executable-find "cat"))
+  (let ((jsonrpc-process-message-dispatch-budget nil)
+        (jsonrpc-process-message-dispatch-defer-on-input t)
+        seen
+        proc conn)
+    (unwind-protect
+        (progn
+          (setq proc (make-process
+                      :name "jsonrpc-dispatch-input-test"
+                      :buffer (generate-new-buffer
+                               " *jsonrpc-dispatch-input-test*")
+                      :command (list "cat")
+                      :connection-type 'pipe
+                      :noquery t)
+                conn (make-instance
+                      'jsonrpc-process-connection
+                      :name "jsonrpc-dispatch-input-test"
+                      :process proc
+                      :notification-dispatcher
+                      (lambda (_conn method _params)
+                        (push method seen))))
+          (jsonrpc--enqueue-process-messages
+           proc
+           (list '(:jsonrpc "2.0" :method "one")
+                 '(:jsonrpc "2.0" :method "two")))
+          (when-let* ((timer (process-get proc 'jsonrpc-dispatch-timer)))
+            (cancel-timer timer)
+            (process-put proc 'jsonrpc-dispatch-timer nil))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&optional _) t)))
+            (should (equal (jsonrpc--dispatch-process-messages proc)
+                           '(:processed 1 :remaining 1))))
+          (should (timerp (process-get proc 'jsonrpc-dispatch-timer)))
+          (should (equal '(one) seen)))
+      (when proc
+        (when-let* ((timer (process-get proc 'jsonrpc-dispatch-timer)))
+          (cancel-timer timer))
+        (when (process-live-p proc)
+          (set-process-sentinel proc #'ignore)
+          (delete-process proc)))
+      (dolist (buffer (delq nil (list (and proc (process-buffer proc))
+                                      (and conn (jsonrpc--events-buffer conn))
+                                      (and conn (jsonrpc-stderr-buffer conn)))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (defun jsonrpc--test-wire-message (message)
   "Return MESSAGE encoded with JSON-RPC content-length headers."
   (let ((json (jsonrpc--json-encode message)))
