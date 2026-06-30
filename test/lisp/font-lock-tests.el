@@ -80,6 +80,27 @@
     (should (equal (get-text-property 1 'face (current-buffer))
                    '((:strike-through t) italic)))))
 
+(ert-deftest font-lock-apply-async-spans-honors-symbolic-overrides ()
+  "Async span commits preserve symbolic override semantics."
+  (with-temp-buffer
+    (insert "abcdefghijkl")
+    (put-text-property 1 4 'face 'font-lock-string-face)
+    (put-text-property 4 7 'face 'font-lock-string-face)
+    (put-text-property 7 10 'face 'font-lock-string-face)
+    (font-lock--apply-async-spans
+     '((1 4 font-lock-keyword-face append)
+       (4 7 font-lock-keyword-face prepend)
+       (7 10 font-lock-keyword-face keep)
+       (10 13 font-lock-keyword-face keep)))
+    (should (equal (get-text-property 1 'face)
+                   '(font-lock-string-face font-lock-keyword-face)))
+    (should (equal (get-text-property 4 'face)
+                   '(font-lock-keyword-face font-lock-string-face)))
+    (should (eq (get-text-property 7 'face)
+                'font-lock-string-face))
+    (should (eq (get-text-property 10 'face)
+                'font-lock-keyword-face))))
+
 (ert-deftest font-lock-commit-queue-drops-stale-buffer-tick ()
   "Queued font-lock commits are dropped after the source buffer changes."
   (let ((old-queue font-lock--commit-queue)
@@ -879,6 +900,45 @@
             (should-not (get-text-property 7 'face))
             (should (eq (get-text-property 12 'face)
                         'font-lock-keyword-face))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when font-lock--async-worker-pool
+        (font-lock--async-shutdown-workers))
+      (setq font-lock--async-worker-pool old-pool
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
+(ert-deftest font-lock-default-fontify-region-can-use-async-symbolic-overrides ()
+  "The async keyword path accepts simple specs with symbolic overrides."
+  (let ((old-pool font-lock--async-worker-pool)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq font-lock--async-worker-pool nil
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "alpha beta alpha")
+          (let ((font-lock-async-keywords t)
+                (font-lock-keywords
+                 '(("alpha" 0 font-lock-keyword-face append)))
+                (font-lock-keywords-only t)
+                (font-lock-keywords-case-fold-search nil)
+                (font-lock-set-defaults t)
+                (font-lock-syntax-table nil)
+                (font-lock-syntactic-keywords nil)
+                (font-lock-syntactically-fontified 0)
+                (font-lock-extend-region-functions nil))
+            (font-lock-default-fontify-region (point-min) (point-max) nil)
+            (should-not (get-text-property 1 'face))
+            (with-timeout (3 (ert-fail "Timed out waiting for symbolic override async font-lock"))
+              (while (not (get-text-property 1 'face))
+                (accept-process-output nil 0.01)
+                (when font-lock--commit-queue
+                  (font-lock--dispatch-commits))))
+            (should (get-text-property 1 'face))
+            (should-not (get-text-property 7 'face))
+            (should (get-text-property 12 'face))))
       (when (timerp font-lock--commit-timer)
         (cancel-timer font-lock--commit-timer))
       (when font-lock--async-worker-pool

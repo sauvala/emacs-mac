@@ -663,7 +663,8 @@ The returned value contains only elements of the form
             (unless (and (consp highlight)
                          (numberp (car highlight))
                          (symbolp (cadr highlight))
-                         (memq (nth 2 highlight) '(nil t))
+                         (memq (nth 2 highlight)
+                               '(nil t prepend append keep))
                          (not (nth 3 highlight)))
               (throw 'unsupported nil))
             (push (list (car keyword)
@@ -685,7 +686,7 @@ The returned value contains only elements of the form
                  (consp (cdr spec))
                  (numberp (cadr spec))
                  (symbolp (nth 2 spec))
-                 (memq (nth 3 spec) '(nil t))
+                 (memq (nth 3 spec) '(nil t prepend append keep))
                  (not (nth 4 spec)))
             (push (list (car spec) (cadr spec) (nth 2 spec) (nth 3 spec))
                   normalized))
@@ -711,7 +712,7 @@ OFFSET converts worker-buffer positions to source-buffer positions."
                  subexp (cadr spec)
                  face (nth 2 spec)
                  override (nth 3 spec))
-           (when (and regexp face)
+           (when (and regexp (or face (eq override t)))
              (goto-char (point-min))
              (while (re-search-forward regexp nil t)
                (let ((start (match-beginning subexp))
@@ -730,9 +731,19 @@ OFFSET converts worker-buffer positions to source-buffer positions."
     (with-silent-modifications
       (dolist (span spans)
         (pcase-let ((`(,start ,end ,face ,override) span))
-          (when (or override
-                    (not (text-property-not-all start end 'face nil)))
-            (put-text-property start end 'face face)
+          (when (or face (eq override t))
+            (pcase override
+              ('nil
+               (unless (text-property-not-all start end 'face nil)
+                 (put-text-property start end 'face face)))
+              ('t
+               (put-text-property start end 'face face))
+              ('prepend
+               (font-lock-prepend-text-property start end 'face face))
+              ('append
+               (font-lock-append-text-property start end 'face face))
+              ('keep
+               (font-lock-fillin-text-property start end 'face face)))
             (setq redisplay-start (min (or redisplay-start start) start)
                   redisplay-end (max (or redisplay-end end) end))))))
     (when (and redisplay-start redisplay-end)
@@ -742,7 +753,8 @@ OFFSET converts worker-buffer positions to source-buffer positions."
   "Prepare simple KEYWORDS for BEG..END in a worker and commit later.
 This is an internal, snapshot-based path for async font-lock preparation.
 It currently supports simple regexp-face specs of the form (REGEXP . FACE)
-and (REGEXP SUBEXP FACE [OVERRIDE]), where OVERRIDE is nil or t."
+and (REGEXP SUBEXP FACE [OVERRIDE]), where OVERRIDE is nil, t,
+`prepend', `append', or `keep'."
   (when-let* ((keywords (font-lock--async-normalize-simple-keywords keywords)))
     (let* ((buffer (current-buffer))
            (tick (buffer-chars-modified-tick))
