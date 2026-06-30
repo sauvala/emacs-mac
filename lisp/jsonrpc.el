@@ -850,6 +850,16 @@ Move point to end of buffer.")
                           (list proc))
       (timer-activate timer))))
 
+(defun jsonrpc--append-process-output (proc string)
+  "Append STRING to PROC's process buffer and advance its process marker."
+  (unless (zerop (length string))
+    (with-current-buffer (process-buffer proc)
+      (save-excursion
+        (goto-char (process-mark proc))
+        (let ((inhibit-read-only t))
+          (insert string))
+        (set-marker (process-mark proc) (point))))))
+
 (defun jsonrpc--enqueue-process-messages (proc messages)
   "Append MESSAGES to PROC's JSON-RPC dispatch queue and schedule dispatch."
   (when messages
@@ -898,6 +908,10 @@ Return a plist with dispatch progress metrics when PROC has a connection."
     (cl-return-from jsonrpc--process-filter))
   (let ((jsonrpc--in-process-filter t))
     (when (buffer-live-p (process-buffer proc))
+      (when (and (timerp (process-get proc 'jsonrpc-parse-timer))
+                 (not (zerop (length string))))
+        (jsonrpc--append-process-output proc string)
+        (cl-return-from jsonrpc--process-filter))
       (when-let* ((timer (process-get proc 'jsonrpc-parse-timer)))
         (cancel-timer timer)
         (process-put proc 'jsonrpc-parse-timer nil))
@@ -910,10 +924,7 @@ Return a plist with dispatch progress metrics when PROC has a connection."
                done)
           ;; Insert the text, advancing the process marker.
           ;;
-          (save-excursion
-            (goto-char (process-mark proc))
-            (let ((inhibit-read-only t)) (insert string))
-            (set-marker (process-mark proc) (point)))
+          (jsonrpc--append-process-output proc string)
           ;; Loop (more than one message might have arrived)
           ;;
           (unwind-protect
