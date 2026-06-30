@@ -243,6 +243,40 @@
       (setq font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
 
+(ert-deftest font-lock-commit-queue-yields-while-input-is-pending ()
+  "Font-lock commit dispatch leaves backlog while input is pending."
+  (let ((font-lock-commit-dispatch-budget nil)
+        (font-lock-commit-defer-on-input t)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer)
+        seen)
+    (setq font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "abc")
+          (let ((buffer (current-buffer))
+                (tick (buffer-chars-modified-tick)))
+            (dotimes (i 2)
+              (font-lock--queue-commit
+               buffer tick
+               (lambda (value)
+                 (push value seen))
+               i))
+            (when (timerp font-lock--commit-timer)
+              (cancel-timer font-lock--commit-timer)
+              (setq font-lock--commit-timer nil))
+            (cl-letf (((symbol-function 'input-pending-p)
+                       (lambda (&optional _) t)))
+              (should (equal (font-lock--dispatch-commits)
+                             '(:processed 1 :dropped 0 :remaining 1))))
+            (should (timerp font-lock--commit-timer))
+            (should (equal seen '(0)))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (setq font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
 (ert-deftest font-lock-async-fontifies-simple-regexp-from-worker ()
   "Worker-computed font-lock spans are committed to an unchanged buffer."
   (let ((old-pool font-lock--async-worker-pool)

@@ -324,6 +324,16 @@ queued commit and then yield once the budget is exhausted."
   :group 'font-lock
   :version "31.1")
 
+(defcustom font-lock-commit-defer-on-input t
+  "Non-nil means queued font-lock commits yield while input is pending.
+When this is non-nil, `font-lock--dispatch-commits' processes at least
+one queued commit and then leaves any remaining commits for a later
+timer turn if input is pending."
+  :type 'boolean
+  :safe 'booleanp
+  :group 'font-lock
+  :version "32.1")
+
 (defcustom font-lock-async-worker-pool-size 2
   "Number of helper Emacs processes used for async font-lock preparation."
   :type 'natnum
@@ -539,8 +549,10 @@ Return a plist with commit progress metrics."
             redisplay-requests)
         (while (and font-lock--commit-queue
                     (or (zerop (+ processed dropped))
-                        (not budget)
-                        (< (- (float-time) started) budget)))
+                        (and (not (and font-lock-commit-defer-on-input
+                                       (input-pending-p)))
+                             (or (not budget)
+                                 (< (- (float-time) started) budget)))))
           (pcase-let ((`(,buffer ,tick ,function ,args)
                        (pop font-lock--commit-queue)))
             (if (and (buffer-live-p buffer)
