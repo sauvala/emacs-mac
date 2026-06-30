@@ -665,7 +665,7 @@ The returned value contains only elements of the form
                          (symbolp (cadr highlight))
                          (memq (nth 2 highlight)
                                '(nil t prepend append keep))
-                         (not (nth 3 highlight)))
+                         (not (nth 4 highlight)))
               (throw 'unsupported nil))
             (push (list (car keyword)
                         (car highlight)
@@ -687,7 +687,7 @@ The returned value contains only elements of the form
                  (numberp (cadr spec))
                  (symbolp (nth 2 spec))
                  (memq (nth 3 spec) '(nil t prepend append keep))
-                 (not (nth 4 spec)))
+                 (not (nth 5 spec)))
             (push (list (car spec) (cadr spec) (nth 2 spec) (nth 3 spec))
                   normalized))
            (t
@@ -753,8 +753,8 @@ OFFSET converts worker-buffer positions to source-buffer positions."
   "Prepare simple KEYWORDS for BEG..END in a worker and commit later.
 This is an internal, snapshot-based path for async font-lock preparation.
 It currently supports simple regexp-face specs of the form (REGEXP . FACE)
-and (REGEXP SUBEXP FACE [OVERRIDE]), where OVERRIDE is nil, t,
-`prepend', `append', or `keep'."
+and (REGEXP SUBEXP FACE [OVERRIDE [LAXMATCH]]), where OVERRIDE is nil,
+t, `prepend', `append', or `keep'."
   (when-let* ((keywords (font-lock--async-normalize-simple-keywords keywords)))
     (let* ((buffer (current-buffer))
            (tick (buffer-chars-modified-tick))
