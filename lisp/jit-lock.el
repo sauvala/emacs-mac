@@ -134,10 +134,19 @@ string/comment and non-string/non-comment fontification."
 
 (defcustom jit-lock-defer-time nil ;; 0.25
   "Idle time after which deferred fontification should take place.
-If nil, fontification is not deferred.
+If nil, fontification is not deferred except when
+`jit-lock-defer-on-input' is non-nil.
 If 0, then fontification is only deferred while there is input pending."
   :type '(choice (const :tag "never" nil)
 	         (number :tag "seconds")))
+
+(defcustom jit-lock-defer-on-input t
+  "Non-nil means defer JIT fontification while input is pending.
+When this is non-nil, redisplay-time fontification can mark a chunk for
+later idle fontification instead of running fontification functions while
+there is pending input, even if `jit-lock-defer-time' is nil."
+  :type 'boolean
+  :version "32.1")
 
 ;;; Variables that are not customizable.
 
@@ -164,6 +173,9 @@ If nil, contextual fontification is disabled.")
   "Timer for context fontification in Just-in-time Lock mode.")
 (defvar jit-lock-defer-timer nil
   "Timer for deferred fontification in Just-in-time Lock mode.")
+
+(defvar jit-lock--defer-timer-input-only nil
+  "Non-nil if `jit-lock-defer-timer' was started for pending input.")
 
 (defvar jit-lock-defer-buffers nil
   "List of buffers with pending deferred fontification.")
@@ -251,6 +263,7 @@ If you need to debug code run from jit-lock, see `jit-lock-debug-mode'."
 
     ;; Init deferred fontification timer.
     (when (and jit-lock-defer-time (null jit-lock-defer-timer))
+      (setq jit-lock--defer-timer-input-only nil)
       (setq jit-lock-defer-timer
             (run-with-idle-timer jit-lock-defer-time t
                                  #'jit-lock-deferred-fontify)))
@@ -286,7 +299,8 @@ If you need to debug code run from jit-lock, see `jit-lock-debug-mode'."
         (setq jit-lock-context-timer nil))
       (when jit-lock-defer-timer
         (cancel-timer jit-lock-defer-timer)
-        (setq jit-lock-defer-timer nil)))
+        (setq jit-lock-defer-timer nil
+              jit-lock--defer-timer-input-only nil)))
 
     ;; Remove hooks.
     (remove-hook 'post-command-hook #'jit-lock--antiblink-post-command t)
@@ -302,8 +316,10 @@ like `debug-on-error' and Edebug can be used."
   :global t
   (when jit-lock-defer-timer
     (cancel-timer jit-lock-defer-timer)
-    (setq jit-lock-defer-timer nil))
+    (setq jit-lock-defer-timer nil
+          jit-lock--defer-timer-input-only nil))
   (when jit-lock-debug-mode
+    (setq jit-lock--defer-timer-input-only nil)
     (setq jit-lock-defer-timer
           (run-with-idle-timer 0 t #'jit-lock--debug-fontify))))
 
@@ -365,14 +381,33 @@ Only applies to the current buffer."
 
 ;;; On demand fontification.
 
+(defun jit-lock--ensure-defer-timer ()
+  "Ensure deferred fontification has an idle timer."
+  (unless jit-lock-defer-timer
+    (setq jit-lock--defer-timer-input-only (null jit-lock-defer-time))
+    (setq jit-lock-defer-timer
+          (run-with-idle-timer (or jit-lock-defer-time 0) t
+                               #'jit-lock-deferred-fontify))))
+
+(defun jit-lock--defer-fontification-p ()
+  "Return non-nil if on-demand fontification should be deferred now."
+  (and (not memory-full)
+       (or (and jit-lock-defer-timer
+                (or jit-lock-debug-mode
+                    (and jit-lock-defer-time
+                         (not (eq jit-lock-defer-time 0)))))
+           (and (or jit-lock-defer-time jit-lock-defer-on-input)
+                (input-pending-p)
+                (progn
+                  (jit-lock--ensure-defer-timer)
+                  t)))))
+
 (defun jit-lock-function (start)
   "Fontify current buffer starting at position START.
 This function is added to `fontification-functions' when `jit-lock-mode'
 is active."
   (when (and jit-lock-mode (not memory-full))
-    (if (not (and jit-lock-defer-timer
-                  (or (not (eq jit-lock-defer-time 0))
-                      (input-pending-p))))
+    (if (not (jit-lock--defer-fontification-p))
 	;; No deferral.
 	(let* ((cend (min (point-max) (+ start jit-lock-chunk-size)))
 	       (vend (next-single-property-change start 'invisible nil cend)))
@@ -628,7 +663,13 @@ non-nil in a repeated invocation of this function."
       (unless (redisplay)                       ;FIXME: Should we `force'?
         (setq jit-lock-defer-buffers buffers))
       ;; (message "Jit-Defer Done")
-      )))
+      ))
+  (when (and jit-lock-defer-timer
+             jit-lock--defer-timer-input-only
+             (null jit-lock-defer-buffers))
+    (cancel-timer jit-lock-defer-timer)
+    (setq jit-lock-defer-timer nil
+          jit-lock--defer-timer-input-only nil)))
 
 
 (defun jit-lock-context-fontify ()

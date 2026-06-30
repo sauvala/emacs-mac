@@ -23,6 +23,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'jit-lock)
 (require 'ert-x)
 
@@ -58,5 +59,46 @@
     (with-silent-modifications
       (put-text-property (point-min) (point-max) 'fontified t))
     (jit-lock-fontify-now (point-min) (point-max))))
+
+(ert-deftest jit-lock-function-defers-while-input-is-pending ()
+  (ert-with-test-buffer (:name "xxx")
+    (let ((jit-lock-defer-time nil)
+          (jit-lock-defer-on-input t)
+          (jit-lock-defer-timer nil)
+          (jit-lock-defer-buffers nil)
+          fontified)
+      (cl-letf (((symbol-function 'input-pending-p) (lambda (&optional _) t)))
+        (unwind-protect
+            (progn
+              (jit-lock-register
+               (lambda (_start _end)
+                 (setq fontified t)))
+              (insert "xyz")
+              (jit-lock-function (point-min))
+              (should-not fontified)
+              (should (memq (current-buffer) jit-lock-defer-buffers))
+              (should (eq (get-text-property (point-min) 'fontified)
+                          'defer)))
+          (jit-lock-mode nil))))))
+
+(ert-deftest jit-lock-function-fontifies-immediately-without-input ()
+  (ert-with-test-buffer (:name "xxx")
+    (let ((jit-lock-defer-time nil)
+          (jit-lock-defer-on-input t)
+          (jit-lock-defer-timer nil)
+          (jit-lock-defer-buffers nil)
+          fontified)
+      (cl-letf (((symbol-function 'input-pending-p) (lambda (&optional _) nil)))
+        (unwind-protect
+            (progn
+              (jit-lock-register
+               (lambda (_start _end)
+                 (setq fontified t)))
+              (insert "xyz")
+              (jit-lock-function (point-min))
+              (should fontified)
+              (should-not (memq (current-buffer) jit-lock-defer-buffers))
+              (should (eq (get-text-property (point-min) 'fontified) t)))
+          (jit-lock-mode nil))))))
 
 ;;; jit-lock-tests.el ends here
