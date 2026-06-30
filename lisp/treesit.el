@@ -64,6 +64,8 @@
 (declare-function elisp-worker-pool-shutdown "elisp-worker" (pool))
 (declare-function elisp-worker-pool-async-eval "elisp-worker"
                   (pool form &rest args))
+(declare-function font-lock--queue-commit "font-lock"
+                  (buffer tick function &rest args))
 
 ;;; Function declarations
 
@@ -620,6 +622,34 @@ is added to each returned position."
                    (lambda (message _data)
                      (message "Async tree-sitter worker failed: %s"
                               message))))))
+
+(defun treesit--async-font-lock-apply-spans (spans override)
+  "Apply tree-sitter font-lock SPANS with OVERRIDE in the current buffer."
+  (with-silent-modifications
+    (dolist (span spans)
+      (pcase-let ((`(,capture ,start ,end) span))
+        (when (facep capture)
+          (treesit-fontify-with-override start end capture override))))))
+
+(defun treesit--async-font-lock-region (beg end query language override)
+  "Query BEG..END with tree-sitter in a worker and commit font-lock spans.
+QUERY and LANGUAGE are passed to tree-sitter in a helper Emacs process.
+OVERRIDE is interpreted as in `treesit-fontify-with-override'.  The
+resulting spans are committed in the source buffer only if its modified
+tick still matches the snapshot."
+  (let ((buffer (current-buffer))
+        (tick (buffer-chars-modified-tick))
+        (text (buffer-substring-no-properties beg end)))
+    (treesit--async-query-string-spans
+     text query language
+     :offset (1- beg)
+     :success-fn
+     (lambda (spans)
+       (font-lock--queue-commit
+        buffer tick #'treesit--async-font-lock-apply-spans spans override))
+     :error-fn
+     (lambda (message _data)
+       (message "Async tree-sitter font-lock worker failed: %s" message)))))
 
 (defsubst treesit--range-start (range)
   "Return the start of RANGE.

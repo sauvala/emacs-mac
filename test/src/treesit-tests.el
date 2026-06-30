@@ -41,10 +41,15 @@
 (declare-function treesit-query-capture "treesit.c")
 
 (defvar treesit--async-worker-pool)
+(defvar font-lock--commit-queue)
+(defvar font-lock--commit-timer)
 
 (declare-function treesit--async-query-string-spans "treesit"
                   (string query language &rest args))
+(declare-function treesit--async-font-lock-region "treesit"
+                  (beg end query language override))
 (declare-function treesit--async-shutdown-workers "treesit" ())
+(declare-function font-lock--dispatch-commits "font-lock" ())
 
 (declare-function treesit-node-type "treesit.c")
 (declare-function treesit-node-start "treesit.c")
@@ -98,6 +103,76 @@
       (when treesit--async-worker-pool
         (treesit--async-shutdown-workers))
       (setq treesit--async-worker-pool old-pool))))
+
+(ert-deftest treesit-async-font-lock-region-commits-spans ()
+  "Async tree-sitter font-lock spans are committed to unchanged buffers."
+  (skip-unless (treesit-language-available-p 'json))
+  (let ((old-pool treesit--async-worker-pool)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq treesit--async-worker-pool nil
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "{\"name\":\"Bob\"}")
+          (treesit--async-font-lock-region
+           (point-min) (point-max)
+           '((string) @font-lock-string-face)
+           'json nil)
+          (with-timeout (3 (ert-fail "Timed out waiting for async tree-sitter font-lock"))
+            (while (not (get-text-property 2 'face))
+              (accept-process-output nil 0.01)
+              (when font-lock--commit-queue
+                (font-lock--dispatch-commits))))
+          (should (eq (get-text-property 2 'face)
+                      'font-lock-string-face))
+          (should (eq (get-text-property 9 'face)
+                      'font-lock-string-face))
+          (should-not (get-text-property 1 'face)))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when treesit--async-worker-pool
+        (treesit--async-shutdown-workers))
+      (setq treesit--async-worker-pool old-pool
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
+(ert-deftest treesit-async-font-lock-region-drops-stale-spans ()
+  "Async tree-sitter font-lock spans are dropped after buffer mutation."
+  (skip-unless (treesit-language-available-p 'json))
+  (let ((old-pool treesit--async-worker-pool)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq treesit--async-worker-pool nil
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "{\"name\":\"Bob\"}")
+          (treesit--async-font-lock-region
+           (point-min) (point-max)
+           '((string) @font-lock-string-face)
+           'json nil)
+          (goto-char (point-max))
+          (insert " ")
+          (with-timeout (3 (ert-fail "Timed out waiting for stale tree-sitter font-lock"))
+            (while (or (not treesit--async-worker-pool)
+                       (cl-some #'elisp-worker-callbacks
+                                (elisp-worker-pool-workers
+                                 treesit--async-worker-pool))
+                       font-lock--commit-queue)
+              (accept-process-output nil 0.01)
+              (when font-lock--commit-queue
+                (font-lock--dispatch-commits))))
+          (should-not (get-text-property 2 'face)))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when treesit--async-worker-pool
+        (treesit--async-shutdown-workers))
+      (setq treesit--async-worker-pool old-pool
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
 
 (ert-deftest treesit-basic-parsing ()
   "Test basic parsing routines."
