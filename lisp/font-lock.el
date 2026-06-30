@@ -532,13 +532,21 @@ REQUESTS is an alist of (BUFFER . (START . END)) entries."
     requests))
 
 (defun font-lock--flush-redisplay-requests (requests)
-  "Force redisplay for merged redisplay REQUESTS."
-  (dolist (entry requests)
-    (pcase-let ((`(,buffer . (,start . ,end)) entry))
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (jit-lock-force-redisplay (copy-marker start)
-                                    (copy-marker end)))))))
+  "Force redisplay for merged redisplay REQUESTS.
+Return requests not flushed because input is pending."
+  (let ((remaining requests)
+        (flushed 0))
+    (while (and remaining
+                (or (zerop flushed)
+                    (not (and font-lock-commit-defer-on-input
+                              (input-pending-p)))))
+      (pcase-let ((`(,buffer . (,start . ,end)) (pop remaining)))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (jit-lock-force-redisplay (copy-marker start)
+                                      (copy-marker end)))))
+      (setq flushed (1+ flushed)))
+    remaining))
 
 (defun font-lock--dispatch-commits ()
   "Dispatch queued font-lock commits.
@@ -573,7 +581,8 @@ Return a plist with commit progress metrics."
                  font-lock-commit-defer-on-input
                  (input-pending-p))
             (setq font-lock--pending-redisplay-requests redisplay-requests)
-          (font-lock--flush-redisplay-requests redisplay-requests))
+          (setq font-lock--pending-redisplay-requests
+                (font-lock--flush-redisplay-requests redisplay-requests)))
         (list :processed processed
               :dropped dropped
               :remaining (length font-lock--commit-queue)))
