@@ -151,7 +151,8 @@
               (font-lock--queue-commit
                buffer tick
                (lambda (value)
-                 (sit-for 0.001)
+                 (let ((end (+ (float-time) 0.001)))
+                   (while (< (float-time) end)))
                  (push value seen))
                i))
             (when (timerp font-lock--commit-timer)
@@ -277,6 +278,45 @@
           (insert "alpha beta alpha")
           (let ((font-lock-async-keywords t)
                 (font-lock-keywords '(("alpha" . font-lock-keyword-face)))
+                (font-lock-keywords-only t)
+                (font-lock-keywords-case-fold-search nil)
+                (font-lock-set-defaults t)
+                (font-lock-syntax-table nil)
+                (font-lock-syntactic-keywords nil)
+                (font-lock-syntactically-fontified 0)
+                (font-lock-extend-region-functions nil))
+            (font-lock-default-fontify-region (point-min) (point-max) nil)
+            (should-not (get-text-property 1 'face))
+            (with-timeout (3 (ert-fail "Timed out waiting for default async font-lock"))
+              (while (not (get-text-property 1 'face))
+                (accept-process-output nil 0.01)
+                (when font-lock--commit-queue
+                  (font-lock--dispatch-commits))))
+            (should (eq (get-text-property 1 'face)
+                        'font-lock-keyword-face))
+            (should-not (get-text-property 7 'face))
+            (should (eq (get-text-property 12 'face)
+                        'font-lock-keyword-face))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when font-lock--async-worker-pool
+        (font-lock--async-shutdown-workers))
+      (setq font-lock--async-worker-pool old-pool
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
+(ert-deftest font-lock-default-fontify-region-uses-async-keywords-by-default ()
+  "Eligible keyword fontification is asynchronous without local opt-in."
+  (let ((old-pool font-lock--async-worker-pool)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq font-lock--async-worker-pool nil
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "alpha beta alpha")
+          (let ((font-lock-keywords '(("alpha" . font-lock-keyword-face)))
                 (font-lock-keywords-only t)
                 (font-lock-keywords-case-fold-search nil)
                 (font-lock-set-defaults t)

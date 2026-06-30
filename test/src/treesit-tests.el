@@ -185,6 +185,43 @@
             font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
 
+(ert-deftest treesit-font-lock-fontify-region-schedules-async-by-default ()
+  "Eligible tree-sitter font-lock queries are asynchronous by default."
+  (skip-unless (treesit-language-available-p 'json))
+  (let ((old-pool treesit--async-worker-pool)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq treesit--async-worker-pool nil
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "{\"name\":\"Bob\"}")
+          (let ((treesit-primary-parser (treesit-parser-create 'json))
+                (treesit-font-lock-settings
+                 (treesit-font-lock-rules
+                  :language 'json
+                  :feature 'string
+                  '((string) @font-lock-string-face))))
+            (treesit-font-lock-fontify-region (point-min) (point-max))
+            (should-not (get-text-property 2 'face))
+            (with-timeout (3 (ert-fail "Timed out waiting for default async tree-sitter font-lock"))
+              (while (not (get-text-property 2 'face))
+                (accept-process-output nil 0.01)
+                (when font-lock--commit-queue
+                  (font-lock--dispatch-commits))))
+            (should (eq (get-text-property 2 'face)
+                        'font-lock-string-face))
+            (should (eq (get-text-property 9 'face)
+                        'font-lock-string-face))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when treesit--async-worker-pool
+        (treesit--async-shutdown-workers))
+      (setq treesit--async-worker-pool old-pool
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
 (ert-deftest treesit-font-lock-async-forces-redisplay-after-commit ()
   "Async tree-sitter font-lock commits request redisplay."
   (skip-unless (treesit-language-available-p 'json))

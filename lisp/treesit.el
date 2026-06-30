@@ -182,7 +182,7 @@ of max unsigned 32-bit value for byte offsets into buffer text."
   :group 'treesit
   :version "31.1")
 
-(defcustom treesit-font-lock-async nil
+(defcustom treesit-font-lock-async t
   "Non-nil means tree-sitter font-lock may prepare face spans asynchronously.
 This only applies to font-lock settings that can be represented as
 plain face spans.  Settings with function captures continue to run

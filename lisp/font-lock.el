@@ -331,7 +331,7 @@ queued commit and then yield once the budget is exhausted."
   :group 'font-lock
   :version "31.1")
 
-(defcustom font-lock-async-keywords nil
+(defcustom font-lock-async-keywords t
   "If non-nil, schedule eligible keyword fontification in worker processes.
 Only simple regexp-face keyword specs are eligible.  Other keyword forms
 continue to use the synchronous font-lock path."
