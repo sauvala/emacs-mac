@@ -498,15 +498,29 @@ BUFFER, TICK, FUNCTION and ARGS are as in `font-lock--queue-commit',
 except SPANS is split into chunks no larger than
 `font-lock-async-commit-span-batch-size' and passed as FUNCTION's first
 argument."
-  (let ((batch-size (max 1 font-lock-async-commit-span-batch-size)))
-    (while spans
+  (let ((batch-size (max 1 font-lock-async-commit-span-batch-size))
+        (queued 0))
+    (while (and spans
+                (or (zerop queued)
+                    (not (and font-lock-commit-defer-on-input
+                              (input-pending-p)))))
       (let ((chunk nil)
             (count 0))
         (while (and spans (< count batch-size))
           (push (pop spans) chunk)
           (setq count (1+ count)))
         (apply #'font-lock--queue-commit
-               buffer tick function (nreverse chunk) args)))))
+               buffer tick function (nreverse chunk) args)
+        (setq queued (1+ queued))))
+    (when spans
+      (apply #'font-lock--queue-commit
+             buffer tick #'font-lock--queue-span-commit-continuation
+             tick function spans args))))
+
+(defun font-lock--queue-span-commit-continuation (tick function spans &rest args)
+  "Continue queueing worker-computed SPANS for the current buffer."
+  (apply #'font-lock--queue-span-commits
+         (current-buffer) tick function spans args))
 
 (defun font-lock--redisplay-request-region (request)
   "Return the region described by redisplay REQUEST, or nil."
