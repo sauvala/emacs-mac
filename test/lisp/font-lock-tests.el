@@ -361,6 +361,40 @@
             font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
 
+(ert-deftest font-lock-async-skips-queue-for-stale-worker-result ()
+  "Stale worker-computed font-lock spans are not queued for commit."
+  (let ((old-pool font-lock--async-worker-pool)
+        (old-pending font-lock--async-pending-jobs)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer)
+        success-fn)
+    (setq font-lock--async-worker-pool nil
+          font-lock--async-pending-jobs (make-hash-table :test #'equal)
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "alpha")
+          (cl-letf (((symbol-function 'elisp-worker-pool-async-eval)
+                     (lambda (_pool _form &rest args)
+                       (setq success-fn (plist-get args :success-fn)))))
+            (font-lock--async-fontify-region
+             (point-min) (point-max)
+             '(("alpha" . font-lock-keyword-face)))
+            (insert " changed")
+            (funcall success-fn '((1 6 font-lock-keyword-face)))
+            (should-not font-lock--commit-queue)
+            (should (= (hash-table-count font-lock--async-pending-jobs)
+                       0))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when font-lock--async-worker-pool
+        (font-lock--async-shutdown-workers))
+      (setq font-lock--async-worker-pool old-pool
+            font-lock--async-pending-jobs old-pending
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
 (ert-deftest font-lock-default-fontify-region-can-use-async-keywords ()
   "The default region fontifier can schedule eligible keywords asynchronously."
   (let ((old-pool font-lock--async-worker-pool)

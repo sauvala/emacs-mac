@@ -581,6 +581,12 @@ Return a plist with commit progress metrics."
   "Return an async font-lock job key for BUFFER snapshot TICK."
   (list buffer tick beg end keywords case-fold))
 
+(defun font-lock--buffer-tick-current-p (buffer tick)
+  "Return non-nil if BUFFER is live and its modified tick is TICK."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (= tick (buffer-chars-modified-tick)))))
+
 (defun font-lock--async-normalize-simple-keywords (keywords)
   "Return worker-safe simple KEYWORDS, or nil if unsupported.
 The returned value contains only elements of the form (REGEXP SUBEXP FACE)."
@@ -688,8 +694,9 @@ and (REGEXP SUBEXP FACE)."
          :success-fn
          (lambda (spans)
            (remhash key font-lock--async-pending-jobs)
-           (font-lock--queue-span-commits
-            buffer tick #'font-lock--apply-async-spans spans))
+           (when (font-lock--buffer-tick-current-p buffer tick)
+             (font-lock--queue-span-commits
+              buffer tick #'font-lock--apply-async-spans spans)))
          :error-fn
          (lambda (message _data)
            (remhash key font-lock--async-pending-jobs)

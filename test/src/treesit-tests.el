@@ -405,6 +405,45 @@
             font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
 
+(ert-deftest treesit-async-font-lock-region-skips-queue-for-stale-result ()
+  "Stale async tree-sitter font-lock spans are not queued for commit."
+  (skip-unless (treesit-language-available-p 'json))
+  (let ((old-pool treesit--async-worker-pool)
+        (old-pending treesit--async-pending-jobs)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer)
+        success-fn)
+    (setq treesit--async-worker-pool nil
+          treesit--async-pending-jobs (make-hash-table :test #'equal)
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "{\"name\":\"Bob\"}")
+          (cl-letf (((symbol-function 'elisp-worker-pool-async-eval)
+                     (lambda (_pool _form &rest args)
+                       (setq success-fn (plist-get args :success-fn)))))
+            (treesit--async-font-lock-region
+             (point-min) (point-max)
+             '((string) @font-lock-string-face)
+             'json nil)
+            (goto-char (point-max))
+            (insert " ")
+            (funcall success-fn
+                     '((font-lock-string-face 2 8)
+                       (font-lock-string-face 9 14)))
+            (should-not font-lock--commit-queue)
+            (should (= (hash-table-count treesit--async-pending-jobs)
+                       0))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when treesit--async-worker-pool
+        (treesit--async-shutdown-workers))
+      (setq treesit--async-worker-pool old-pool
+            treesit--async-pending-jobs old-pending
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
 (ert-deftest treesit-basic-parsing ()
   "Test basic parsing routines."
   (skip-unless (treesit-language-available-p 'json))

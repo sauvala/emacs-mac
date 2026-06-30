@@ -65,6 +65,8 @@
 (declare-function elisp-worker-pool-shutdown "elisp-worker" (pool))
 (declare-function elisp-worker-pool-async-eval "elisp-worker"
                   (pool form &rest args))
+(declare-function font-lock--buffer-tick-current-p "font-lock"
+                  (buffer tick))
 (declare-function font-lock--queue-span-commits "font-lock"
                   (buffer tick function spans &rest args))
 
@@ -703,9 +705,10 @@ tick still matches the snapshot."
        :success-fn
        (lambda (spans)
          (remhash key treesit--async-pending-jobs)
-         (font-lock--queue-span-commits
-          buffer tick #'treesit--async-font-lock-apply-spans
-          spans override beg end))
+         (when (font-lock--buffer-tick-current-p buffer tick)
+           (font-lock--queue-span-commits
+            buffer tick #'treesit--async-font-lock-apply-spans
+            spans override beg end)))
        :error-fn
        (lambda (message _data)
          (remhash key treesit--async-pending-jobs)
