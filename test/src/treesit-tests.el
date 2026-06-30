@@ -49,6 +49,8 @@
 (defvar treesit-tests--function-capture-called)
 (defvar treesit-range-settings)
 (defvar treesit--syntax-propertize-start)
+(defvar treesit-primary-parser)
+(defvar treesit--pre-redisplay-tick)
 
 (declare-function treesit--async-query-string-spans "treesit"
                   (string query language &rest args))
@@ -57,6 +59,7 @@
 (declare-function treesit--async-shutdown-workers "treesit" ())
 (declare-function treesit--font-lock-mark-ranges-to-fontify "treesit"
                   (ranges))
+(declare-function treesit--pre-redisplay "treesit" (&rest args))
 (declare-function treesit-font-lock-fontify-region "treesit"
                   (start end &optional loudly))
 (declare-function treesit-update-ranges "treesit" (&optional beg end))
@@ -261,6 +264,28 @@
       (should-not (get-text-property 2 'fontified))
       (should (eq (get-text-property 5 'fontified) t))
       (should (= treesit--syntax-propertize-start 2)))))
+
+(ert-deftest treesit-pre-redisplay-defers-while-input-is-pending ()
+  "Tree-sitter pre-redisplay reparsing yields while input is pending."
+  (with-temp-buffer
+    (insert "abcdef")
+    (let ((treesit-primary-parser 'parser)
+          (treesit--pre-redisplay-tick nil)
+          parser-calls
+          mark-calls)
+      (cl-letf (((symbol-function 'input-pending-p)
+                 (lambda (&optional _) t))
+                ((symbol-function 'treesit-parser-changed-regions)
+                 (lambda (_parser)
+                   (setq parser-calls (1+ (or parser-calls 0)))
+                   '((2 . 5))))
+                ((symbol-function 'treesit--font-lock-mark-ranges-to-fontify)
+                 (lambda (_ranges)
+                   (setq mark-calls (1+ (or mark-calls 0))))))
+        (treesit--pre-redisplay)
+        (should-not parser-calls)
+        (should-not mark-calls)
+        (should-not treesit--pre-redisplay-tick)))))
 
 (ert-deftest treesit-font-lock-fontify-region-schedules-async-by-default ()
   "Eligible tree-sitter font-lock queries are asynchronous by default."

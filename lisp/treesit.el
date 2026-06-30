@@ -196,6 +196,17 @@ objects from the current buffer."
   :group 'treesit
   :version "31.1")
 
+(defcustom treesit-pre-redisplay-defer-on-input t
+  "Non-nil means defer tree-sitter pre-redisplay reparsing on pending input.
+When this is non-nil, `treesit--pre-redisplay' avoids forcing parser
+changed-region computation while input is pending.  The pre-redisplay
+tick is left unchanged, so a later redisplay without pending input can
+catch up and mark changed ranges for refontification."
+  :type 'boolean
+  :safe #'booleanp
+  :group 'treesit
+  :version "32.1")
+
 ;;; Parser API supplement
 
 ;; The primary parser will be accessed frequently (after each re-parse,
@@ -2524,15 +2535,17 @@ parser."
 (defun treesit--pre-redisplay (&rest _)
   "Force a reparse on primary parser and mark regions to be fontified."
   (unless (eq treesit--pre-redisplay-tick (buffer-chars-modified-tick))
-    (when treesit-primary-parser
-      ;; Force a reparse on the primary parser and update embedded
-      ;; parser ranges in the changed ranges.
-      (let ((affected-ranges (treesit-parser-changed-regions
-                              treesit-primary-parser)))
-        (when affected-ranges
-          (treesit--font-lock-mark-ranges-to-fontify affected-ranges))))
+    (unless (and treesit-pre-redisplay-defer-on-input
+                 (input-pending-p))
+      (when treesit-primary-parser
+        ;; Force a reparse on the primary parser and update embedded
+        ;; parser ranges in the changed ranges.
+        (let ((affected-ranges (treesit-parser-changed-regions
+                                treesit-primary-parser)))
+          (when affected-ranges
+            (treesit--font-lock-mark-ranges-to-fontify affected-ranges))))
 
-    (setq treesit--pre-redisplay-tick (buffer-chars-modified-tick))))
+      (setq treesit--pre-redisplay-tick (buffer-chars-modified-tick)))))
 
 (defun treesit--pre-syntax-ppss (start end)
   "Force reparse and consequently run all notifiers.
