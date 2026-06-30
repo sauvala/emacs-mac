@@ -647,7 +647,8 @@ Return a plist with commit progress metrics."
 
 (defun font-lock--async-normalize-simple-keywords (keywords)
   "Return worker-safe simple KEYWORDS, or nil if unsupported.
-The returned value contains only elements of the form (REGEXP SUBEXP FACE)."
+The returned value contains only elements of the form
+(REGEXP SUBEXP FACE OVERRIDE)."
   (catch 'unsupported
     (cond
      ((not (consp keywords))
@@ -662,11 +663,13 @@ The returned value contains only elements of the form (REGEXP SUBEXP FACE)."
             (unless (and (consp highlight)
                          (numberp (car highlight))
                          (symbolp (cadr highlight))
-                         (not (nth 2 highlight)))
+                         (memq (nth 2 highlight) '(nil t))
+                         (not (nth 3 highlight)))
               (throw 'unsupported nil))
             (push (list (car keyword)
                         (car highlight)
-                        (cadr highlight))
+                        (cadr highlight)
+                        (nth 2 highlight))
                   normalized)))
         (nreverse normalized)))
      (t
@@ -676,14 +679,16 @@ The returned value contains only elements of the form (REGEXP SUBEXP FACE)."
            ((and (consp spec)
                  (stringp (car spec))
                  (symbolp (cdr spec)))
-            (push (list (car spec) 0 (cdr spec)) normalized))
+            (push (list (car spec) 0 (cdr spec) nil) normalized))
            ((and (consp spec)
                  (stringp (car spec))
                  (consp (cdr spec))
                  (numberp (cadr spec))
                  (symbolp (nth 2 spec))
-                 (not (nth 3 spec)))
-            (push (list (car spec) (cadr spec) (nth 2 spec)) normalized))
+                 (memq (nth 3 spec) '(nil t))
+                 (not (nth 4 spec)))
+            (push (list (car spec) (cadr spec) (nth 2 spec) (nth 3 spec))
+                  normalized))
            (t
             (throw 'unsupported nil))))
         (nreverse normalized))))))
@@ -691,7 +696,7 @@ The returned value contains only elements of the form (REGEXP SUBEXP FACE)."
 (defun font-lock--async-simple-span-form (text keywords case-fold offset)
   "Return a worker form computing simple font-lock spans.
 TEXT is the immutable buffer snapshot.  KEYWORDS contains simple
-regexp-face specs of the form (REGEXP SUBEXP FACE).
+regexp-face specs of the form (REGEXP SUBEXP FACE OVERRIDE).
 OFFSET converts worker-buffer positions to source-buffer positions."
   `(let ((text ,text)
          (keywords ',keywords)
@@ -701,10 +706,11 @@ OFFSET converts worker-buffer positions to source-buffer positions."
      (with-temp-buffer
        (insert text)
        (dolist (spec keywords)
-         (let (regexp subexp face)
+         (let (regexp subexp face override)
            (setq regexp (car spec)
                  subexp (cadr spec)
-                 face (nth 2 spec))
+                 face (nth 2 spec)
+                 override (nth 3 spec))
            (when (and regexp face)
              (goto-char (point-min))
              (while (re-search-forward regexp nil t)
@@ -713,7 +719,8 @@ OFFSET converts worker-buffer positions to source-buffer positions."
                  (when (and start end (< start end))
                    (push (list (+ offset start)
                                (+ offset end)
-                               face)
+                               face
+                               override)
                          spans)))))))
        (nreverse spans))))
 
@@ -722,10 +729,12 @@ OFFSET converts worker-buffer positions to source-buffer positions."
   (let (redisplay-start redisplay-end)
     (with-silent-modifications
       (dolist (span spans)
-        (pcase-let ((`(,start ,end ,face) span))
-          (put-text-property start end 'face face)
-          (setq redisplay-start (min (or redisplay-start start) start)
-                redisplay-end (max (or redisplay-end end) end)))))
+        (pcase-let ((`(,start ,end ,face ,override) span))
+          (when (or override
+                    (not (text-property-not-all start end 'face nil)))
+            (put-text-property start end 'face face)
+            (setq redisplay-start (min (or redisplay-start start) start)
+                  redisplay-end (max (or redisplay-end end) end))))))
     (when (and redisplay-start redisplay-end)
       `(font-lock-redisplay ,redisplay-start . ,redisplay-end))))
 
@@ -733,7 +742,7 @@ OFFSET converts worker-buffer positions to source-buffer positions."
   "Prepare simple KEYWORDS for BEG..END in a worker and commit later.
 This is an internal, snapshot-based path for async font-lock preparation.
 It currently supports simple regexp-face specs of the form (REGEXP . FACE)
-and (REGEXP SUBEXP FACE)."
+and (REGEXP SUBEXP FACE [OVERRIDE]), where OVERRIDE is nil or t."
   (when-let* ((keywords (font-lock--async-normalize-simple-keywords keywords)))
     (let* ((buffer (current-buffer))
            (tick (buffer-chars-modified-tick))
