@@ -661,10 +661,12 @@ non-nil in a repeated invocation of this function."
     ;; Force fontification of the visible parts.
     (let ((buffers jit-lock-defer-buffers)
           (jit-lock-defer-timer nil))
-      (setq jit-lock-defer-buffers nil)
-      ;; (message "Jit-Defer Now")
-      (unless (redisplay)                       ;FIXME: Should we `force'?
-        (setq jit-lock-defer-buffers buffers))
+      (unless (and jit-lock-defer-on-input
+                   (input-pending-p))
+        (setq jit-lock-defer-buffers nil)
+        ;; (message "Jit-Defer Now")
+        (unless (redisplay)                     ;FIXME: Should we `force'?
+          (setq jit-lock-defer-buffers buffers)))
       ;; (message "Jit-Defer Done")
       ))
   (when (and jit-lock-defer-timer
