@@ -2325,66 +2325,68 @@ detail.")
 If LOUDLY is non-nil, display some debugging information."
   (when (or loudly treesit--font-lock-verbose)
     (message "Fontifying region: %s-%s" start end))
-  (treesit-update-ranges start end)
-  (font-lock-unfontify-region start end)
-  (let* ((local-parsers (treesit-local-parsers-on start end))
-         (global-parsers (treesit-parser-list))
-         (root-nodes
-          (mapcar #'treesit-parser-root-node
-                  (append local-parsers global-parsers))))
-    ;; Can't we combine all the queries in each setting into one big
-    ;; query? That should make font-lock faster? I tried, it shaved off
-    ;; 1ms in xdisp.c, and 0.3ms in a small C file (for typing a single
-    ;; character), not worth it.  --yuan
-    (dolist (setting treesit-font-lock-settings)
-      (let* ((query (treesit-font-lock-setting-query setting))
-             (enable (treesit-font-lock-setting-enable setting))
-             (override (treesit-font-lock-setting-override setting))
-             (language (treesit-font-lock-setting-language setting))
-             (root-nodes (cl-remove-if-not
-                          (lambda (node)
-                            (eq (treesit-node-language node) language))
-                          root-nodes)))
+  (let ((local-parsers (treesit-local-parsers-on start end)))
+    (when (or treesit-range-settings local-parsers)
+      (treesit-update-ranges start end)
+      (setq local-parsers (treesit-local-parsers-on start end)))
+    (font-lock-unfontify-region start end)
+    (let* ((global-parsers (treesit-parser-list))
+           (root-nodes
+            (mapcar #'treesit-parser-root-node
+                    (append local-parsers global-parsers))))
+      ;; Can't we combine all the queries in each setting into one big
+      ;; query? That should make font-lock faster? I tried, it shaved off
+      ;; 1ms in xdisp.c, and 0.3ms in a small C file (for typing a single
+      ;; character), not worth it.  --yuan
+      (dolist (setting treesit-font-lock-settings)
+        (let* ((query (treesit-font-lock-setting-query setting))
+               (enable (treesit-font-lock-setting-enable setting))
+               (override (treesit-font-lock-setting-override setting))
+               (language (treesit-font-lock-setting-language setting))
+               (root-nodes (cl-remove-if-not
+                            (lambda (node)
+                              (eq (treesit-node-language node) language))
+                            root-nodes)))
 
-        ;; Use deterministic way to decide whether to turn on "fast
-        ;; mode". (See bug#60691, bug#60223.)
-        (when (eq treesit--font-lock-fast-mode 'unspecified)
-          (pcase-let ((`(,max-depth ,max-width)
-                       (treesit-subtree-stat
-                        (treesit-parser-root-node
-                         treesit-primary-parser))))
-            (setq treesit--font-lock-fast-mode
-                  (or (> max-depth 100) (> max-width 4000)))))
+          ;; Use deterministic way to decide whether to turn on "fast
+          ;; mode". (See bug#60691, bug#60223.)
+          (when (eq treesit--font-lock-fast-mode 'unspecified)
+            (pcase-let ((`(,max-depth ,max-width)
+                         (treesit-subtree-stat
+                          (treesit-parser-root-node
+                           treesit-primary-parser))))
+              (setq treesit--font-lock-fast-mode
+                    (or (> max-depth 100) (> max-width 4000)))))
 
-        ;; Only activate if ENABLE flag is t.
-        (when-let*
-            ((activate (eq t enable))
-             (nodes (if (eq t treesit--font-lock-fast-mode)
-                        (mapcan
-                         (lambda (node)
-                           (treesit--children-covering-range-recurse
-                            node start end (* 4 jit-lock-chunk-size)))
-                         root-nodes)
-                      root-nodes)))
-          (ignore activate)
+          ;; Only activate if ENABLE flag is t.
+          (when-let*
+              ((activate (eq t enable))
+               (nodes (if (eq t treesit--font-lock-fast-mode)
+                          (mapcan
+                           (lambda (node)
+                             (treesit--children-covering-range-recurse
+                              node start end (* 4 jit-lock-chunk-size)))
+                           root-nodes)
+                        root-nodes)))
+            (ignore activate)
 
-          ;; Query each node.
-          (let ((query-beg (max (- start
-                                   (car treesit--font-lock-query-expand-range))
-                                (point-min)))
-                (query-end (min (+ end
-                                   (cdr treesit--font-lock-query-expand-range))
-                                (point-max))))
-            (if (and treesit-font-lock-async
-                     (null local-parsers)
-                     (not (eq t treesit--font-lock-fast-mode))
-                     (null (cdr nodes))
-                     (treesit--font-lock-query-async-compatible-p query))
-                (treesit--async-font-lock-region
-                 start end query language override query-beg query-end)
-              (dolist (sub-node nodes)
-                (treesit--font-lock-fontify-region-1
-                 sub-node query start end override loudly))))))))
+            ;; Query each node.
+            (let ((query-beg (max (- start
+                                     (car treesit--font-lock-query-expand-range))
+                                  (point-min)))
+                  (query-end (min (+ end
+                                     (cdr treesit--font-lock-query-expand-range))
+                                  (point-max))))
+              (if (and treesit-font-lock-async
+                       (null local-parsers)
+                       (not (eq t treesit--font-lock-fast-mode))
+                       (null (cdr nodes))
+                       (treesit--font-lock-query-async-compatible-p query))
+                  (treesit--async-font-lock-region
+                   start end query language override query-beg query-end)
+                (dolist (sub-node nodes)
+                  (treesit--font-lock-fontify-region-1
+                   sub-node query start end override loudly)))))))))
   `(jit-lock-bounds ,start . ,end))
 
 (defun treesit--font-lock-fontify-region-1 (node query start end override loudly)

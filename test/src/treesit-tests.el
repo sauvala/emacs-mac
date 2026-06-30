@@ -52,6 +52,9 @@
 (declare-function treesit--async-font-lock-region "treesit"
                   (beg end query language override))
 (declare-function treesit--async-shutdown-workers "treesit" ())
+(declare-function treesit-font-lock-fontify-region "treesit"
+                  (start end &optional loudly))
+(declare-function treesit-update-ranges "treesit" (&optional beg end))
 (declare-function font-lock--dispatch-commits "font-lock" ())
 (declare-function jit-lock-force-redisplay "jit-lock" (start end))
 
@@ -184,6 +187,29 @@
       (setq treesit--async-worker-pool old-pool
             font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
+
+(ert-deftest treesit-font-lock-skips-range-update-without-range-settings ()
+  "Tree-sitter font-lock does not update ranges when no ranges exist."
+  (skip-unless (treesit-language-available-p 'json))
+  (with-temp-buffer
+    (insert "{\"name\":\"Bob\"}")
+    (let ((treesit-primary-parser (treesit-parser-create 'json))
+          (treesit-font-lock-settings
+           (treesit-font-lock-rules
+            :language 'json
+            :feature 'string
+            '((string) @font-lock-string-face)))
+          (treesit-font-lock-async nil)
+          (treesit-range-settings nil)
+          (range-update-calls 0))
+      (cl-letf (((symbol-function 'treesit-update-ranges)
+                 (lambda (&optional _beg _end)
+                   (setq range-update-calls
+                         (1+ range-update-calls)))))
+        (treesit-font-lock-fontify-region (point-min) (point-max)))
+      (should (= range-update-calls 0))
+      (should (eq (get-text-property 2 'face)
+                  'font-lock-string-face)))))
 
 (ert-deftest treesit-font-lock-fontify-region-schedules-async-by-default ()
   "Eligible tree-sitter font-lock queries are asynchronous by default."
