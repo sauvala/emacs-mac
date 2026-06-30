@@ -101,4 +101,25 @@
               (should (eq (get-text-property (point-min) 'fontified) t)))
           (jit-lock-mode nil))))))
 
+(ert-deftest jit-lock-deferred-fontify-yields-while-input-is-pending ()
+  (ert-with-test-buffer (:name "xxx")
+    (insert "xyz")
+    (with-silent-modifications
+      (put-text-property (point-min) (point-max) 'fontified 'defer))
+    (let ((jit-lock-defer-on-input t)
+          (jit-lock-defer-timer (timer-create))
+          (jit-lock--defer-timer-input-only t)
+          (jit-lock-defer-buffers (list (current-buffer)))
+          redisplayed)
+      (cl-letf (((symbol-function 'input-pending-p) (lambda (&optional _) t))
+                ((symbol-function 'redisplay)
+                 (lambda (&optional _force)
+                   (setq redisplayed t)
+                   t)))
+        (jit-lock-deferred-fontify)
+        (should-not redisplayed)
+        (should (memq (current-buffer) jit-lock-defer-buffers))
+        (should (eq (get-text-property (point-min) 'fontified) 'defer))
+        (should (timerp jit-lock-defer-timer))))))
+
 ;;; jit-lock-tests.el ends here
