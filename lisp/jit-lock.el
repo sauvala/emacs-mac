@@ -638,7 +638,10 @@ non-nil in a repeated invocation of this function."
 
 (defun jit-lock-deferred-fontify ()
   "Fontify what was deferred."
-  (when (and jit-lock-defer-buffers (not memory-full))
+  (when (and jit-lock-defer-buffers
+             (not memory-full)
+             (not (and jit-lock-defer-on-input
+                       (input-pending-p))))
     ;; Mark the deferred regions back to `fontified = nil'
     (dolist (buffer jit-lock-defer-buffers)
       (when (buffer-live-p buffer)
