@@ -198,6 +198,20 @@ objects from the current buffer."
   :group 'treesit
   :version "31.1")
 
+(defcustom treesit-font-lock-settings-budget 0.005
+  "Maximum seconds spent visiting tree-sitter font-lock settings per call.
+The default is a small positive budget so buffers with many tree-sitter
+font-lock settings yield back to the command loop.  If nil, visit all
+settings in one call.  When this is a positive number, visit at least
+one setting and then yield once the budget is exhausted."
+  :type '(choice (const :tag "Visit all settings in one call" nil)
+                 (number :tag "Seconds"))
+  :safe (lambda (value)
+          (or (null value)
+              (and (numberp value) (>= value 0))))
+  :group 'treesit
+  :version "31.1")
+
 (defcustom treesit-font-lock-defer-on-input t
   "Non-nil means tree-sitter font-lock yields between settings on input.
 When this is non-nil, tree-sitter font-lock visits at least one setting
@@ -2326,6 +2340,12 @@ detail.")
                   (not (functionp capture))))
             (treesit--font-lock-query-captures query)))
 
+(defun treesit--font-lock-settings-budget ()
+  "Return the active tree-sitter font-lock settings budget, or nil."
+  (and (numberp treesit-font-lock-settings-budget)
+       (>= treesit-font-lock-settings-budget 0)
+       treesit-font-lock-settings-budget))
+
 ;; Some details worth explaining:
 ;;
 ;; 1. When we apply face to a node, we clip the face into the
@@ -2375,6 +2395,8 @@ later font-lock commit turn."
       (treesit-update-ranges start end)
       (setq local-parsers (treesit-local-parsers-on start end)))
     (let* ((global-parsers (treesit-parser-list))
+           (budget (treesit--font-lock-settings-budget))
+           (started (and budget (float-time)))
            (root-nodes
             (mapcar #'treesit-parser-root-node
                     (append local-parsers global-parsers)))
@@ -2439,8 +2461,10 @@ later font-lock commit turn."
         (setq settings (cdr settings))
         (setq yielded
               (and settings
-                   treesit-font-lock-defer-on-input
-                   (input-pending-p))))
+                   (or (and treesit-font-lock-defer-on-input
+                            (input-pending-p))
+                       (and budget
+                            (>= (- (float-time) started) budget))))))
       (when settings
         (font-lock--queue-commit
          (current-buffer) (buffer-chars-modified-tick)
