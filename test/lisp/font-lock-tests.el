@@ -109,6 +109,7 @@
 (ert-deftest font-lock-queue-span-commits-splits-large-span-lists ()
   "Large async span lists are split into multiple queued commits."
   (let ((font-lock-async-commit-span-batch-size 1)
+        (font-lock-commit-defer-on-input nil)
         (old-queue font-lock--commit-queue)
         (old-timer font-lock--commit-timer))
     (setq font-lock--commit-queue nil
@@ -170,6 +171,43 @@
                              ((3 4 font-lock-string-face)
                               (5 6 font-lock-comment-face))
                              :extra)))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (setq font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
+(ert-deftest font-lock-queue-span-commits-is-bounded-without-input ()
+  "Async span commit queueing uses a continuation for remaining split work."
+  (let ((font-lock-async-commit-span-batch-size 1)
+        (font-lock-commit-defer-on-input t)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((buffer (current-buffer))
+                (tick (buffer-chars-modified-tick)))
+            (cl-letf (((symbol-function 'input-pending-p)
+                       (lambda (&optional _) nil)))
+              (font-lock--queue-span-commits
+               buffer tick #'ignore
+               '((1 2 font-lock-keyword-face)
+                 (3 4 font-lock-string-face)
+                 (5 6 font-lock-comment-face))))
+            (when (timerp font-lock--commit-timer)
+              (cancel-timer font-lock--commit-timer)
+              (setq font-lock--commit-timer nil))
+            (should (= (length font-lock--commit-queue) 2))
+            (should (eq (nth 2 (car font-lock--commit-queue))
+                        #'ignore))
+            (should (eq (nth 2 (cadr font-lock--commit-queue))
+                        #'font-lock--queue-span-commit-continuation))
+            (should (equal (nth 3 (cadr font-lock--commit-queue))
+                           `(,tick
+                             ,#'ignore
+                             ((3 4 font-lock-string-face)
+                              (5 6 font-lock-comment-face)))))))
       (when (timerp font-lock--commit-timer)
         (cancel-timer font-lock--commit-timer))
       (setq font-lock--commit-queue old-queue

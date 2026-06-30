@@ -497,13 +497,13 @@ modified tick changes before dispatch, the queued commit is dropped."
 BUFFER, TICK, FUNCTION and ARGS are as in `font-lock--queue-commit',
 except SPANS is split into chunks no larger than
 `font-lock-async-commit-span-batch-size' and passed as FUNCTION's first
-argument."
+argument.  If `font-lock-commit-defer-on-input' is non-nil, queue one
+chunk and leave remaining split work for a continuation."
   (let ((batch-size (max 1 font-lock-async-commit-span-batch-size))
         (queued 0))
     (while (and spans
-                (or (zerop queued)
-                    (not (and font-lock-commit-defer-on-input
-                              (input-pending-p)))))
+                (or (not font-lock-commit-defer-on-input)
+                    (zerop queued)))
       (let ((chunk nil)
             (count 0))
         (while (and spans (< count batch-size))
