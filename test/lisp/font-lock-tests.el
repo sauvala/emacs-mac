@@ -28,13 +28,17 @@
 (defvar font-lock--commit-queue)
 (defvar font-lock--commit-timer)
 (defvar font-lock-commit-dispatch-budget)
+(defvar font-lock-async-commit-span-batch-size)
 
 (declare-function font-lock--async-fontify-region "font-lock"
                   (beg end keywords))
+(declare-function font-lock--apply-async-spans "font-lock" (spans))
 (declare-function font-lock--async-shutdown-workers "font-lock" ())
 (declare-function font-lock--dispatch-commits "font-lock" ())
 (declare-function font-lock--queue-commit "font-lock"
                   (buffer tick function &rest args))
+(declare-function font-lock--queue-span-commits "font-lock"
+                  (buffer tick function spans &rest args))
 (declare-function jit-lock-force-redisplay "jit-lock" (start end))
 
 (defun font-lock-tests--async-workers-idle-p ()
@@ -95,6 +99,34 @@
             (should (equal (font-lock--dispatch-commits)
                            '(:processed 0 :dropped 1 :remaining 0)))
             (should-not called)))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (setq font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
+(ert-deftest font-lock-queue-span-commits-splits-large-span-lists ()
+  "Large async span lists are split into multiple queued commits."
+  (let ((font-lock-async-commit-span-batch-size 1)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((buffer (current-buffer))
+                (tick (buffer-chars-modified-tick)))
+            (font-lock--queue-span-commits
+             buffer tick #'font-lock--apply-async-spans
+             '((1 2 font-lock-keyword-face)
+               (3 4 font-lock-string-face)))
+            (when (timerp font-lock--commit-timer)
+              (cancel-timer font-lock--commit-timer)
+              (setq font-lock--commit-timer nil))
+            (should (= (length font-lock--commit-queue) 2))
+            (should (equal (nth 3 (car font-lock--commit-queue))
+                           '(((1 2 font-lock-keyword-face)))))
+            (should (equal (nth 3 (cadr font-lock--commit-queue))
+                           '(((3 4 font-lock-string-face)))))))
       (when (timerp font-lock--commit-timer)
         (cancel-timer font-lock--commit-timer))
       (setq font-lock--commit-queue old-queue

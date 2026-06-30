@@ -340,6 +340,17 @@ continue to use the synchronous font-lock path."
   :group 'font-lock
   :version "31.1")
 
+(defcustom font-lock-async-commit-span-batch-size 512
+  "Maximum number of worker-computed font-lock spans to commit at once.
+Large worker results are split into multiple queued commits so main-thread
+face application can yield between chunks according to
+`font-lock-commit-dispatch-budget'."
+  :type 'natnum
+  :safe (lambda (value)
+          (and (integerp value) (> value 0)))
+  :group 'font-lock
+  :version "31.1")
+
 
 ;; Obsolete face variables.
 
@@ -463,6 +474,22 @@ modified tick changes before dispatch, the queued commit is dropped."
         (nconc font-lock--commit-queue
                (list (list buffer tick function args))))
   (font-lock--ensure-commit-timer))
+
+(defun font-lock--queue-span-commits (buffer tick function spans &rest args)
+  "Queue worker-computed SPANS as bounded font-lock commits.
+BUFFER, TICK, FUNCTION and ARGS are as in `font-lock--queue-commit',
+except SPANS is split into chunks no larger than
+`font-lock-async-commit-span-batch-size' and passed as FUNCTION's first
+argument."
+  (let ((batch-size (max 1 font-lock-async-commit-span-batch-size)))
+    (while spans
+      (let ((chunk nil)
+            (count 0))
+        (while (and spans (< count batch-size))
+          (push (pop spans) chunk)
+          (setq count (1+ count)))
+        (apply #'font-lock--queue-commit
+               buffer tick function (nreverse chunk) args)))))
 
 (defun font-lock--commit-redisplay (request)
   "Honor redisplay REQUEST returned by a queued commit function."
@@ -622,7 +649,7 @@ and (REGEXP SUBEXP FACE)."
        form
        :success-fn
        (lambda (spans)
-         (font-lock--queue-commit
+         (font-lock--queue-span-commits
           buffer tick #'font-lock--apply-async-spans spans))
        :error-fn
        (lambda (message _data)

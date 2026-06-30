@@ -64,8 +64,8 @@
 (declare-function elisp-worker-pool-shutdown "elisp-worker" (pool))
 (declare-function elisp-worker-pool-async-eval "elisp-worker"
                   (pool form &rest args))
-(declare-function font-lock--queue-commit "font-lock"
-                  (buffer tick function &rest args))
+(declare-function font-lock--queue-span-commits "font-lock"
+                  (buffer tick function spans &rest args))
 
 ;;; Function declarations
 
@@ -686,7 +686,7 @@ tick still matches the snapshot."
      :offset (1- query-beg)
      :success-fn
      (lambda (spans)
-       (font-lock--queue-commit
+       (font-lock--queue-span-commits
         buffer tick #'treesit--async-font-lock-apply-spans
         spans override beg end))
      :error-fn
