@@ -645,12 +645,29 @@ is added to each returned position."
 (defun treesit--async-font-lock-apply-spans
     (spans override &optional bound-start bound-end)
   "Apply tree-sitter font-lock SPANS with OVERRIDE in the current buffer."
-  (with-silent-modifications
-    (dolist (span spans)
-      (pcase-let ((`(,capture ,start ,end) span))
-        (when (facep capture)
-          (treesit-fontify-with-override
-           start end capture override bound-start bound-end))))))
+  (let (redisplay-start redisplay-end)
+    (with-silent-modifications
+      (dolist (span spans)
+        (pcase-let ((`(,capture ,start ,end) span))
+          (when (and (facep capture)
+                     (or (null bound-start) (null bound-end)
+                         (and (<= bound-start end)
+                              (>= bound-end start))))
+            (let ((applied-start start)
+                  (applied-end end))
+              (when (and bound-start bound-end)
+                (setq applied-start (max bound-start applied-start)
+                      applied-end (min bound-end applied-end)))
+              (treesit-fontify-with-override
+               start end capture override bound-start bound-end)
+              (setq redisplay-start
+                    (min (or redisplay-start applied-start)
+                         applied-start)
+                    redisplay-end
+                    (max (or redisplay-end applied-end)
+                         applied-end)))))))
+    (when (and redisplay-start redisplay-end)
+      `(font-lock-redisplay ,redisplay-start . ,redisplay-end))))
 
 (defun treesit--async-font-lock-region
     (beg end query language override &optional query-beg query-end)

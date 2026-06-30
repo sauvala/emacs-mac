@@ -213,6 +213,7 @@
 (declare-function elisp-worker-pool-shutdown "elisp-worker" (pool))
 (declare-function elisp-worker-pool-async-eval "elisp-worker"
                   (pool form &rest args))
+(declare-function jit-lock-force-redisplay "jit-lock" (start end))
 
 ;; Define core `font-lock' group.
 (defgroup font-lock '((jit-lock custom-group))
@@ -463,6 +464,17 @@ modified tick changes before dispatch, the queued commit is dropped."
                (list (list buffer tick function args))))
   (font-lock--ensure-commit-timer))
 
+(defun font-lock--commit-redisplay (request)
+  "Honor redisplay REQUEST returned by a queued commit function."
+  (pcase request
+    (`(font-lock-redisplay ,start . ,end)
+     (when (and (fboundp 'jit-lock-force-redisplay)
+                (integer-or-marker-p start)
+                (integer-or-marker-p end)
+                (< start end))
+       (jit-lock-force-redisplay (copy-marker start)
+                                 (copy-marker end))))))
+
 (defun font-lock--dispatch-commits ()
   "Dispatch queued font-lock commits.
 Return a plist with commit progress metrics."
@@ -483,7 +495,8 @@ Return a plist with commit progress metrics."
                          (with-current-buffer buffer
                            (= tick (buffer-chars-modified-tick)))))
                 (with-current-buffer buffer
-                  (apply function args)
+                  (font-lock--commit-redisplay
+                   (apply function args))
                   (setq processed (1+ processed)))
               (setq dropped (1+ dropped)))))
         (list :processed processed
@@ -581,10 +594,15 @@ OFFSET converts worker-buffer positions to source-buffer positions."
 
 (defun font-lock--apply-async-spans (spans)
   "Apply async font-lock SPANS in the current buffer."
-  (with-silent-modifications
-    (dolist (span spans)
-      (pcase-let ((`(,start ,end ,face) span))
-        (put-text-property start end 'face face)))))
+  (let (redisplay-start redisplay-end)
+    (with-silent-modifications
+      (dolist (span spans)
+        (pcase-let ((`(,start ,end ,face) span))
+          (put-text-property start end 'face face)
+          (setq redisplay-start (min (or redisplay-start start) start)
+                redisplay-end (max (or redisplay-end end) end)))))
+    (when (and redisplay-start redisplay-end)
+      `(font-lock-redisplay ,redisplay-start . ,redisplay-end))))
 
 (defun font-lock--async-fontify-region (beg end keywords)
   "Prepare simple KEYWORDS for BEG..END in a worker and commit later.

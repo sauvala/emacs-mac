@@ -18,6 +18,7 @@
 ;; along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Code:
+(require 'cl-lib)
 (require 'ert)
 (require 'elisp-worker)
 (require 'font-lock)
@@ -34,6 +35,7 @@
 (declare-function font-lock--dispatch-commits "font-lock" ())
 (declare-function font-lock--queue-commit "font-lock"
                   (buffer tick function &rest args))
+(declare-function jit-lock-force-redisplay "jit-lock" (start end))
 
 (defun font-lock-tests--async-workers-idle-p ()
   "Return non-nil if async font-lock workers have no outstanding callbacks."
@@ -93,6 +95,40 @@
             (should (equal (font-lock--dispatch-commits)
                            '(:processed 0 :dropped 1 :remaining 0)))
             (should-not called)))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (setq font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
+(ert-deftest font-lock-commit-queue-forces-redisplay-for-returned-region ()
+  "Queued commits can request redisplay after applying async faces."
+  (let ((old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer)
+        calls)
+    (setq font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "abc")
+          (let ((buffer (current-buffer))
+                (tick (buffer-chars-modified-tick)))
+            (cl-letf (((symbol-function 'jit-lock-force-redisplay)
+                       (lambda (start end)
+                         (push (list (marker-buffer start)
+                                     (marker-position start)
+                                     (marker-position end))
+                               calls))))
+              (font-lock--queue-commit
+               buffer tick
+               (lambda ()
+                 '(font-lock-redisplay 1 . 4)))
+              (when (timerp font-lock--commit-timer)
+                (cancel-timer font-lock--commit-timer)
+                (setq font-lock--commit-timer nil))
+              (should (equal (font-lock--dispatch-commits)
+                             '(:processed 1 :dropped 0 :remaining 0)))
+              (should (equal calls
+                             `((,buffer 1 4)))))))
       (when (timerp font-lock--commit-timer)
         (cancel-timer font-lock--commit-timer))
       (setq font-lock--commit-queue old-queue
@@ -159,6 +195,42 @@
           (should-not (get-text-property 7 'face))
           (should (eq (get-text-property 12 'face)
                       'font-lock-keyword-face)))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when font-lock--async-worker-pool
+        (font-lock--async-shutdown-workers))
+      (setq font-lock--async-worker-pool old-pool
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
+(ert-deftest font-lock-async-forces-redisplay-after-worker-commit ()
+  "Async font-lock commits request redisplay after applying faces."
+  (let ((old-pool font-lock--async-worker-pool)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer)
+        calls)
+    (setq font-lock--async-worker-pool nil
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "alpha beta")
+          (let ((buffer (current-buffer))
+                (font-lock-keywords-case-fold-search nil))
+            (cl-letf (((symbol-function 'jit-lock-force-redisplay)
+                       (lambda (start end)
+                         (push (list (marker-buffer start)
+                                     (marker-position start)
+                                     (marker-position end))
+                               calls))))
+              (font-lock--async-fontify-region
+               (point-min) (point-max)
+               '(("alpha" . font-lock-keyword-face)))
+              (font-lock-tests--wait-for-async-font-lock-idle)
+              (should (eq (get-text-property 1 'face)
+                          'font-lock-keyword-face))
+              (should (equal calls
+                             `((,buffer 1 6)))))))
       (when (timerp font-lock--commit-timer)
         (cancel-timer font-lock--commit-timer))
       (when font-lock--async-worker-pool
