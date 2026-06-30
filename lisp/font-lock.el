@@ -492,16 +492,37 @@ argument."
         (apply #'font-lock--queue-commit
                buffer tick function (nreverse chunk) args)))))
 
-(defun font-lock--commit-redisplay (request)
-  "Honor redisplay REQUEST returned by a queued commit function."
+(defun font-lock--redisplay-request-region (request)
+  "Return the region described by redisplay REQUEST, or nil."
   (pcase request
     (`(font-lock-redisplay ,start . ,end)
      (when (and (fboundp 'jit-lock-force-redisplay)
                 (integer-or-marker-p start)
                 (integer-or-marker-p end)
                 (< start end))
-       (jit-lock-force-redisplay (copy-marker start)
-                                 (copy-marker end))))))
+       (cons start end)))))
+
+(defun font-lock--merge-redisplay-request (requests buffer request)
+  "Merge REQUEST for BUFFER into redisplay REQUESTS.
+REQUESTS is an alist of (BUFFER . (START . END)) entries."
+  (if-let* ((range (font-lock--redisplay-request-region request)))
+      (let ((existing (assq buffer requests)))
+        (if existing
+            (setcdr existing
+                    (cons (min (cadr existing) (car range))
+                          (max (cddr existing) (cdr range))))
+          (push (cons buffer range) requests))
+        requests)
+    requests))
+
+(defun font-lock--flush-redisplay-requests (requests)
+  "Force redisplay for merged redisplay REQUESTS."
+  (dolist (entry requests)
+    (pcase-let ((`(,buffer . (,start . ,end)) entry))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (jit-lock-force-redisplay (copy-marker start)
+                                    (copy-marker end)))))))
 
 (defun font-lock--dispatch-commits ()
   "Dispatch queued font-lock commits.
@@ -511,7 +532,8 @@ Return a plist with commit progress metrics."
       (let ((budget (font-lock--commit-dispatch-budget))
             (started (float-time))
             (processed 0)
-            (dropped 0))
+            (dropped 0)
+            redisplay-requests)
         (while (and font-lock--commit-queue
                     (or (zerop (+ processed dropped))
                         (not budget)
@@ -523,10 +545,12 @@ Return a plist with commit progress metrics."
                          (with-current-buffer buffer
                            (= tick (buffer-chars-modified-tick)))))
                 (with-current-buffer buffer
-                  (font-lock--commit-redisplay
-                   (apply function args))
+                  (setq redisplay-requests
+                        (font-lock--merge-redisplay-request
+                         redisplay-requests buffer (apply function args)))
                   (setq processed (1+ processed)))
               (setq dropped (1+ dropped)))))
+        (font-lock--flush-redisplay-requests redisplay-requests)
         (list :processed processed
               :dropped dropped
               :remaining (length font-lock--commit-queue)))
