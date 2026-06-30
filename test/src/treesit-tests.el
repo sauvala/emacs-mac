@@ -46,12 +46,16 @@
 (defvar font-lock--commit-timer)
 (defvar treesit-font-lock-async)
 (defvar treesit-tests--function-capture-called)
+(defvar treesit-range-settings)
+(defvar treesit--syntax-propertize-start)
 
 (declare-function treesit--async-query-string-spans "treesit"
                   (string query language &rest args))
 (declare-function treesit--async-font-lock-region "treesit"
                   (beg end query language override))
 (declare-function treesit--async-shutdown-workers "treesit" ())
+(declare-function treesit--font-lock-mark-ranges-to-fontify "treesit"
+                  (ranges))
 (declare-function treesit-font-lock-fontify-region "treesit"
                   (start end &optional loudly))
 (declare-function treesit-update-ranges "treesit" (&optional beg end))
@@ -210,6 +214,24 @@
       (should (= range-update-calls 0))
       (should (eq (get-text-property 2 'face)
                   'font-lock-string-face)))))
+
+(ert-deftest treesit-font-lock-mark-ranges-skips-unused-range-update ()
+  "Pre-redisplay range marking skips range updates when no ranges exist."
+  (with-temp-buffer
+    (insert "abcdef")
+    (put-text-property (point-min) (point-max) 'fontified t)
+    (let ((treesit-range-settings nil)
+          (treesit--syntax-propertize-start nil)
+          (range-update-calls 0))
+      (cl-letf (((symbol-function 'treesit-update-ranges)
+                 (lambda (&optional _beg _end)
+                   (setq range-update-calls
+                         (1+ range-update-calls)))))
+        (treesit--font-lock-mark-ranges-to-fontify '((2 . 5))))
+      (should (= range-update-calls 0))
+      (should-not (get-text-property 2 'fontified))
+      (should (eq (get-text-property 5 'fontified) t))
+      (should (= treesit--syntax-propertize-start 2)))))
 
 (ert-deftest treesit-font-lock-fontify-region-schedules-async-by-default ()
   "Eligible tree-sitter font-lock queries are asynchronous by default."

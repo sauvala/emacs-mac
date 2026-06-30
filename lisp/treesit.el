@@ -2465,7 +2465,9 @@ fontify the slash, but also the whole block comment, which previously
 wasn't fontified as comment due to incomplete parse tree."
   (dolist (range ranges)
     ;; 1. Update ranges.
-    (treesit-update-ranges (car range) (cdr range))
+    (when (or treesit-range-settings
+              (treesit-local-parsers-on (car range) (cdr range)))
+      (treesit-update-ranges (car range) (cdr range)))
     ;; 2. Mark the changed ranges to be fontified.
     (when treesit--font-lock-verbose
       (message "Notifier received range: %s-%s"
