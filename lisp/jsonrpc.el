@@ -593,6 +593,16 @@ yield once the budget is exhausted."
               (and (numberp value) (>= value 0))))
   :group 'jsonrpc)
 
+(defcustom jsonrpc-process-message-parse-defer-on-input t
+  "Non-nil means process message parsing yields while input is pending.
+When this is non-nil, `jsonrpc--process-filter' parses at least one
+complete process message and then leaves any remaining buffered input for
+a later timer turn if input is pending."
+  :version "32.1"
+  :type 'boolean
+  :safe #'booleanp
+  :group 'jsonrpc)
+
 
 ;;; Specific to `jsonrpc-process-connection'
 ;;;
@@ -942,8 +952,10 @@ Return a plist with dispatch progress metrics when PROC has a connection."
           (unwind-protect
               (while (not done)
                 (if (and (> parsed 0)
-                         budget
-                         (>= (- (float-time) started) budget))
+                         (or (and budget
+                                  (>= (- (float-time) started) budget))
+                             (and jsonrpc-process-message-parse-defer-on-input
+                                  (input-pending-p))))
                     (setq done :parse-budget-exhausted)
                   (cond
                    ((not expected-bytes)
