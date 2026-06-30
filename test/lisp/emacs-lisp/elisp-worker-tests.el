@@ -87,4 +87,16 @@
           (should (equal (sort results #'<) '(0 1))))
       (elisp-worker-pool-shutdown pool))))
 
+(ert-deftest elisp-worker-pool-start-lazy-grows-after-startup ()
+  "A lazy worker pool starts one worker and grows later."
+  (let ((pool (elisp-worker-pool-start-lazy 2 "lazy-worker-test")))
+    (unwind-protect
+        (progn
+          (should (= (length (elisp-worker-pool-workers pool)) 1))
+          (with-timeout (3 (ert-fail "Timed out waiting for lazy worker pool"))
+            (while (< (length (elisp-worker-pool-workers pool)) 2)
+              (accept-process-output nil 0.01)))
+          (should (= (length (elisp-worker-pool-workers pool)) 2)))
+      (elisp-worker-pool-shutdown pool))))
+
 ;;; elisp-worker-tests.el ends here

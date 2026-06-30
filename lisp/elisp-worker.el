@@ -45,7 +45,10 @@
 (cl-defstruct (elisp-worker-pool
                (:constructor elisp-worker-pool--make))
   workers
-  (cursor 0))
+  (cursor 0)
+  target-size
+  name
+  grow-timer)
 
 (defconst elisp-worker--loaded-file (or load-file-name buffer-file-name)
   "File from which `elisp-worker' was loaded.")
@@ -189,7 +192,47 @@ Optional NAME is used as the process name prefix."
     (elisp-worker-pool--make
      :workers (cl-loop for i from 1 to size
                        collect (elisp-worker-start
-                                (format "%s-%d" name i))))))
+                                (format "%s-%d" name i)))
+     :target-size size
+     :name name)))
+
+(defun elisp-worker-pool--schedule-grow (pool)
+  "Schedule POOL to start one more worker on a later timer turn."
+  (setf (elisp-worker-pool-grow-timer pool)
+        (run-at-time 0 nil #'elisp-worker-pool--grow pool)))
+
+(defun elisp-worker-pool--grow (pool)
+  "Start one missing worker for POOL and reschedule if needed."
+  (setf (elisp-worker-pool-grow-timer pool) nil)
+  (let ((target-size (elisp-worker-pool-target-size pool))
+        (workers (elisp-worker-pool-workers pool)))
+    (when (and target-size (< (length workers) target-size))
+      (let* ((next-index (1+ (length workers)))
+             (name (or (elisp-worker-pool-name pool)
+                       "elisp-worker-pool")))
+        (setf (elisp-worker-pool-workers pool)
+              (append workers
+                      (list (elisp-worker-start
+                             (format "%s-%d" name next-index))))))
+      (when (< (length (elisp-worker-pool-workers pool)) target-size)
+        (elisp-worker-pool--schedule-grow pool)))))
+
+(defun elisp-worker-pool-start-lazy (size &optional name)
+  "Start and return a worker pool that grows to SIZE over timer turns.
+One worker is started immediately so callers can submit work right away.
+Remaining workers are started one at a time from timers, avoiding a burst of
+process startup work on the calling command."
+  (unless (and (integerp size) (> size 0))
+    (error "Worker pool size must be a positive integer"))
+  (let* ((name (or name "elisp-worker-pool"))
+         (pool (elisp-worker-pool--make
+                :workers (list (elisp-worker-start
+                                (format "%s-1" name)))
+                :target-size size
+                :name name)))
+    (when (> size 1)
+      (elisp-worker-pool--schedule-grow pool))
+    pool))
 
 (defun elisp-worker-pool--next-worker (pool)
   "Return the next worker from POOL and advance its cursor."
@@ -213,8 +256,11 @@ SUCCESS-FN and ERROR-FN are interpreted as in
 
 (defun elisp-worker-pool-shutdown (pool)
   "Shut down all workers in POOL."
+  (when (timerp (elisp-worker-pool-grow-timer pool))
+    (cancel-timer (elisp-worker-pool-grow-timer pool)))
   (mapc #'elisp-worker-shutdown (elisp-worker-pool-workers pool))
-  (setf (elisp-worker-pool-workers pool) nil))
+  (setf (elisp-worker-pool-workers pool) nil
+        (elisp-worker-pool-grow-timer pool) nil))
 
 (defun elisp-worker--write-response (response)
   "Write one worker protocol RESPONSE to standard output."

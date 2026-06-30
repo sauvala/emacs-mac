@@ -60,7 +60,8 @@
 (require 'seq)
 (require 'prog-mode) ; For `prog--text-at-point-p'.
 
-(declare-function elisp-worker-pool-start "elisp-worker" (size &optional name))
+(declare-function elisp-worker-pool-start-lazy "elisp-worker"
+                  (size &optional name))
 (declare-function elisp-worker-pool-shutdown "elisp-worker" (pool))
 (declare-function elisp-worker-pool-async-eval "elisp-worker"
                   (pool form &rest args))
@@ -590,8 +591,8 @@ See `treesit-query-capture' for QUERY."
   (require 'elisp-worker)
   (unless treesit--async-worker-pool
     (setq treesit--async-worker-pool
-          (elisp-worker-pool-start treesit-async-worker-pool-size
-                                   "treesit-worker")))
+          (elisp-worker-pool-start-lazy treesit-async-worker-pool-size
+                                        "treesit-worker")))
   treesit--async-worker-pool)
 
 (defun treesit--async-shutdown-workers ()

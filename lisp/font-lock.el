@@ -209,7 +209,8 @@
 (require 'syntax)
 (eval-when-compile (require 'subr-x))
 
-(declare-function elisp-worker-pool-start "elisp-worker" (size &optional name))
+(declare-function elisp-worker-pool-start-lazy "elisp-worker"
+                  (size &optional name))
 (declare-function elisp-worker-pool-shutdown "elisp-worker" (pool))
 (declare-function elisp-worker-pool-async-eval "elisp-worker"
                   (pool form &rest args))
@@ -537,8 +538,8 @@ Return a plist with commit progress metrics."
   (require 'elisp-worker)
   (unless font-lock--async-worker-pool
     (setq font-lock--async-worker-pool
-          (elisp-worker-pool-start font-lock-async-worker-pool-size
-                                   "font-lock-worker")))
+          (elisp-worker-pool-start-lazy font-lock-async-worker-pool-size
+                                        "font-lock-worker")))
   font-lock--async-worker-pool)
 
 (defun font-lock--async-shutdown-workers ()
