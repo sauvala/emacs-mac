@@ -2556,17 +2556,19 @@ also want to extend the to-be-propertized region to include the
 whole region affected by the last reparse.
 
 START and END mark the current to-be-propertized region."
-  (treesit--pre-redisplay)
-  ;; `treesit--syntax-propertize-start' is set by
-  ;; `treesit--font-lock-mark-ranges-to-fontify', which is called after
-  ;; each re-parser on the primary parser and in
-  ;; `treesit--pre-redisplay'.
-  (let ((new-start treesit--syntax-propertize-start))
-    (if (and new-start (< new-start start))
-        (progn
-          (setq treesit--syntax-propertize-start nil)
-          (cons (max new-start (point-min)) end))
-      nil)))
+  (unless (and treesit-pre-redisplay-defer-on-input
+               (input-pending-p))
+    (treesit--pre-redisplay)
+    ;; `treesit--syntax-propertize-start' is set by
+    ;; `treesit--font-lock-mark-ranges-to-fontify', which is called after
+    ;; each re-parser on the primary parser and in
+    ;; `treesit--pre-redisplay'.
+    (let ((new-start treesit--syntax-propertize-start))
+      (if (and new-start (< new-start start))
+          (progn
+            (setq treesit--syntax-propertize-start nil)
+            (cons (max new-start (point-min)) end))
+        nil))))
 
 ;;; Indent
 

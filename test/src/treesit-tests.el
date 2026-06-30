@@ -287,6 +287,26 @@
         (should-not mark-calls)
         (should-not treesit--pre-redisplay-tick)))))
 
+(ert-deftest treesit-pre-syntax-ppss-defers-while-input-is-pending ()
+  "Tree-sitter syntax extension preserves pending work while input is pending."
+  (with-temp-buffer
+    (insert "abcdef")
+    (let ((treesit-primary-parser 'parser)
+          (treesit--pre-redisplay-tick nil)
+          (treesit--syntax-propertize-start 2)
+          (treesit-pre-redisplay-defer-on-input t)
+          parser-calls)
+      (cl-letf (((symbol-function 'input-pending-p)
+                 (lambda (&optional _) t))
+                ((symbol-function 'treesit-parser-changed-regions)
+                 (lambda (_parser)
+                   (setq parser-calls (1+ (or parser-calls 0)))
+                   '((2 . 5)))))
+        (should-not (treesit--pre-syntax-ppss 4 6))
+        (should-not parser-calls)
+        (should (= treesit--syntax-propertize-start 2))
+        (should-not treesit--pre-redisplay-tick)))))
+
 (ert-deftest treesit-font-lock-fontify-region-schedules-async-by-default ()
   "Eligible tree-sitter font-lock queries are asynchronous by default."
   (skip-unless (treesit-language-available-p 'json))
