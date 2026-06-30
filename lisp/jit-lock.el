@@ -642,33 +642,41 @@ non-nil in a repeated invocation of this function."
              (not memory-full)
              (not (and jit-lock-defer-on-input
                        (input-pending-p))))
-    ;; Mark the deferred regions back to `fontified = nil'
-    (dolist (buffer jit-lock-defer-buffers)
-      (when (buffer-live-p buffer)
-	(with-current-buffer buffer
-	  ;; (message "Jit-Defer %s" (buffer-name))
-	  (with-silent-modifications
-	   (let ((pos (point-min)))
-	     (while
-		 (progn
-		   (when (eq (get-text-property pos 'fontified) 'defer)
-		     (put-text-property
-		      pos (setq pos (next-single-property-change
-				     pos 'fontified nil (point-max)))
-		      'fontified nil))
-		   (setq pos (next-single-property-change
-                              pos 'fontified)))))))))
-    ;; Force fontification of the visible parts.
-    (let ((buffers jit-lock-defer-buffers)
-          (jit-lock-defer-timer nil))
-      (unless (and jit-lock-defer-on-input
-                   (input-pending-p))
-        (setq jit-lock-defer-buffers nil)
-        ;; (message "Jit-Defer Now")
-        (unless (redisplay)                     ;FIXME: Should we `force'?
-          (setq jit-lock-defer-buffers buffers)))
-      ;; (message "Jit-Defer Done")
-      ))
+    (let (yielded)
+      ;; Mark the deferred regions back to `fontified = nil'
+      (let ((buffers jit-lock-defer-buffers))
+        (while (and buffers (not yielded))
+          (let ((buffer (pop buffers)))
+            (when (buffer-live-p buffer)
+	      (with-current-buffer buffer
+	        ;; (message "Jit-Defer %s" (buffer-name))
+	        (with-silent-modifications
+	          (let ((pos (point-min)))
+	            (while
+		        (progn
+		          (when (eq (get-text-property pos 'fontified) 'defer)
+		            (put-text-property
+		             pos (setq pos (next-single-property-change
+				            pos 'fontified nil (point-max)))
+		             'fontified nil))
+		          (setq pos (next-single-property-change
+                                     pos 'fontified))))))))
+            (setq yielded
+                  (and buffers
+                       jit-lock-defer-on-input
+                       (input-pending-p))))))
+      ;; Force fontification of the visible parts.
+      (let ((buffers jit-lock-defer-buffers)
+            (jit-lock-defer-timer nil))
+        (unless (or yielded
+                    (and jit-lock-defer-on-input
+                         (input-pending-p)))
+          (setq jit-lock-defer-buffers nil)
+          ;; (message "Jit-Defer Now")
+          (unless (redisplay)                   ;FIXME: Should we `force'?
+            (setq jit-lock-defer-buffers buffers)))
+        ;; (message "Jit-Defer Done")
+        )))
   (when (and jit-lock-defer-timer
              jit-lock--defer-timer-input-only
              (null jit-lock-defer-buffers))

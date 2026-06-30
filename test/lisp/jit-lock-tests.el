@@ -146,4 +146,46 @@
         (should (memq (current-buffer) jit-lock-defer-buffers))
         (should (timerp jit-lock-defer-timer))))))
 
+(ert-deftest jit-lock-deferred-fontify-yields-between-buffers ()
+  (let ((buffer-a (generate-new-buffer "jit-lock-a"))
+        (buffer-b (generate-new-buffer "jit-lock-b"))
+        (jit-lock-defer-on-input t)
+        (jit-lock-defer-timer (timer-create))
+        (jit-lock--defer-timer-input-only t)
+        (input-checks 0)
+        redisplayed
+        jit-lock-defer-buffers)
+    (unwind-protect
+        (progn
+          (dolist (buffer (list buffer-a buffer-b))
+            (with-current-buffer buffer
+              (insert "xyz")
+              (with-silent-modifications
+                (put-text-property (point-min) (point-max)
+                                   'fontified 'defer))))
+          (setq jit-lock-defer-buffers (list buffer-a buffer-b))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&optional _)
+                       (setq input-checks (1+ input-checks))
+                       (= input-checks 2)))
+                    ((symbol-function 'redisplay)
+                     (lambda (&optional _force)
+                       (setq redisplayed t)
+                       t)))
+            (jit-lock-deferred-fontify)
+            (should-not redisplayed)
+            (with-current-buffer buffer-a
+              (should-not (eq (get-text-property (point-min) 'fontified)
+                              'defer)))
+            (with-current-buffer buffer-b
+              (should (eq (get-text-property (point-min) 'fontified)
+                          'defer)))
+            (should (equal jit-lock-defer-buffers
+                           (list buffer-a buffer-b)))
+            (should (timerp jit-lock-defer-timer))))
+      (when (buffer-live-p buffer-a)
+        (kill-buffer buffer-a))
+      (when (buffer-live-p buffer-b)
+        (kill-buffer buffer-b)))))
+
 ;;; jit-lock-tests.el ends here
