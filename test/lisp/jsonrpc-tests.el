@@ -254,6 +254,55 @@ INITARGS are passed to `make-instance' for `jsonrpc--test-client'."
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest process-message-parse-yields-while-input-is-pending ()
+  "JSON-RPC process message parsing leaves complete messages for later on input."
+  (skip-unless (executable-find "cat"))
+  (let ((jsonrpc-process-message-parse-budget nil)
+        (jsonrpc-process-message-parse-defer-on-input t)
+        proc conn)
+    (unwind-protect
+        (progn
+          (setq proc (make-process
+                      :name "jsonrpc-parse-input-test"
+                      :buffer (generate-new-buffer
+                               " *jsonrpc-parse-input-test*")
+                      :command (list "cat")
+                      :connection-type 'pipe
+                      :noquery t)
+                conn (make-instance
+                      'jsonrpc-process-connection
+                      :name "jsonrpc-parse-input-test"
+                      :process proc))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&optional _) t)))
+            (jsonrpc--process-filter
+             proc
+             (concat
+              (jsonrpc--test-wire-message
+               '(:jsonrpc "2.0" :method "one"))
+              (jsonrpc--test-wire-message
+               '(:jsonrpc "2.0" :method "two")))))
+          (should (timerp (process-get proc 'jsonrpc-parse-timer)))
+          (should (= (length (process-get proc 'jsonrpc-dispatch-queue)) 1))
+          (when-let* ((timer (process-get proc 'jsonrpc-parse-timer)))
+            (cancel-timer timer)
+            (process-put proc 'jsonrpc-parse-timer nil))
+          (let ((jsonrpc-process-message-parse-budget nil))
+            (jsonrpc--process-filter proc ""))
+          (should (= (length (process-get proc 'jsonrpc-dispatch-queue)) 2)))
+      (when proc
+        (dolist (prop '(jsonrpc-parse-timer jsonrpc-dispatch-timer))
+          (when-let* ((timer (process-get proc prop)))
+            (cancel-timer timer)))
+        (when (process-live-p proc)
+          (set-process-sentinel proc #'ignore)
+          (delete-process proc)))
+      (dolist (buffer (delq nil (list (and proc (process-buffer proc))
+                                      (and conn (jsonrpc--events-buffer conn))
+                                      (and conn (jsonrpc-stderr-buffer conn)))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest process-message-parse-budget-appends-while-timer-pending ()
   "New process output does not synchronously parse while a parse timer waits."
   (skip-unless (executable-find "cat"))
