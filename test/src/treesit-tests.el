@@ -42,6 +42,7 @@
 (declare-function treesit-query-capture "treesit.c")
 
 (defvar treesit--async-worker-pool)
+(defvar treesit--async-pending-jobs)
 (defvar font-lock--commit-queue)
 (defvar font-lock--commit-timer)
 (defvar treesit-font-lock-async)
@@ -153,6 +154,34 @@
       (setq treesit--async-worker-pool old-pool
             font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
+
+(ert-deftest treesit-async-font-lock-region-deduplicates-pending-work ()
+  "Duplicate async tree-sitter font-lock work is not resubmitted."
+  (skip-unless (treesit-language-available-p 'json))
+  (let ((old-pool treesit--async-worker-pool)
+        (old-pending treesit--async-pending-jobs)
+        submissions)
+    (setq treesit--async-worker-pool nil
+          treesit--async-pending-jobs (make-hash-table :test #'equal))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "{\"name\":\"Bob\"}")
+          (cl-letf (((symbol-function 'elisp-worker-pool-async-eval)
+                     (lambda (_pool form &rest _args)
+                       (push form submissions))))
+            (treesit--async-font-lock-region
+             (point-min) (point-max)
+             '((string) @font-lock-string-face)
+             'json nil)
+            (treesit--async-font-lock-region
+             (point-min) (point-max)
+             '((string) @font-lock-string-face)
+             'json nil)
+            (should (= (length submissions) 1))))
+      (when treesit--async-worker-pool
+        (treesit--async-shutdown-workers))
+      (setq treesit--async-worker-pool old-pool
+            treesit--async-pending-jobs old-pending))))
 
 (ert-deftest treesit-font-lock-fontify-region-can-schedule-async-spans ()
   "Tree-sitter font-lock can schedule face-only queries asynchronously."

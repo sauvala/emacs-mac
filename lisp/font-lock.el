@@ -452,6 +452,9 @@ This can be an \"!\" or the \"n\" in \"ifndef\".")
 (defvar font-lock--async-worker-pool nil
   "Worker pool used for async font-lock preparation.")
 
+(defvar font-lock--async-pending-jobs (make-hash-table :test #'equal)
+  "Pending async font-lock jobs keyed by buffer snapshot and region.")
+
 (defun font-lock--commit-dispatch-budget ()
   "Return the active font-lock commit dispatch budget, or nil."
   (and (numberp font-lock-commit-dispatch-budget)
@@ -570,7 +573,13 @@ Return a plist with commit progress metrics."
   "Shut down async font-lock worker processes."
   (when font-lock--async-worker-pool
     (elisp-worker-pool-shutdown font-lock--async-worker-pool)
-    (setq font-lock--async-worker-pool nil)))
+    (setq font-lock--async-worker-pool nil))
+  (when (hash-table-p font-lock--async-pending-jobs)
+    (clrhash font-lock--async-pending-jobs)))
+
+(defun font-lock--async-job-key (buffer tick beg end keywords case-fold)
+  "Return an async font-lock job key for BUFFER snapshot TICK."
+  (list buffer tick beg end keywords case-fold))
 
 (defun font-lock--async-normalize-simple-keywords (keywords)
   "Return worker-safe simple KEYWORDS, or nil if unsupported.
@@ -668,17 +677,23 @@ and (REGEXP SUBEXP FACE)."
            (case-fold font-lock-keywords-case-fold-search)
            (form (font-lock--async-simple-span-form text keywords
                                                     case-fold (1- beg)))
+           (key (font-lock--async-job-key buffer tick beg end keywords
+                                          case-fold))
            (pool (font-lock--async-worker-pool)))
-      (elisp-worker-pool-async-eval
-       pool
-       form
-       :success-fn
-       (lambda (spans)
-         (font-lock--queue-span-commits
-          buffer tick #'font-lock--apply-async-spans spans))
-       :error-fn
-       (lambda (message _data)
-         (message "Async font-lock worker failed: %s" message))))))
+      (unless (gethash key font-lock--async-pending-jobs)
+        (puthash key t font-lock--async-pending-jobs)
+        (elisp-worker-pool-async-eval
+         pool
+         form
+         :success-fn
+         (lambda (spans)
+           (remhash key font-lock--async-pending-jobs)
+           (font-lock--queue-span-commits
+            buffer tick #'font-lock--apply-async-spans spans))
+         :error-fn
+         (lambda (message _data)
+           (remhash key font-lock--async-pending-jobs)
+           (message "Async font-lock worker failed: %s" message)))))))
 
 (defvar font-lock-keywords nil
   "A list of keywords and corresponding font-lock highlighting rules.

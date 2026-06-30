@@ -25,6 +25,7 @@
 
 (defvar font-lock--async-worker-pool)
 (defvar font-lock-async-keywords)
+(defvar font-lock--async-pending-jobs)
 (defvar font-lock--commit-queue)
 (defvar font-lock--commit-timer)
 (defvar font-lock-commit-dispatch-budget)
@@ -273,6 +274,31 @@
       (setq font-lock--async-worker-pool old-pool
             font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
+
+(ert-deftest font-lock-async-deduplicates-pending-region-work ()
+  "Duplicate async font-lock work is not resubmitted while pending."
+  (let ((old-pool font-lock--async-worker-pool)
+        (old-pending font-lock--async-pending-jobs)
+        submissions)
+    (setq font-lock--async-worker-pool nil
+          font-lock--async-pending-jobs (make-hash-table :test #'equal))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "alpha beta alpha")
+          (cl-letf (((symbol-function 'elisp-worker-pool-async-eval)
+                     (lambda (_pool form &rest _args)
+                       (push form submissions))))
+            (font-lock--async-fontify-region
+             (point-min) (point-max)
+             '(("alpha" . font-lock-keyword-face)))
+            (font-lock--async-fontify-region
+             (point-min) (point-max)
+             '(("alpha" . font-lock-keyword-face)))
+            (should (= (length submissions) 1))))
+      (when font-lock--async-worker-pool
+        (font-lock--async-shutdown-workers))
+      (setq font-lock--async-worker-pool old-pool
+            font-lock--async-pending-jobs old-pending))))
 
 (ert-deftest font-lock-async-forces-redisplay-after-worker-commit ()
   "Async font-lock commits request redisplay after applying faces."

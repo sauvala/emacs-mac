@@ -586,6 +586,9 @@ See `treesit-query-capture' for QUERY."
 (defvar treesit--async-worker-pool nil
   "Worker pool used for async tree-sitter work.")
 
+(defvar treesit--async-pending-jobs (make-hash-table :test #'equal)
+  "Pending async tree-sitter jobs keyed by buffer snapshot and query.")
+
 (defun treesit--async-worker-pool ()
   "Return the lazy async tree-sitter worker pool."
   (require 'elisp-worker)
@@ -599,7 +602,15 @@ See `treesit-query-capture' for QUERY."
   "Shut down async tree-sitter worker processes."
   (when treesit--async-worker-pool
     (elisp-worker-pool-shutdown treesit--async-worker-pool)
-    (setq treesit--async-worker-pool nil)))
+    (setq treesit--async-worker-pool nil))
+  (when (hash-table-p treesit--async-pending-jobs)
+    (clrhash treesit--async-pending-jobs)))
+
+(defun treesit--async-font-lock-job-key
+    (buffer tick beg end query language override query-beg query-end)
+  "Return an async tree-sitter font-lock job key for BUFFER snapshot TICK."
+  (list buffer tick beg end (treesit--query-source-or-self query)
+        language override query-beg query-end))
 
 (defun treesit--async-query-string-spans-form
     (string query language &optional offset)
@@ -681,18 +692,24 @@ tick still matches the snapshot."
          (query-end (or query-end end))
          (buffer (current-buffer))
          (tick (buffer-chars-modified-tick))
+         (key (treesit--async-font-lock-job-key
+               buffer tick beg end query language override query-beg query-end))
          (text (buffer-substring-no-properties query-beg query-end)))
-    (treesit--async-query-string-spans
-     text query language
-     :offset (1- query-beg)
-     :success-fn
-     (lambda (spans)
-       (font-lock--queue-span-commits
-        buffer tick #'treesit--async-font-lock-apply-spans
-        spans override beg end))
-     :error-fn
-     (lambda (message _data)
-       (message "Async tree-sitter font-lock worker failed: %s" message)))))
+    (unless (gethash key treesit--async-pending-jobs)
+      (puthash key t treesit--async-pending-jobs)
+      (treesit--async-query-string-spans
+       text query language
+       :offset (1- query-beg)
+       :success-fn
+       (lambda (spans)
+         (remhash key treesit--async-pending-jobs)
+         (font-lock--queue-span-commits
+          buffer tick #'treesit--async-font-lock-apply-spans
+          spans override beg end))
+       :error-fn
+       (lambda (message _data)
+         (remhash key treesit--async-pending-jobs)
+         (message "Async tree-sitter font-lock worker failed: %s" message))))))
 
 (defsubst treesit--range-start (range)
   "Return the start of RANGE.
