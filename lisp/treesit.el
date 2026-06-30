@@ -2411,7 +2411,6 @@ If LOUDLY is non-nil, display some debugging information."
                                   (point-max))))
               (if (and treesit-font-lock-async
                        (null local-parsers)
-                       (null (cdr nodes))
                        (treesit--font-lock-query-async-compatible-p query))
                   (treesit--async-font-lock-region
                    start end query language override query-beg query-end)
