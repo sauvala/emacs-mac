@@ -224,6 +224,34 @@
             font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
 
+(ert-deftest treesit-font-lock-fast-mode-can-schedule-async-spans ()
+  "Tree-sitter fast mode still schedules face-only queries asynchronously."
+  (skip-unless (treesit-language-available-p 'json))
+  (with-temp-buffer
+    (insert "{\"name\":\"Bob\"}")
+    (let ((treesit-primary-parser (treesit-parser-create 'json))
+          (treesit-font-lock-settings
+           (treesit-font-lock-rules
+            :language 'json
+            :feature 'string
+            '((string) @font-lock-string-face)))
+          (treesit-font-lock-async t)
+          (treesit--font-lock-fast-mode t)
+          async-calls
+          sync-calls)
+      (cl-letf (((symbol-function 'treesit--children-covering-range-recurse)
+                 (lambda (node _start _end _limit)
+                   (list node)))
+                ((symbol-function 'treesit--async-font-lock-region)
+                 (lambda (&rest args)
+                   (push args async-calls)))
+                ((symbol-function 'treesit--font-lock-fontify-region-1)
+                 (lambda (&rest args)
+                   (push args sync-calls))))
+        (treesit-font-lock-fontify-region (point-min) (point-max))
+        (should async-calls)
+        (should-not sync-calls)))))
+
 (ert-deftest treesit-font-lock-skips-range-update-without-range-settings ()
   "Tree-sitter font-lock does not update ranges when no ranges exist."
   (skip-unless (treesit-language-available-p 'json))

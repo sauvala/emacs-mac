@@ -2411,7 +2411,6 @@ If LOUDLY is non-nil, display some debugging information."
                                   (point-max))))
               (if (and treesit-font-lock-async
                        (null local-parsers)
-                       (not (eq t treesit--font-lock-fast-mode))
                        (null (cdr nodes))
                        (treesit--font-lock-query-async-compatible-p query))
                   (treesit--async-font-lock-region
