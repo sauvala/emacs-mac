@@ -27,6 +27,7 @@
 (defvar font-lock-async-keywords)
 (defvar font-lock--async-pending-jobs)
 (defvar font-lock--commit-queue)
+(defvar font-lock--commit-queue-tail)
 (defvar font-lock--commit-timer)
 (defvar font-lock--pending-redisplay-requests)
 (defvar font-lock-commit-dispatch-budget)
@@ -82,9 +83,11 @@
 (ert-deftest font-lock-commit-queue-drops-stale-buffer-tick ()
   "Queued font-lock commits are dropped after the source buffer changes."
   (let ((old-queue font-lock--commit-queue)
+        (old-tail font-lock--commit-queue-tail)
         (old-timer font-lock--commit-timer)
         (called nil))
     (setq font-lock--commit-queue nil
+          font-lock--commit-queue-tail nil
           font-lock--commit-timer nil)
     (unwind-protect
         (with-temp-buffer
@@ -104,6 +107,40 @@
       (when (timerp font-lock--commit-timer)
         (cancel-timer font-lock--commit-timer))
       (setq font-lock--commit-queue old-queue
+            font-lock--commit-queue-tail old-tail
+            font-lock--commit-timer old-timer))))
+
+(ert-deftest font-lock-commit-queue-maintains-tail-pointer ()
+  "Queued font-lock commits maintain an append tail and reset it on drain."
+  (let ((old-queue font-lock--commit-queue)
+        (old-tail font-lock--commit-queue-tail)
+        (old-timer font-lock--commit-timer))
+    (setq font-lock--commit-queue nil
+          font-lock--commit-queue-tail nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "abc")
+          (let ((buffer (current-buffer))
+                (tick (buffer-chars-modified-tick)))
+            (font-lock--queue-commit buffer tick #'ignore 1)
+            (should (eq font-lock--commit-queue-tail
+                        (last font-lock--commit-queue)))
+            (font-lock--queue-commit buffer tick #'ignore 2)
+            (should (eq font-lock--commit-queue-tail
+                        (last font-lock--commit-queue)))
+            (should (= (length font-lock--commit-queue) 2))
+            (when (timerp font-lock--commit-timer)
+              (cancel-timer font-lock--commit-timer)
+              (setq font-lock--commit-timer nil))
+            (should (equal (font-lock--dispatch-commits)
+                           '(:processed 2 :dropped 0 :remaining 0)))
+            (should-not font-lock--commit-queue)
+            (should-not font-lock--commit-queue-tail)))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (setq font-lock--commit-queue old-queue
+            font-lock--commit-queue-tail old-tail
             font-lock--commit-timer old-timer))))
 
 (ert-deftest font-lock-queue-span-commits-splits-large-span-lists ()

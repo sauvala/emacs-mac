@@ -456,6 +456,9 @@ This can be an \"!\" or the \"n\" in \"ifndef\".")
 (defvar font-lock--commit-queue nil
   "Queued font-lock commits waiting to run in timer context.")
 
+(defvar font-lock--commit-queue-tail nil
+  "Last cons cell of `font-lock--commit-queue'.")
+
 (defvar font-lock--commit-timer nil
   "Timer used to dispatch `font-lock--commit-queue'.")
 
@@ -487,9 +490,15 @@ This can be an \"!\" or the \"n\" in \"ifndef\".")
   "Queue a font-lock commit for BUFFER if its modified TICK still matches.
 FUNCTION is called in BUFFER with ARGS.  If TICK is non-nil and BUFFER's
 modified tick changes before dispatch, the queued commit is dropped."
-  (setq font-lock--commit-queue
-        (nconc font-lock--commit-queue
-               (list (list buffer tick function args))))
+  (let ((cell (list (list buffer tick function args))))
+    (if (and font-lock--commit-queue font-lock--commit-queue-tail)
+        (setcdr font-lock--commit-queue-tail cell)
+      (when font-lock--commit-queue
+        (setq font-lock--commit-queue-tail (last font-lock--commit-queue))
+        (setcdr font-lock--commit-queue-tail cell))
+      (unless font-lock--commit-queue
+        (setq font-lock--commit-queue cell)))
+    (setq font-lock--commit-queue-tail cell))
   (font-lock--ensure-commit-timer))
 
 (defun font-lock--queue-span-commits (buffer tick function spans &rest args)
@@ -581,6 +590,8 @@ Return a plist with commit progress metrics."
                                  (< (- (float-time) started) budget)))))
           (pcase-let ((`(,buffer ,tick ,function ,args)
                        (pop font-lock--commit-queue)))
+            (unless font-lock--commit-queue
+              (setq font-lock--commit-queue-tail nil))
             (if (and (buffer-live-p buffer)
                      (or (not tick)
                          (with-current-buffer buffer
