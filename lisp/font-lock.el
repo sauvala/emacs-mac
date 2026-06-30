@@ -554,15 +554,17 @@ REQUESTS is an alist of (BUFFER . (START . END)) entries."
         requests)
     requests))
 
-(defun font-lock--flush-redisplay-requests (requests)
+(defun font-lock--flush-redisplay-requests (requests &optional started budget)
   "Force redisplay for merged redisplay REQUESTS.
-Return requests not flushed because input is pending."
+Return requests not flushed because input is pending or BUDGET expired."
   (let ((remaining requests)
         (flushed 0))
     (while (and remaining
                 (or (zerop flushed)
-                    (not (and font-lock-commit-defer-on-input
-                              (input-pending-p)))))
+                    (and (not (and font-lock-commit-defer-on-input
+                                   (input-pending-p)))
+                         (or (not budget)
+                             (< (- (float-time) started) budget)))))
       (pcase-let ((`(,buffer . (,start . ,end)) (pop remaining)))
         (when (buffer-live-p buffer)
           (with-current-buffer buffer
@@ -607,7 +609,8 @@ Return a plist with commit progress metrics."
                  (input-pending-p))
             (setq font-lock--pending-redisplay-requests redisplay-requests)
           (setq font-lock--pending-redisplay-requests
-                (font-lock--flush-redisplay-requests redisplay-requests)))
+                (font-lock--flush-redisplay-requests
+                 redisplay-requests started budget)))
         (list :processed processed
               :dropped dropped
               :remaining (length font-lock--commit-queue)))
