@@ -206,6 +206,60 @@ INITARGS are passed to `make-instance' for `jsonrpc--test-client'."
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest process-message-parse-budget-appends-while-timer-pending ()
+  "New process output does not synchronously parse while a parse timer waits."
+  (skip-unless (executable-find "cat"))
+  (let ((jsonrpc-process-message-parse-budget 0.000001)
+        proc conn)
+    (unwind-protect
+        (progn
+          (setq proc (make-process
+                      :name "jsonrpc-parse-append-test"
+                      :buffer (generate-new-buffer
+                               " *jsonrpc-parse-append-test*")
+                      :command (list "cat")
+                      :connection-type 'pipe
+                      :noquery t)
+                conn (make-instance
+                      'jsonrpc-process-connection
+                      :name "jsonrpc-parse-append-test"
+                      :process proc))
+          (jsonrpc--process-filter
+           proc
+           (concat
+            (jsonrpc--test-wire-message
+             '(:jsonrpc "2.0" :method "one"))
+            (jsonrpc--test-wire-message
+             '(:jsonrpc "2.0" :method "two"))))
+          (let ((timer (process-get proc 'jsonrpc-parse-timer)))
+            (should (timerp timer))
+            (should (= (length (process-get proc 'jsonrpc-dispatch-queue))
+                       1))
+            (jsonrpc--process-filter
+             proc
+             (jsonrpc--test-wire-message
+              '(:jsonrpc "2.0" :method "three")))
+            (should (eq timer (process-get proc 'jsonrpc-parse-timer)))
+            (should (= (length (process-get proc 'jsonrpc-dispatch-queue))
+                       1))
+            (cancel-timer timer)
+            (process-put proc 'jsonrpc-parse-timer nil))
+          (let ((jsonrpc-process-message-parse-budget nil))
+            (jsonrpc--process-filter proc ""))
+          (should (= (length (process-get proc 'jsonrpc-dispatch-queue)) 3)))
+      (when proc
+        (dolist (prop '(jsonrpc-parse-timer jsonrpc-dispatch-timer))
+          (when-let* ((timer (process-get proc prop)))
+            (cancel-timer timer)))
+        (when (process-live-p proc)
+          (set-process-sentinel proc #'ignore)
+          (delete-process proc)))
+      (dolist (buffer (delq nil (list (and proc (process-buffer proc))
+                                      (and conn (jsonrpc--events-buffer conn))
+                                      (and conn (jsonrpc-stderr-buffer conn)))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest times-out ()
   "Request for 3-sec sit-for with 1-sec timeout times out."
   (skip-when (eq system-type 'windows-nt))
