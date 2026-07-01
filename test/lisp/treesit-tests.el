@@ -29,6 +29,18 @@
 (defvar treesit-font-lock-settings-budget)
 
 (declare-function font-lock--dispatch-commits "font-lock" ())
+(declare-function treesit--async-font-lock-apply-spans "treesit"
+                  (spans override &optional bound-start bound-end))
+
+(ert-deftest treesit-async-font-lock-apply-spans-skips-empty-bound-intersection ()
+  "Async tree-sitter span commits ignore zero-width bound intersections."
+  (with-temp-buffer
+    (insert "abcdef")
+    (should-not
+     (treesit--async-font-lock-apply-spans
+      '((font-lock-keyword-face 1 4)) t 4 6))
+    (should-not (get-text-property 3 'face))
+    (should-not (get-text-property 4 'face))))
 
 (ert-deftest treesit-font-lock-fontify-region-yields-between-settings ()
   "Tree-sitter font-lock leaves remaining settings queued on input."
