@@ -667,7 +667,6 @@ Return a plist with commit progress metrics."
     (let ((value (cadr face)))
       (when (and (consp value)
                  (eq (car value) 'face)
-                 (symbolp (cadr value))
                  (font-lock--async-property-list-p (cddr value)))
         (list (cadr value) (cddr value)))))))
 
