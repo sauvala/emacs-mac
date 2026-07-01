@@ -125,4 +125,57 @@
       (setq font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
 
+(ert-deftest treesit-font-lock-fontify-region-defers-range-update-on-input ()
+  "Tree-sitter font-lock defers range updates when input is pending."
+  (let ((old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer)
+        (treesit-font-lock-settings
+         '((query-a t feature-a nil nil elisp)))
+        (treesit-font-lock-async nil)
+        (treesit--font-lock-fast-mode nil)
+        (treesit-range-settings '(range-setting))
+        (treesit-font-lock-defer-on-input t)
+        (font-lock-commit-defer-on-input nil)
+        (treesit-font-lock-settings-budget nil)
+        (input-pending t)
+        (range-updates 0)
+        (fontified nil))
+    (setq font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "abc")
+          (cl-letf (((symbol-function 'treesit-local-parsers-on)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'treesit-update-ranges)
+                     (lambda (&rest _)
+                       (setq range-updates (1+ range-updates))))
+                    ((symbol-function 'treesit-parser-list)
+                     (lambda (&optional _) '(parser)))
+                    ((symbol-function 'treesit-parser-root-node)
+                     (lambda (_) 'node))
+                    ((symbol-function 'treesit-node-language)
+                     (lambda (_) 'elisp))
+                    ((symbol-function 'treesit--font-lock-fontify-region-1)
+                     (lambda (_node query _start _end _override _loudly)
+                       (push query fontified)))
+                    ((symbol-function 'input-pending-p)
+                     (lambda (&optional _) input-pending)))
+            (treesit-font-lock-fontify-region (point-min) (point-max))
+            (should (= range-updates 0))
+            (should-not fontified)
+            (should (= (length font-lock--commit-queue) 1))
+            (when (timerp font-lock--commit-timer)
+              (cancel-timer font-lock--commit-timer)
+              (setq font-lock--commit-timer nil))
+            (setq input-pending nil)
+            (should (equal (font-lock--dispatch-commits)
+                           '(:processed 1 :dropped 0 :remaining 0)))
+            (should (= range-updates 1))
+            (should (equal fontified '(query-a)))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (setq font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
 ;;; treesit-tests.el ends here
