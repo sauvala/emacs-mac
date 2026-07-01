@@ -645,10 +645,36 @@ Return a plist with commit progress metrics."
        (with-current-buffer buffer
          (= tick (buffer-chars-modified-tick)))))
 
+(defun font-lock--async-property-list-p (properties)
+  "Return non-nil if PROPERTIES is a valid literal property list."
+  (catch 'invalid
+    (while properties
+      (unless (and (consp properties)
+                   (symbolp (car properties))
+                   (consp (cdr properties)))
+        (throw 'invalid nil))
+      (setq properties (cddr properties)))
+    t))
+
+(defun font-lock--async-normalize-face-spec (face)
+  "Return (FACE PROPERTIES) for a worker-safe FACE spec, or nil."
+  (cond
+   ((symbolp face)
+    (list face nil))
+   ((and (consp face)
+         (eq (car face) 'quote)
+         (not (nthcdr 2 face)))
+    (let ((value (cadr face)))
+      (when (and (consp value)
+                 (eq (car value) 'face)
+                 (symbolp (cadr value))
+                 (font-lock--async-property-list-p (cddr value)))
+        (list (cadr value) (cddr value)))))))
+
 (defun font-lock--async-normalize-simple-keywords (keywords)
   "Return worker-safe simple KEYWORDS, or nil if unsupported.
 The returned value contains only elements of the form
-(REGEXP SUBEXP FACE OVERRIDE)."
+(REGEXP SUBEXP FACE OVERRIDE PROPERTIES)."
   (catch 'unsupported
     (cond
      ((not (consp keywords))
@@ -660,18 +686,21 @@ The returned value contains only elements of the form
                        (stringp (car keyword)))
             (throw 'unsupported nil))
           (dolist (highlight (cdr keyword))
-            (unless (and (consp highlight)
-                         (numberp (car highlight))
-                         (symbolp (cadr highlight))
-                         (memq (nth 2 highlight)
-                               '(nil t prepend append keep))
-                         (not (nth 4 highlight)))
-              (throw 'unsupported nil))
-            (push (list (car keyword)
-                        (car highlight)
-                        (cadr highlight)
-                        (nth 2 highlight))
-                  normalized)))
+            (let ((face-spec
+                   (font-lock--async-normalize-face-spec (cadr highlight))))
+              (unless (and (consp highlight)
+                           (numberp (car highlight))
+                           face-spec
+                           (memq (nth 2 highlight)
+                                 '(nil t prepend append keep))
+                           (not (nth 4 highlight)))
+                (throw 'unsupported nil))
+              (push (list (car keyword)
+                          (car highlight)
+                          (car face-spec)
+                          (nth 2 highlight)
+                          (cadr face-spec))
+                    normalized))))
         (nreverse normalized)))
      (t
       (let (normalized)
@@ -699,27 +728,37 @@ The returned value contains only elements of the form
                  (stringp (car spec))
                  (consp (cdr spec))
                  (numberp (cadr spec))
-                 (symbolp (nth 2 spec))
                  (memq (nth 3 spec) '(nil t prepend append keep))
                  (not (nth 5 spec)))
-            (push (list (car spec) (cadr spec) (nth 2 spec) (nth 3 spec))
-                  normalized))
+            (let ((face-spec
+                   (font-lock--async-normalize-face-spec (nth 2 spec))))
+              (unless face-spec
+                (throw 'unsupported nil))
+              (push (list (car spec)
+                          (cadr spec)
+                          (car face-spec)
+                          (nth 3 spec)
+                          (cadr face-spec))
+                    normalized)))
            ((and (consp spec)
                  (stringp (car spec))
                  (consp (cadr spec)))
             (dolist (highlight (cdr spec))
-              (unless (and (consp highlight)
-                           (numberp (car highlight))
-                           (symbolp (cadr highlight))
-                           (memq (nth 2 highlight)
-                                 '(nil t prepend append keep))
-                           (not (nth 4 highlight)))
-                (throw 'unsupported nil))
-              (push (list (car spec)
-                          (car highlight)
-                          (cadr highlight)
-                          (nth 2 highlight))
-                    normalized)))
+              (let ((face-spec
+                     (font-lock--async-normalize-face-spec (cadr highlight))))
+                (unless (and (consp highlight)
+                             (numberp (car highlight))
+                             face-spec
+                             (memq (nth 2 highlight)
+                                   '(nil t prepend append keep))
+                             (not (nth 4 highlight)))
+                  (throw 'unsupported nil))
+                (push (list (car spec)
+                            (car highlight)
+                            (car face-spec)
+                            (nth 2 highlight)
+                            (cadr face-spec))
+                      normalized))))
            (t
             (throw 'unsupported nil))))
         (nreverse normalized))))))
@@ -727,7 +766,7 @@ The returned value contains only elements of the form
 (defun font-lock--async-simple-span-form (text keywords case-fold offset)
   "Return a worker form computing simple font-lock spans.
 TEXT is the immutable buffer snapshot.  KEYWORDS contains simple
-regexp-face specs of the form (REGEXP SUBEXP FACE OVERRIDE).
+regexp-face specs of the form (REGEXP SUBEXP FACE OVERRIDE PROPERTIES).
 OFFSET converts worker-buffer positions to source-buffer positions."
   `(let ((text ,text)
          (keywords ',keywords)
@@ -742,16 +781,18 @@ OFFSET converts worker-buffer positions to source-buffer positions."
                  subexp (cadr spec)
                  face (nth 2 spec)
                  override (nth 3 spec))
-           (when (and regexp (or face (eq override t)))
+           (when (and regexp (or face (nth 4 spec) (eq override t)))
              (goto-char (point-min))
              (while (re-search-forward regexp nil t)
                (let ((start (match-beginning subexp))
                      (end (match-end subexp)))
                  (when (and start end (< start end))
-                   (push (list (+ offset start)
-                               (+ offset end)
-                               face
-                               override)
+                   (push (append (list (+ offset start)
+                                       (+ offset end)
+                                       face
+                                       override)
+                                 (when (nth 4 spec)
+                                   (list (nth 4 spec))))
                          spans)))))))
        (nreverse spans))))
 
@@ -760,8 +801,14 @@ OFFSET converts worker-buffer positions to source-buffer positions."
   (let (redisplay-start redisplay-end)
     (with-silent-modifications
       (dolist (span spans)
-        (pcase-let ((`(,start ,end ,face ,override) span))
-          (when (or face (eq override t))
+        (let ((start (nth 0 span))
+              (end (nth 1 span))
+              (face (nth 2 span))
+              (override (nth 3 span))
+              (properties (nth 4 span)))
+          (when (or face properties (eq override t))
+            (when properties
+              (add-text-properties start end properties))
             (pcase override
               ('nil
                (unless (text-property-not-all start end 'face nil)
@@ -779,15 +826,20 @@ OFFSET converts worker-buffer positions to source-buffer positions."
     (when (and redisplay-start redisplay-end)
       `(font-lock-redisplay ,redisplay-start . ,redisplay-end))))
 
-(defun font-lock--async-fontify-region (beg end keywords)
+(defun font-lock--async-fontify-region (beg end keywords &optional normalized)
   "Prepare simple KEYWORDS for BEG..END in a worker and commit later.
 This is an internal, snapshot-based path for async font-lock preparation.
-It currently supports simple regexp-face specs of the form (REGEXP . FACE)
-or (REGEXP . \\='FACE), (REGEXP SUBEXP FACE [OVERRIDE [LAXMATCH]]),
-and simple multiple highlight specs of the form
-(REGEXP (SUBEXP FACE [OVERRIDE]) ...), where OVERRIDE is nil, t,
-`prepend', `append', or `keep'."
-  (when-let* ((keywords (font-lock--async-normalize-simple-keywords keywords)))
+When NORMALIZED is non-nil, KEYWORDS must already be in the worker-safe
+form returned by `font-lock--async-normalize-simple-keywords'.
+Otherwise, this currently supports simple regexp-face specs of the form
+(REGEXP . FACE) or (REGEXP . \\='FACE),
+(REGEXP SUBEXP FACE [OVERRIDE [LAXMATCH]]), and simple multiple
+highlight specs of the form (REGEXP (SUBEXP FACE [OVERRIDE]) ...),
+where OVERRIDE is nil, t, `prepend', `append', or `keep'."
+  (when-let* ((keywords (if normalized
+                            keywords
+                          (font-lock--async-normalize-simple-keywords
+                           keywords))))
     (let* ((buffer (current-buffer))
            (tick (buffer-chars-modified-tick))
            (text (buffer-substring-no-properties beg end))
@@ -1646,7 +1698,7 @@ This function is the default `font-lock-fontify-region-function'."
                 (and font-lock-async-keywords
                      (font-lock--async-normalize-simple-keywords
                       font-lock-keywords))))
-         (font-lock--async-fontify-region beg end async-keywords)
+         (font-lock--async-fontify-region beg end async-keywords t)
        (font-lock-fontify-keywords-region beg end loudly))
      `(jit-lock-bounds ,beg . ,end))))
 

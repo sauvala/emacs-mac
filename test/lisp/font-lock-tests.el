@@ -34,7 +34,7 @@
 (defvar font-lock-async-commit-span-batch-size)
 
 (declare-function font-lock--async-fontify-region "font-lock"
-                  (beg end keywords))
+                  (beg end keywords &optional normalized))
 (declare-function font-lock--apply-async-spans "font-lock" (spans))
 (declare-function font-lock--async-shutdown-workers "font-lock" ())
 (declare-function font-lock--dispatch-commits "font-lock" ())
@@ -1140,6 +1140,51 @@
             (should-not (get-text-property 7 'face))
             (should (eq (get-text-property 12 'face)
                         'font-lock-keyword-face))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when font-lock--async-worker-pool
+        (font-lock--async-shutdown-workers))
+      (setq font-lock--async-worker-pool old-pool
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
+(ert-deftest font-lock-default-fontify-region-can-use-async-property-list-faces ()
+  "The async keyword path accepts simple literal property-list faces."
+  (let ((old-pool font-lock--async-worker-pool)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq font-lock--async-worker-pool nil
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "alpha beta")
+          (let ((font-lock-async-keywords t)
+                (font-lock-keywords
+                 '(("alpha" 0
+                    '(face font-lock-keyword-face help-echo "async alpha")
+                    t)))
+                (font-lock-keywords-only t)
+                (font-lock-keywords-case-fold-search nil)
+                (font-lock-set-defaults t)
+                (font-lock-syntax-table nil)
+                (font-lock-syntactic-keywords nil)
+                (font-lock-syntactically-fontified 0)
+                (font-lock-extend-region-functions nil))
+            (font-lock-default-fontify-region (point-min) (point-max) nil)
+            (should-not (get-text-property 1 'face))
+            (should-not (get-text-property 1 'help-echo))
+            (with-timeout (3 (ert-fail "Timed out waiting for property-list async font-lock"))
+              (while (not (get-text-property 1 'face))
+                (accept-process-output nil 0.01)
+                (when font-lock--commit-queue
+                  (font-lock--dispatch-commits))))
+            (should (eq (get-text-property 1 'face)
+                        'font-lock-keyword-face))
+            (should (equal (get-text-property 1 'help-echo)
+                           "async alpha"))
+            (should-not (get-text-property 7 'face))
+            (should-not (get-text-property 7 'help-echo))))
       (when (timerp font-lock--commit-timer)
         (cancel-timer font-lock--commit-timer))
       (when font-lock--async-worker-pool
