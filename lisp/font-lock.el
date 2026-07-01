@@ -708,6 +708,15 @@ The returned value contains only elements of the form
            ((stringp spec)
             (push (list spec 0 'font-lock-keyword-face nil) normalized))
            ((and (consp spec)
+                 (eq (car spec) 'eval))
+            (let ((evaluated
+                   (font-lock--async-normalize-simple-keywords
+                    (list (eval (cdr spec) t)))))
+              (unless evaluated
+                (throw 'unsupported nil))
+              (dolist (item evaluated)
+                (push item normalized))))
+           ((and (consp spec)
                  (stringp (car spec))
                  (symbolp (cdr spec)))
             (push (list (car spec) 0 (cdr spec) nil) normalized))
