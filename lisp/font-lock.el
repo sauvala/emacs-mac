@@ -677,6 +677,8 @@ The returned value contains only elements of the form
       (let (normalized)
         (dolist (spec keywords)
           (cond
+           ((stringp spec)
+            (push (list spec 0 'font-lock-keyword-face nil) normalized))
            ((and (consp spec)
                  (stringp (car spec))
                  (symbolp (cdr spec)))
