@@ -651,20 +651,25 @@ non-nil in a repeated invocation of this function."
 	      (with-current-buffer buffer
 	        ;; (message "Jit-Defer %s" (buffer-name))
 	        (with-silent-modifications
-	          (let ((pos (point-min)))
-	            (while
-		        (progn
-		          (when (eq (get-text-property pos 'fontified) 'defer)
-		            (put-text-property
-		             pos (setq pos (next-single-property-change
-				            pos 'fontified nil (point-max)))
-		             'fontified nil))
-		          (setq pos (next-single-property-change
-                                     pos 'fontified))))))))
+	          (let ((pos (point-min))
+                        (limit (point-max)))
+	            (while (and pos (< pos limit) (not yielded))
+		      (if (eq (get-text-property pos 'fontified) 'defer)
+			  (let ((next (next-single-property-change
+				       pos 'fontified nil limit)))
+		            (put-text-property pos next 'fontified nil)
+			    (setq pos (and (< next limit) next)
+				  yielded (and jit-lock-defer-on-input
+					       (input-pending-p))))
+			(setq pos (next-single-property-change
+				   pos 'fontified nil limit))
+                        (when (and pos (not (< pos limit)))
+                          (setq pos nil))))))))
             (setq yielded
-                  (and buffers
-                       jit-lock-defer-on-input
-                       (input-pending-p))))))
+                  (or yielded
+                      (and buffers
+                           jit-lock-defer-on-input
+                           (input-pending-p)))))))
       ;; Force fontification of the visible parts.
       (let ((buffers jit-lock-defer-buffers)
             (jit-lock-defer-timer nil))
