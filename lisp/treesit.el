@@ -2434,6 +2434,10 @@ later font-lock commit turn."
                  (enable (treesit-font-lock-setting-enable setting))
                  (override (treesit-font-lock-setting-override setting))
                  (language (treesit-font-lock-setting-language setting))
+                 (async-compatible
+                  (and treesit-font-lock-async
+                       (null local-parsers)
+                       (treesit--font-lock-query-async-compatible-p query)))
                  (setting-root-nodes
                   (cl-remove-if-not
                    (lambda (node)
@@ -2442,7 +2446,8 @@ later font-lock commit turn."
 
             ;; Use deterministic way to decide whether to turn on "fast
             ;; mode". (See bug#60691, bug#60223.)
-            (when (eq treesit--font-lock-fast-mode 'unspecified)
+            (when (and (not async-compatible)
+                       (eq treesit--font-lock-fast-mode 'unspecified))
               (pcase-let ((`(,max-depth ,max-width)
                            (treesit-subtree-stat
                             (treesit-parser-root-node
@@ -2453,13 +2458,14 @@ later font-lock commit turn."
             ;; Only activate if ENABLE flag is t.
             (when-let*
                 ((activate (eq t enable))
-                 (nodes (if (eq t treesit--font-lock-fast-mode)
-                            (mapcan
-                             (lambda (node)
-                               (treesit--children-covering-range-recurse
-                                node start end (* 4 jit-lock-chunk-size)))
-                             setting-root-nodes)
-                          setting-root-nodes)))
+                 (nodes (or (and async-compatible setting-root-nodes)
+                            (if (eq t treesit--font-lock-fast-mode)
+                                (mapcan
+                                 (lambda (node)
+                                   (treesit--children-covering-range-recurse
+                                    node start end (* 4 jit-lock-chunk-size)))
+                                 setting-root-nodes)
+                              setting-root-nodes))))
               (ignore activate)
 
               ;; Query each node.
@@ -2469,9 +2475,7 @@ later font-lock commit turn."
                     (query-end (min (+ end
                                        (cdr treesit--font-lock-query-expand-range))
                                     (point-max))))
-                (if (and treesit-font-lock-async
-                         (null local-parsers)
-                         (treesit--font-lock-query-async-compatible-p query))
+                (if async-compatible
                     (treesit--async-font-lock-region
                      start end query language override query-beg query-end)
                   (dolist (sub-node nodes)
