@@ -174,6 +174,45 @@
             font-lock--commit-queue-tail old-tail
             font-lock--commit-timer old-timer))))
 
+(ert-deftest font-lock-commit-queue-rejects-late-stale-buffer-work ()
+  "Late stale work does not replace current queued commits."
+  (let ((old-queue font-lock--commit-queue)
+        (old-tail font-lock--commit-queue-tail)
+        (old-timer font-lock--commit-timer)
+        seen)
+    (setq font-lock--commit-queue nil
+          font-lock--commit-queue-tail nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "abc")
+          (let ((buffer (current-buffer))
+                (old-tick (buffer-chars-modified-tick)))
+            (insert "d")
+            (let ((new-tick (buffer-chars-modified-tick)))
+              (font-lock--queue-commit
+               buffer new-tick
+               (lambda ()
+                 (push 'new seen)))
+              (font-lock--queue-commit
+               buffer old-tick
+               (lambda ()
+                 (push 'old seen))))
+            (should (= (length font-lock--commit-queue) 1))
+            (should (eq font-lock--commit-queue-tail
+                        (last font-lock--commit-queue)))
+            (when (timerp font-lock--commit-timer)
+              (cancel-timer font-lock--commit-timer)
+              (setq font-lock--commit-timer nil))
+            (should (equal (font-lock--dispatch-commits)
+                           '(:processed 1 :dropped 0 :remaining 0)))
+            (should (equal seen '(new)))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (setq font-lock--commit-queue old-queue
+            font-lock--commit-queue-tail old-tail
+            font-lock--commit-timer old-timer))))
+
 (ert-deftest font-lock-commit-queue-maintains-tail-pointer ()
   "Queued font-lock commits maintain an append tail and reset it on drain."
   (let ((old-queue font-lock--commit-queue)

@@ -507,17 +507,21 @@ This can be an \"!\" or the \"n\" in \"ifndef\".")
   "Queue a font-lock commit for BUFFER if its modified TICK still matches.
 FUNCTION is called in BUFFER with ARGS.  If TICK is non-nil and BUFFER's
 modified tick changes before dispatch, the queued commit is dropped."
-  (font-lock--prune-stale-commits buffer tick)
-  (let ((cell (list (list buffer tick function args))))
-    (if (and font-lock--commit-queue font-lock--commit-queue-tail)
-        (setcdr font-lock--commit-queue-tail cell)
-      (when font-lock--commit-queue
-        (setq font-lock--commit-queue-tail (last font-lock--commit-queue))
-        (setcdr font-lock--commit-queue-tail cell))
-      (unless font-lock--commit-queue
-        (setq font-lock--commit-queue cell)))
-    (setq font-lock--commit-queue-tail cell))
-  (font-lock--ensure-commit-timer))
+  (when (and (buffer-live-p buffer)
+             (or (not tick)
+                 (with-current-buffer buffer
+                   (= tick (buffer-chars-modified-tick)))))
+    (font-lock--prune-stale-commits buffer tick)
+    (let ((cell (list (list buffer tick function args))))
+      (if (and font-lock--commit-queue font-lock--commit-queue-tail)
+          (setcdr font-lock--commit-queue-tail cell)
+        (when font-lock--commit-queue
+          (setq font-lock--commit-queue-tail (last font-lock--commit-queue))
+          (setcdr font-lock--commit-queue-tail cell))
+        (unless font-lock--commit-queue
+          (setq font-lock--commit-queue cell)))
+      (setq font-lock--commit-queue-tail cell))
+    (font-lock--ensure-commit-timer)))
 
 (defun font-lock--queue-span-commits (buffer tick function spans &rest args)
   "Queue worker-computed SPANS as bounded font-lock commits.
