@@ -746,25 +746,25 @@ tick still matches the snapshot."
          (buffer (current-buffer))
          (tick (buffer-chars-modified-tick))
          (key (treesit--async-font-lock-job-key
-               buffer tick beg end query language override query-beg query-end))
-         (text (buffer-substring-no-properties query-beg query-end)))
+               buffer tick beg end query language override query-beg query-end)))
     (unless (gethash key treesit--async-pending-jobs)
       (treesit--async-prune-superseded-font-lock-jobs key)
-      (puthash key t treesit--async-pending-jobs)
-      (treesit--async-query-string-spans
-       text query language
-       :offset (1- query-beg)
-       :success-fn
-       (lambda (spans)
-         (remhash key treesit--async-pending-jobs)
-         (when (font-lock--buffer-tick-current-p buffer tick)
-           (font-lock--queue-span-commits
-            buffer tick #'treesit--async-font-lock-apply-spans
-            spans override beg end)))
-       :error-fn
-       (lambda (message _data)
-         (remhash key treesit--async-pending-jobs)
-         (message "Async tree-sitter font-lock worker failed: %s" message))))))
+      (let ((text (buffer-substring-no-properties query-beg query-end)))
+        (puthash key t treesit--async-pending-jobs)
+        (treesit--async-query-string-spans
+         text query language
+         :offset (1- query-beg)
+         :success-fn
+         (lambda (spans)
+           (remhash key treesit--async-pending-jobs)
+           (when (font-lock--buffer-tick-current-p buffer tick)
+             (font-lock--queue-span-commits
+              buffer tick #'treesit--async-font-lock-apply-spans
+              spans override beg end)))
+         :error-fn
+         (lambda (message _data)
+           (remhash key treesit--async-pending-jobs)
+           (message "Async tree-sitter font-lock worker failed: %s" message)))))))
 
 (defsubst treesit--range-start (range)
   "Return the start of RANGE.

@@ -186,6 +186,40 @@
       (setq treesit--async-worker-pool old-pool
             treesit--async-pending-jobs old-pending))))
 
+(ert-deftest treesit-async-font-lock-region-deduplicates-before-snapshot ()
+  "Duplicate async tree-sitter font-lock work avoids resnapshotting text."
+  (skip-unless (treesit-language-available-p 'json))
+  (let ((old-pool treesit--async-worker-pool)
+        (old-pending treesit--async-pending-jobs)
+        (snapshots 0)
+        submissions)
+    (setq treesit--async-worker-pool nil
+          treesit--async-pending-jobs (make-hash-table :test #'equal))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "{\"name\":\"Bob\"}")
+          (cl-letf (((symbol-function 'buffer-substring-no-properties)
+                     (lambda (_beg _end)
+                       (setq snapshots (1+ snapshots))
+                       "{\"name\":\"Bob\"}"))
+                    ((symbol-function 'treesit--async-query-string-spans)
+                     (lambda (text _query _language &rest _args)
+                       (push text submissions))))
+            (treesit--async-font-lock-region
+             (point-min) (point-max)
+             '((string) @font-lock-string-face)
+             'json nil)
+            (treesit--async-font-lock-region
+             (point-min) (point-max)
+             '((string) @font-lock-string-face)
+             'json nil)
+            (should (= snapshots 1))
+            (should (equal submissions '("{\"name\":\"Bob\"}")))))
+      (when treesit--async-worker-pool
+        (treesit--async-shutdown-workers))
+      (setq treesit--async-worker-pool old-pool
+            treesit--async-pending-jobs old-pending))))
+
 (ert-deftest treesit-async-font-lock-region-prunes-superseded-pending-work ()
   "Newer async tree-sitter work prunes stale pending work for the same region."
   (skip-unless (treesit-language-available-p 'json))
