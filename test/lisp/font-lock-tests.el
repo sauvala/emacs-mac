@@ -1108,6 +1108,53 @@
             font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
 
+(ert-deftest font-lock-default-fontify-region-can-use-async-anchored-keywords ()
+  "The async keyword path accepts simple anchored regexp specs."
+  (let ((old-pool font-lock--async-worker-pool)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq font-lock--async-worker-pool nil
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "anchor item item\nitem")
+          (let ((font-lock-async-keywords t)
+                (font-lock-keywords
+                 '(("anchor"
+                    (0 font-lock-keyword-face)
+                    ("item" nil nil
+                     (0 font-lock-variable-name-face)))))
+                (font-lock-keywords-only t)
+                (font-lock-keywords-case-fold-search nil)
+                (font-lock-set-defaults t)
+                (font-lock-syntax-table nil)
+                (font-lock-syntactic-keywords nil)
+                (font-lock-syntactically-fontified 0)
+                (font-lock-extend-region-functions nil))
+            (font-lock-default-fontify-region (point-min) (point-max) nil)
+            (should-not (get-text-property 1 'face))
+            (should-not (get-text-property 8 'face))
+            (with-timeout (3 (ert-fail "Timed out waiting for anchored async font-lock"))
+              (while (not (get-text-property 8 'face))
+                (accept-process-output nil 0.01)
+                (when font-lock--commit-queue
+                  (font-lock--dispatch-commits))))
+            (should (eq (get-text-property 1 'face)
+                        'font-lock-keyword-face))
+            (should (eq (get-text-property 8 'face)
+                        'font-lock-variable-name-face))
+            (should (eq (get-text-property 13 'face)
+                        'font-lock-variable-name-face))
+            (should-not (get-text-property 18 'face))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when font-lock--async-worker-pool
+        (font-lock--async-shutdown-workers))
+      (setq font-lock--async-worker-pool old-pool
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
 (ert-deftest font-lock-default-fontify-region-can-use-async-quoted-face-keywords ()
   "The async keyword path accepts simple dotted quoted face specs."
   (let ((old-pool font-lock--async-worker-pool)
