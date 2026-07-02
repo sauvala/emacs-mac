@@ -563,16 +563,18 @@ chunk and leave remaining split work for a continuation."
                 (< start end))
        (cons start end)))))
 
-(defun font-lock--merge-redisplay-request (requests buffer request)
+(defun font-lock--merge-redisplay-request (requests buffer tick request)
   "Merge REQUEST for BUFFER into redisplay REQUESTS.
-REQUESTS is an alist of (BUFFER . (START . END)) entries."
+REQUESTS is an alist of (BUFFER TICK START . END) entries."
   (if-let* ((range (font-lock--redisplay-request-region request)))
       (let ((existing (assq buffer requests)))
         (if existing
-            (setcdr existing
-                    (cons (min (cadr existing) (car range))
-                          (max (cddr existing) (cdr range))))
-          (push (cons buffer range) requests))
+            (if (equal (cadr existing) tick)
+                (setcdr (cdr existing)
+                        (cons (min (caddr existing) (car range))
+                              (max (cdddr existing) (cdr range))))
+              (setcdr existing (cons tick range)))
+          (push (cons buffer (cons tick range)) requests))
         requests)
     requests))
 
@@ -587,8 +589,11 @@ Return requests not flushed because input is pending or BUDGET expired."
                                    (input-pending-p)))
                          (or (not budget)
                              (< (- (float-time) started) budget)))))
-      (pcase-let ((`(,buffer . (,start . ,end)) (pop remaining)))
-        (when (buffer-live-p buffer)
+      (pcase-let ((`(,buffer ,tick ,start . ,end) (pop remaining)))
+        (when (and (buffer-live-p buffer)
+                   (or (not tick)
+                       (with-current-buffer buffer
+                         (= tick (buffer-chars-modified-tick)))))
           (with-current-buffer buffer
             (jit-lock-force-redisplay (copy-marker start)
                                       (copy-marker end)))))
@@ -623,7 +628,8 @@ Return a plist with commit progress metrics."
                 (with-current-buffer buffer
                   (setq redisplay-requests
                         (font-lock--merge-redisplay-request
-                         redisplay-requests buffer (apply function args)))
+                         redisplay-requests buffer tick
+                         (apply function args)))
                   (setq processed (1+ processed)))
               (setq dropped (1+ dropped)))))
         (if (and redisplay-requests
