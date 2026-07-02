@@ -691,18 +691,31 @@ Return a plist with commit progress metrics."
   "Return worker-safe anchored pre-match FORM data, or nil.
 The returned value is nil for a nil FORM, or a small data form
 describing point movement relative to the parent regexp match."
-  (cond
-   ((null form)
-    nil)
-   ((and (consp form)
-         (eq (car form) 'goto-char)
-         (not (nthcdr 2 form)))
-    (let ((target (cadr form)))
-      (when (and (consp target)
+  (letrec
+      ((normalize-target
+        (lambda (target)
+          (cond
+           ((and (consp target)
                  (memq (car target) '(match-beginning match-end))
                  (numberp (cadr target))
                  (not (nthcdr 2 target)))
-        (list (car target) (cadr target)))))))
+            (list (list (car target) (cadr target))))
+           ((and (consp target)
+                 (eq (car target) 'or))
+            (catch 'unsupported
+              (let (targets)
+                (dolist (subtarget (cdr target))
+                  (if-let* ((normalized (funcall normalize-target subtarget)))
+                      (setq targets (append targets normalized))
+                    (throw 'unsupported nil)))
+                targets)))))))
+    (cond
+     ((null form)
+      nil)
+     ((and (consp form)
+           (eq (car form) 'goto-char)
+           (not (nthcdr 2 form)))
+      (funcall normalize-target (cadr form))))))
 
 (defun font-lock--async-normalize-anchored-keyword (keyword)
   "Return worker-safe anchored KEYWORD data, or nil if unsupported."
@@ -890,9 +903,12 @@ OFFSET converts worker-buffer positions to source-buffer positions."
                (while (re-search-forward anchor-regexp nil t)
                  (let ((limit (line-end-position)))
                    (when pre-match
-                     (pcase-let ((`(,function ,subexp) pre-match))
-                       (when-let* ((target (funcall function subexp)))
-                         (goto-char target))))
+                     (catch 'moved
+                       (dolist (target-spec pre-match)
+                         (pcase-let ((`(,function ,subexp) target-spec))
+                           (when-let* ((target (funcall function subexp)))
+                             (goto-char target)
+                             (throw 'moved t))))))
                    (save-match-data
                      (while (and (< (point) limit)
                                  (re-search-forward regexp limit t))
