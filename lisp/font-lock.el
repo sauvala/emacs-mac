@@ -687,28 +687,49 @@ Return a plist with commit progress metrics."
               (nth 2 highlight)
               (cadr face-spec))))))
 
+(defun font-lock--async-normalize-anchored-pre-match-form (form)
+  "Return worker-safe anchored pre-match FORM data, or nil.
+The returned value is nil for a nil FORM, or a small data form
+describing point movement relative to the parent regexp match."
+  (cond
+   ((null form)
+    nil)
+   ((and (consp form)
+         (eq (car form) 'goto-char)
+         (not (nthcdr 2 form)))
+    (let ((target (cadr form)))
+      (when (and (consp target)
+                 (memq (car target) '(match-beginning match-end))
+                 (numberp (cadr target))
+                 (not (nthcdr 2 target)))
+        (list (car target) (cadr target)))))))
+
 (defun font-lock--async-normalize-anchored-keyword (keyword)
   "Return worker-safe anchored KEYWORD data, or nil if unsupported."
   (when (and (consp keyword)
              (stringp (car keyword))
-             (null (nth 1 keyword))
              (null (nth 2 keyword)))
-    (catch 'unsupported
-      (let (highlights)
-        (dolist (highlight (nthcdr 3 keyword))
-          (if-let* ((normalized
-                     (font-lock--async-normalize-highlight highlight)))
-              (push normalized highlights)
-            (throw 'unsupported nil)))
-        (when highlights
-          (list :anchored (car keyword) (nreverse highlights)))))))
+    (let ((pre-match
+           (font-lock--async-normalize-anchored-pre-match-form
+            (nth 1 keyword))))
+      (when (or (null (nth 1 keyword)) pre-match)
+        (catch 'unsupported
+          (let (highlights)
+            (dolist (highlight (nthcdr 3 keyword))
+              (if-let* ((normalized
+                         (font-lock--async-normalize-highlight highlight)))
+                  (push normalized highlights)
+                (throw 'unsupported nil)))
+            (when highlights
+              (list :anchored (car keyword) pre-match
+                    (nreverse highlights)))))))))
 
 (defun font-lock--async-normalize-simple-keywords (keywords)
   "Return worker-safe simple KEYWORDS, or nil if unsupported.
 The returned value contains elements of the form
 (REGEXP SUBEXP FACE OVERRIDE PROPERTIES), or anchored elements of
 the form
-(ANCHOR-REGEXP :anchored REGEXP
+(ANCHOR-REGEXP :anchored REGEXP PRE-MATCH
                ((SUBEXP FACE OVERRIDE PROPERTIES) ...))."
   (catch 'unsupported
     (cond
@@ -811,7 +832,7 @@ This preserves `font-lock-ignore' semantics without mutating
 TEXT is the immutable buffer snapshot.  KEYWORDS contains simple
 regexp-face specs of the form (REGEXP SUBEXP FACE OVERRIDE PROPERTIES)
 and anchored specs of the form
-(ANCHOR-REGEXP :anchored REGEXP HIGHLIGHTS).
+(ANCHOR-REGEXP :anchored REGEXP PRE-MATCH HIGHLIGHTS).
 OFFSET converts worker-buffer positions to source-buffer positions."
   `(let ((text ,text)
          (keywords ',keywords)
@@ -824,10 +845,15 @@ OFFSET converts worker-buffer positions to source-buffer positions."
          (if (eq (cadr spec) :anchored)
              (let ((anchor-regexp (car spec))
                    (regexp (nth 2 spec))
-                   (highlights (nth 3 spec)))
+                   (pre-match (nth 3 spec))
+                   (highlights (nth 4 spec)))
                (goto-char (point-min))
                (while (re-search-forward anchor-regexp nil t)
                  (let ((limit (line-end-position)))
+                   (when pre-match
+                     (pcase-let ((`(,function ,subexp) pre-match))
+                       (when-let* ((target (funcall function subexp)))
+                         (goto-char target))))
                    (save-match-data
                      (while (and (< (point) limit)
                                  (re-search-forward regexp limit t))
