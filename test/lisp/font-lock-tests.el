@@ -655,6 +655,48 @@
       (setq font-lock--async-worker-pool old-pool
             font-lock--async-pending-jobs old-pending))))
 
+(ert-deftest font-lock-async-prunes-superseded-pending-region-work ()
+  "Newer async font-lock work prunes stale pending work for the same region."
+  (let ((old-pool font-lock--async-worker-pool)
+        (old-pending font-lock--async-pending-jobs)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer)
+        submissions success-fns)
+    (setq font-lock--async-worker-pool nil
+          font-lock--async-pending-jobs (make-hash-table :test #'equal)
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "alpha")
+          (cl-letf (((symbol-function 'elisp-worker-pool-async-eval)
+                     (lambda (_pool form &rest args)
+                       (push form submissions)
+                       (push (plist-get args :success-fn) success-fns))))
+            (font-lock--async-fontify-region
+             (point-min) (point-max)
+             '(("alpha" . font-lock-keyword-face)))
+            (delete-char -1)
+            (insert "b")
+            (font-lock--async-fontify-region
+             (point-min) (point-max)
+             '(("alpha" . font-lock-keyword-face)))
+            (should (= (length submissions) 2))
+            (should (= (hash-table-count font-lock--async-pending-jobs)
+                       1))
+            (funcall (cadr success-fns) '((1 6 font-lock-keyword-face)))
+            (should-not font-lock--commit-queue)
+            (should (= (hash-table-count font-lock--async-pending-jobs)
+                       1))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when font-lock--async-worker-pool
+        (font-lock--async-shutdown-workers))
+      (setq font-lock--async-worker-pool old-pool
+            font-lock--async-pending-jobs old-pending
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
 (ert-deftest font-lock-async-forces-redisplay-after-worker-commit ()
   "Async font-lock commits request redisplay after applying faces."
   (let ((old-pool font-lock--async-worker-pool)

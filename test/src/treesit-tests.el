@@ -186,6 +186,54 @@
       (setq treesit--async-worker-pool old-pool
             treesit--async-pending-jobs old-pending))))
 
+(ert-deftest treesit-async-font-lock-region-prunes-superseded-pending-work ()
+  "Newer async tree-sitter work prunes stale pending work for the same region."
+  (skip-unless (treesit-language-available-p 'json))
+  (let ((old-pool treesit--async-worker-pool)
+        (old-pending treesit--async-pending-jobs)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer)
+        submissions success-fns)
+    (setq treesit--async-worker-pool nil
+          treesit--async-pending-jobs (make-hash-table :test #'equal)
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "{\"name\":\"Bob\"}")
+          (cl-letf (((symbol-function 'elisp-worker-pool-async-eval)
+                     (lambda (_pool form &rest args)
+                       (push form submissions)
+                       (push (plist-get args :success-fn) success-fns))))
+            (treesit--async-font-lock-region
+             (point-min) (point-max)
+             '((string) @font-lock-string-face)
+             'json nil)
+            (search-backward "Bob")
+            (delete-char 3)
+            (insert "Ann")
+            (treesit--async-font-lock-region
+             (point-min) (point-max)
+             '((string) @font-lock-string-face)
+             'json nil)
+            (should (= (length submissions) 2))
+            (should (= (hash-table-count treesit--async-pending-jobs)
+                       1))
+            (funcall (cadr success-fns)
+                     '((font-lock-string-face 2 8)
+                       (font-lock-string-face 9 14)))
+            (should-not font-lock--commit-queue)
+            (should (= (hash-table-count treesit--async-pending-jobs)
+                       1))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when treesit--async-worker-pool
+        (treesit--async-shutdown-workers))
+      (setq treesit--async-worker-pool old-pool
+            treesit--async-pending-jobs old-pending
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
 (ert-deftest treesit-font-lock-fontify-region-can-schedule-async-spans ()
   "Tree-sitter font-lock can schedule face-only queries asynchronously."
   (skip-unless (treesit-language-available-p 'json))

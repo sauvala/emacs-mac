@@ -652,6 +652,19 @@ See `treesit-query-capture' for QUERY."
   (list buffer tick beg end (treesit--query-source-or-self query)
         language override query-beg query-end))
 
+(defun treesit--async-prune-superseded-font-lock-jobs (key)
+  "Remove pending async tree-sitter font-lock jobs superseded by KEY."
+  (let (superseded)
+    (maphash
+     (lambda (pending-key _value)
+       (when (and (eq (nth 0 pending-key) (nth 0 key))
+                  (not (= (nth 1 pending-key) (nth 1 key)))
+                  (equal (nthcdr 2 pending-key) (nthcdr 2 key)))
+         (push pending-key superseded)))
+     treesit--async-pending-jobs)
+    (dolist (pending-key superseded)
+      (remhash pending-key treesit--async-pending-jobs))))
+
 (defun treesit--async-query-string-spans-form
     (string query language &optional offset)
   "Return a worker form querying STRING with QUERY in LANGUAGE.
@@ -736,6 +749,7 @@ tick still matches the snapshot."
                buffer tick beg end query language override query-beg query-end))
          (text (buffer-substring-no-properties query-beg query-end)))
     (unless (gethash key treesit--async-pending-jobs)
+      (treesit--async-prune-superseded-font-lock-jobs key)
       (puthash key t treesit--async-pending-jobs)
       (treesit--async-query-string-spans
        text query language

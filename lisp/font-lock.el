@@ -639,6 +639,19 @@ Return a plist with commit progress metrics."
   "Return an async font-lock job key for BUFFER snapshot TICK."
   (list buffer tick beg end keywords case-fold))
 
+(defun font-lock--async-prune-superseded-jobs (key)
+  "Remove pending async font-lock jobs superseded by KEY."
+  (let (superseded)
+    (maphash
+     (lambda (pending-key _value)
+       (when (and (eq (nth 0 pending-key) (nth 0 key))
+                  (not (= (nth 1 pending-key) (nth 1 key)))
+                  (equal (nthcdr 2 pending-key) (nthcdr 2 key)))
+         (push pending-key superseded)))
+     font-lock--async-pending-jobs)
+    (dolist (pending-key superseded)
+      (remhash pending-key font-lock--async-pending-jobs))))
+
 (defun font-lock--buffer-tick-current-p (buffer tick)
   "Return non-nil if BUFFER is live and its modified tick is TICK."
   (and (buffer-live-p buffer)
@@ -1003,6 +1016,7 @@ t, `prepend', `append', or `keep'."
                                           case-fold))
            (pool (font-lock--async-worker-pool)))
       (unless (gethash key font-lock--async-pending-jobs)
+        (font-lock--async-prune-superseded-jobs key)
         (puthash key t font-lock--async-pending-jobs)
         (elisp-worker-pool-async-eval
          pool
