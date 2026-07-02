@@ -486,10 +486,28 @@ This can be an \"!\" or the \"n\" in \"ifndef\".")
       (timer-set-function timer #'font-lock--dispatch-commits)
       (timer-activate timer))))
 
+(defun font-lock--prune-stale-commits (buffer tick)
+  "Prune queued commits for BUFFER superseded by TICK."
+  (when tick
+    (let (queue tail)
+      (dolist (entry font-lock--commit-queue)
+        (if (and (eq (nth 0 entry) buffer)
+                 (nth 1 entry)
+                 (not (= (nth 1 entry) tick)))
+            nil
+          (let ((cell (list entry)))
+            (if queue
+                (setcdr tail cell)
+              (setq queue cell))
+            (setq tail cell))))
+      (setq font-lock--commit-queue queue
+            font-lock--commit-queue-tail tail))))
+
 (defun font-lock--queue-commit (buffer tick function &rest args)
   "Queue a font-lock commit for BUFFER if its modified TICK still matches.
 FUNCTION is called in BUFFER with ARGS.  If TICK is non-nil and BUFFER's
 modified tick changes before dispatch, the queued commit is dropped."
+  (font-lock--prune-stale-commits buffer tick)
   (let ((cell (list (list buffer tick function args))))
     (if (and font-lock--commit-queue font-lock--commit-queue-tail)
         (setcdr font-lock--commit-queue-tail cell)
