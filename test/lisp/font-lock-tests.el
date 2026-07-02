@@ -62,6 +62,10 @@
       (when font-lock--commit-queue
         (font-lock--dispatch-commits)))))
 
+(defun font-lock-tests--match-sync-token (limit)
+  "Search for a token that keeps its keyword on the synchronous path."
+  (re-search-forward "\\_<sync\\_>" limit t))
+
 (ert-deftest font-lock-test-append-anonymous-face ()
   "Ensure `font-lock-append-text-property' does not splice anonymous faces."
   (with-temp-buffer
@@ -817,6 +821,48 @@
             (should-not (get-text-property 7 'face))
             (should (eq (get-text-property 12 'face)
                         'font-lock-keyword-face))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (when font-lock--async-worker-pool
+        (font-lock--async-shutdown-workers))
+      (setq font-lock--async-worker-pool old-pool
+            font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
+(ert-deftest font-lock-default-fontify-region-can-use-async-keyword-suffix ()
+  "The async keyword path can process a safe suffix after sync keywords."
+  (let ((old-pool font-lock--async-worker-pool)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq font-lock--async-worker-pool nil
+          font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "sync async")
+          (let ((font-lock-async-keywords t)
+                (font-lock-keywords
+                 '((font-lock-tests--match-sync-token
+                    (0 font-lock-keyword-face))
+                   ("async" . font-lock-variable-name-face)))
+                (font-lock-keywords-only t)
+                (font-lock-keywords-case-fold-search nil)
+                (font-lock-set-defaults t)
+                (font-lock-syntax-table nil)
+                (font-lock-syntactic-keywords nil)
+                (font-lock-syntactically-fontified 0)
+                (font-lock-extend-region-functions nil))
+            (font-lock-default-fontify-region (point-min) (point-max) nil)
+            (should (eq (get-text-property 1 'face)
+                        'font-lock-keyword-face))
+            (should-not (get-text-property 6 'face))
+            (with-timeout (3 (ert-fail "Timed out waiting for async keyword suffix"))
+              (while (not (get-text-property 6 'face))
+                (accept-process-output nil 0.01)
+                (when font-lock--commit-queue
+                  (font-lock--dispatch-commits))))
+            (should (eq (get-text-property 6 'face)
+                        'font-lock-variable-name-face))))
       (when (timerp font-lock--commit-timer)
         (cancel-timer font-lock--commit-timer))
       (when font-lock--async-worker-pool

@@ -816,16 +816,55 @@ the form
             (throw 'unsupported nil))))
         (nreverse normalized))))))
 
+(defun font-lock--async-compiled-buffer-keywords (keywords)
+  "Return compiled buffer KEYWORDS after standard filtering."
+  (if (eq (car-safe keywords) t)
+      keywords
+    `(t ,keywords
+        ,@(font-lock--filter-keywords
+           (mapcar #'font-lock-compile-keyword keywords)))))
+
 (defun font-lock--async-normalize-buffer-keywords (keywords)
   "Return worker-safe buffer KEYWORDS after standard filtering, or nil.
 This preserves `font-lock-ignore' semantics without mutating
 `font-lock-keywords' during async eligibility checks."
   (font-lock--async-normalize-simple-keywords
-   (if (eq (car-safe keywords) t)
-       keywords
-     `(t ,keywords
-         ,@(font-lock--filter-keywords
-            (mapcar #'font-lock-compile-keyword keywords))))))
+   (font-lock--async-compiled-buffer-keywords keywords)))
+
+(defun font-lock--async-normalize-compiled-keyword (keyword)
+  "Return worker-safe normalized spans for one compiled KEYWORD, or nil."
+  (font-lock--async-normalize-simple-keywords (list t nil keyword)))
+
+(defun font-lock--async-split-buffer-keywords (keywords)
+  "Split KEYWORDS into a synchronous prefix and async-safe suffix.
+Return a plist (:sync SYNC-KEYWORDS :async ASYNC-KEYWORDS), or nil if no
+async-safe suffix exists.  SYNC-KEYWORDS is a compiled keyword list that
+preserves all keywords up to the last unsupported keyword.  ASYNC-KEYWORDS
+is normalized data for the worker-safe suffix that follows it."
+  (let* ((compiled (font-lock--async-compiled-buffer-keywords keywords))
+         (items (cddr compiled))
+         (reversed (reverse items))
+         (suffix-length 0)
+         async-keywords)
+    (catch 'unsupported
+      (while reversed
+        (if-let* ((normalized
+                   (font-lock--async-normalize-compiled-keyword
+                    (car reversed))))
+            (setq async-keywords (append normalized async-keywords)
+                  suffix-length (1+ suffix-length)
+                  reversed (cdr reversed))
+          (throw 'unsupported nil))))
+    (when async-keywords
+      (let ((sync-length (- (length items) suffix-length))
+            sync-items)
+        (while (> sync-length 0)
+          (push (car items) sync-items)
+          (setq items (cdr items)
+                sync-length (1- sync-length)))
+        (list :sync (when sync-items
+                      `(t ,(cadr compiled) ,@(nreverse sync-items)))
+              :async async-keywords)))))
 
 (defun font-lock--async-simple-span-form (text keywords case-fold offset)
   "Return a worker form computing simple font-lock spans.
@@ -1792,11 +1831,16 @@ This function is the default `font-lock-fontify-region-function'."
          (font-lock-fontify-syntactic-keywords-region start end)))
      (unless font-lock-keywords-only
        (font-lock-fontify-syntactically-region beg end loudly))
-     (if-let* ((async-keywords
+     (if-let* ((async-work
                 (and font-lock-async-keywords
-                     (font-lock--async-normalize-buffer-keywords
+                     (font-lock--async-split-buffer-keywords
                       font-lock-keywords))))
-         (font-lock--async-fontify-region beg end async-keywords t)
+         (progn
+           (when-let* ((sync-keywords (plist-get async-work :sync)))
+             (let ((font-lock-keywords sync-keywords))
+               (font-lock-fontify-keywords-region beg end loudly)))
+           (font-lock--async-fontify-region
+            beg end (plist-get async-work :async) t))
        (font-lock-fontify-keywords-region beg end loudly))
      `(jit-lock-bounds ,beg . ,end))))
 
