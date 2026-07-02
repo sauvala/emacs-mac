@@ -665,10 +665,13 @@ Return a plist with commit progress metrics."
          (eq (car face) 'quote)
          (not (nthcdr 2 face)))
     (let ((value (cadr face)))
-      (when (and (consp value)
-                 (eq (car value) 'face)
-                 (font-lock--async-property-list-p (cddr value)))
-        (list (cadr value) (cddr value)))))))
+      (cond
+       ((symbolp value)
+        (list value nil))
+       ((and (consp value)
+             (eq (car value) 'face)
+             (font-lock--async-property-list-p (cddr value)))
+        (list (cadr value) (cddr value))))))))
 
 (defun font-lock--async-normalize-simple-keywords (keywords)
   "Return worker-safe simple KEYWORDS, or nil if unsupported.
@@ -770,6 +773,17 @@ The returned value contains only elements of the form
            (t
             (throw 'unsupported nil))))
         (nreverse normalized))))))
+
+(defun font-lock--async-normalize-buffer-keywords (keywords)
+  "Return worker-safe buffer KEYWORDS after standard filtering, or nil.
+This preserves `font-lock-ignore' semantics without mutating
+`font-lock-keywords' during async eligibility checks."
+  (font-lock--async-normalize-simple-keywords
+   (if (eq (car-safe keywords) t)
+       keywords
+     `(t ,keywords
+         ,@(font-lock--filter-keywords
+            (mapcar #'font-lock-compile-keyword keywords))))))
 
 (defun font-lock--async-simple-span-form (text keywords case-fold offset)
   "Return a worker form computing simple font-lock spans.
@@ -1704,7 +1718,7 @@ This function is the default `font-lock-fontify-region-function'."
        (font-lock-fontify-syntactically-region beg end loudly))
      (if-let* ((async-keywords
                 (and font-lock-async-keywords
-                     (font-lock--async-normalize-simple-keywords
+                     (font-lock--async-normalize-buffer-keywords
                       font-lock-keywords))))
          (font-lock--async-fontify-region beg end async-keywords t)
        (font-lock-fontify-keywords-region beg end loudly))
