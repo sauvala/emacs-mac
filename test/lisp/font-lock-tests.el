@@ -595,6 +595,61 @@
             font-lock--commit-timer old-timer
             font-lock--pending-redisplay-requests old-redisplay))))
 
+(ert-deftest font-lock-commit-queue-prunes-stale-pending-redisplay ()
+  "Queueing newer work prunes stale deferred redisplay for the same buffer."
+  (let ((font-lock-commit-dispatch-budget nil)
+        (font-lock-commit-defer-on-input t)
+        (old-queue font-lock--commit-queue)
+        (old-tail font-lock--commit-queue-tail)
+        (old-timer font-lock--commit-timer)
+        (old-redisplay font-lock--pending-redisplay-requests)
+        calls)
+    (setq font-lock--commit-queue nil
+          font-lock--commit-queue-tail nil
+          font-lock--commit-timer nil
+          font-lock--pending-redisplay-requests nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "abc")
+          (let ((buffer (current-buffer))
+                (old-tick (buffer-chars-modified-tick)))
+            (font-lock--queue-commit
+             buffer old-tick
+             (lambda ()
+               '(font-lock-redisplay 1 . 3)))
+            (when (timerp font-lock--commit-timer)
+              (cancel-timer font-lock--commit-timer)
+              (setq font-lock--commit-timer nil))
+            (cl-letf (((symbol-function 'input-pending-p)
+                       (lambda (&optional _) t))
+                      ((symbol-function 'jit-lock-force-redisplay)
+                       (lambda (start end)
+                         (push (list (marker-buffer start)
+                                     (marker-position start)
+                                     (marker-position end))
+                               calls))))
+              (should (equal (font-lock--dispatch-commits)
+                             '(:processed 1 :dropped 0 :remaining 0)))
+              (should (equal font-lock--pending-redisplay-requests
+                             `((,buffer ,old-tick 1 . 3))))
+              (insert "d")
+              (let ((new-tick (buffer-chars-modified-tick)))
+                (font-lock--queue-commit
+                 buffer new-tick
+                 (lambda ()
+                   '(font-lock-redisplay 2 . 4)))
+                (should-not font-lock--pending-redisplay-requests)
+                (should (= (length font-lock--commit-queue) 1))
+                (should (eq font-lock--commit-queue-tail
+                            (last font-lock--commit-queue))))
+              (should-not calls))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (setq font-lock--commit-queue old-queue
+            font-lock--commit-queue-tail old-tail
+            font-lock--commit-timer old-timer
+            font-lock--pending-redisplay-requests old-redisplay))))
+
 (ert-deftest font-lock-commit-queue-yields-during-redisplay-flush ()
   "Font-lock redisplay flushing yields and preserves remaining requests."
   (let ((font-lock-commit-dispatch-budget nil)

@@ -503,6 +503,17 @@ This can be an \"!\" or the \"n\" in \"ifndef\".")
       (setq font-lock--commit-queue queue
             font-lock--commit-queue-tail tail))))
 
+(defun font-lock--prune-stale-redisplay-requests (buffer tick)
+  "Prune pending redisplay requests for BUFFER superseded by TICK."
+  (when tick
+    (let (requests)
+      (dolist (entry font-lock--pending-redisplay-requests)
+        (unless (and (eq (car entry) buffer)
+                     (cadr entry)
+                     (not (= (cadr entry) tick)))
+          (push entry requests)))
+      (setq font-lock--pending-redisplay-requests (nreverse requests)))))
+
 (defun font-lock--queue-commit (buffer tick function &rest args)
   "Queue a font-lock commit for BUFFER if its modified TICK still matches.
 FUNCTION is called in BUFFER with ARGS.  If TICK is non-nil and BUFFER's
@@ -512,6 +523,7 @@ modified tick changes before dispatch, the queued commit is dropped."
                  (with-current-buffer buffer
                    (= tick (buffer-chars-modified-tick)))))
     (font-lock--prune-stale-commits buffer tick)
+    (font-lock--prune-stale-redisplay-requests buffer tick)
     (let ((cell (list (list buffer tick function args))))
       (if (and font-lock--commit-queue font-lock--commit-queue-tail)
           (setcdr font-lock--commit-queue-tail cell)
