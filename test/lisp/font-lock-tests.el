@@ -840,6 +840,43 @@
       (setq font-lock--async-worker-pool old-pool
             font-lock--async-pending-jobs old-pending))))
 
+(ert-deftest font-lock-async-deduplicates-before-building-worker-form ()
+  "Duplicate async font-lock work avoids rebuilding the worker form."
+  (let ((old-pool font-lock--async-worker-pool)
+        (old-pending font-lock--async-pending-jobs)
+        (form-builds 0)
+        (pool-requests 0)
+        submissions)
+    (setq font-lock--async-worker-pool nil
+          font-lock--async-pending-jobs (make-hash-table :test #'equal))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "alpha beta alpha")
+          (cl-letf (((symbol-function 'font-lock--async-worker-pool)
+                     (lambda ()
+                       (setq pool-requests (1+ pool-requests))
+                       'pool))
+                    ((symbol-function 'font-lock--async-simple-span-form)
+                     (lambda (&rest _)
+                       (setq form-builds (1+ form-builds))
+                       'form))
+                    ((symbol-function 'elisp-worker-pool-async-eval)
+                     (lambda (_pool form &rest _args)
+                       (push form submissions))))
+            (font-lock--async-fontify-region
+             (point-min) (point-max)
+             '(("alpha" . font-lock-keyword-face)))
+            (font-lock--async-fontify-region
+             (point-min) (point-max)
+             '(("alpha" . font-lock-keyword-face)))
+            (should (= form-builds 1))
+            (should (= pool-requests 1))
+            (should (equal submissions '(form)))))
+      (when font-lock--async-worker-pool
+        (font-lock--async-shutdown-workers))
+      (setq font-lock--async-worker-pool old-pool
+            font-lock--async-pending-jobs old-pending))))
+
 (ert-deftest font-lock-async-prunes-superseded-pending-region-work ()
   "Newer async font-lock work prunes stale pending work for the same region."
   (let ((old-pool font-lock--async-worker-pool)

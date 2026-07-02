@@ -1048,29 +1048,29 @@ t, `prepend', `append', or `keep'."
                            keywords))))
     (let* ((buffer (current-buffer))
            (tick (buffer-chars-modified-tick))
-           (text (buffer-substring-no-properties beg end))
            (case-fold font-lock-keywords-case-fold-search)
-           (form (font-lock--async-simple-span-form text keywords
-                                                    case-fold (1- beg)))
            (key (font-lock--async-job-key buffer tick beg end keywords
-                                          case-fold))
-           (pool (font-lock--async-worker-pool)))
+                                          case-fold)))
       (unless (gethash key font-lock--async-pending-jobs)
         (font-lock--async-prune-superseded-jobs key)
-        (puthash key t font-lock--async-pending-jobs)
-        (elisp-worker-pool-async-eval
-         pool
-         form
-         :success-fn
-         (lambda (spans)
-           (remhash key font-lock--async-pending-jobs)
-           (when (font-lock--buffer-tick-current-p buffer tick)
-             (font-lock--queue-span-commits
-              buffer tick #'font-lock--apply-async-spans spans)))
-         :error-fn
-         (lambda (message _data)
-           (remhash key font-lock--async-pending-jobs)
-           (message "Async font-lock worker failed: %s" message)))))))
+        (let* ((text (buffer-substring-no-properties beg end))
+               (form (font-lock--async-simple-span-form text keywords
+                                                        case-fold (1- beg)))
+               (pool (font-lock--async-worker-pool)))
+          (puthash key t font-lock--async-pending-jobs)
+          (elisp-worker-pool-async-eval
+           pool
+           form
+           :success-fn
+           (lambda (spans)
+             (remhash key font-lock--async-pending-jobs)
+             (when (font-lock--buffer-tick-current-p buffer tick)
+               (font-lock--queue-span-commits
+                buffer tick #'font-lock--apply-async-spans spans)))
+           :error-fn
+           (lambda (message _data)
+             (remhash key font-lock--async-pending-jobs)
+             (message "Async font-lock worker failed: %s" message))))))))
 
 (defvar font-lock-keywords nil
   "A list of keywords and corresponding font-lock highlighting rules.
