@@ -402,6 +402,13 @@ Only applies to the current buffer."
                   (jit-lock--ensure-defer-timer)
                   t)))))
 
+(defun jit-lock--defer-region (start end)
+  "Defer fontification of the current buffer from START to END."
+  (jit-lock--ensure-defer-timer)
+  (unless (memq (current-buffer) jit-lock-defer-buffers)
+    (push (current-buffer) jit-lock-defer-buffers))
+  (put-text-property start end 'fontified 'defer))
+
 (defun jit-lock-function (start)
   "Fontify current buffer starting at position START.
 This function is added to `fontification-functions' when `jit-lock-mode'
@@ -420,11 +427,11 @@ is active."
       ;; Mark the area as defer-fontified so that the redisplay engine
       ;; is happy and so that the idle timer can find the places to fontify.
       (with-silent-modifications
-       (put-text-property start
-			  (next-single-property-change
-			   start 'fontified nil
-			   (min (point-max) (+ start jit-lock-chunk-size)))
-			  'fontified 'defer)))))
+       (jit-lock--defer-region
+        start
+        (next-single-property-change
+         start 'fontified nil
+         (min (point-max) (+ start jit-lock-chunk-size))))))))
 
 (defun jit-lock--run-functions (beg end)
   (let ((tight-beg nil) (tight-end nil)
@@ -522,7 +529,13 @@ Defaults to the whole buffer.  END can be out of bounds."
                (setq start tight-end)))
            ;; Find the start of the next chunk, if any.
            (setq start
-                 (text-property-any start end 'fontified nil))))))))
+                 (text-property-any start end 'fontified nil))
+           (when (and start
+                      jit-lock-defer-on-input
+                      (input-pending-p))
+             (jit-lock--defer-region
+              start (or (text-property-any start end 'fontified t) end))
+             (setq start nil))))))))
 
 (defun jit-lock-force-redisplay (start end)
   "Force the display engine to re-render START's buffer from START to END.
