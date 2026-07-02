@@ -162,9 +162,10 @@ data object.  FORM and its result must be printable and readable."
             (elisp-worker-callbacks worker))
       (process-send-string
        process
-       (concat (prin1-to-string
-                (list :op 'eval :id id :form form))
-               "\n"))
+       (let ((print-escape-newlines t))
+         (concat (prin1-to-string
+                  (list :op 'eval :id id :form form))
+                 "\n")))
       id)))
 
 (defun elisp-worker-shutdown (worker)
@@ -264,9 +265,10 @@ SUCCESS-FN and ERROR-FN are interpreted as in
 
 (defun elisp-worker--write-response (response)
   "Write one worker protocol RESPONSE to standard output."
-  (prin1 response)
-  (terpri)
-  (flush-standard-output))
+  (let ((print-escape-newlines t))
+    (prin1 response)
+    (terpri)
+    (flush-standard-output)))
 
 (defun elisp-worker--stdio-server ()
   "Run a line-oriented worker protocol on standard input and output."

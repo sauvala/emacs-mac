@@ -63,6 +63,27 @@
           (should (string-match-p "worker failed" error-message)))
       (elisp-worker-shutdown worker))))
 
+(ert-deftest elisp-worker-async-eval-round-trips-newline-strings ()
+  "Worker requests can contain strings with embedded newlines."
+  (let ((worker (elisp-worker-start))
+        result
+        error-message)
+    (unwind-protect
+        (progn
+          (elisp-worker-async-eval
+           worker
+           '(concat "alpha\n" "beta")
+           :success-fn (lambda (value)
+                         (setq result value))
+           :error-fn (lambda (message _data)
+                       (setq error-message message)))
+          (with-timeout (3 (ert-fail "Timed out waiting for worker newline result"))
+            (while (and (not result) (not error-message))
+              (accept-process-output nil 0.01)))
+          (should-not error-message)
+          (should (equal result "alpha\nbeta")))
+      (elisp-worker-shutdown worker))))
+
 (ert-deftest elisp-worker-pool-runs-jobs-concurrently ()
   "A worker pool can run independent Lisp jobs in parallel processes."
   (let ((pool (elisp-worker-pool-start 2))
