@@ -202,6 +202,56 @@ INITARGS are passed to `make-instance' for `jsonrpc--test-client'."
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
+(ert-deftest deferred-actions-yield-while-input-is-pending ()
+  "Deferred JSON-RPC actions leave backlog while input is pending."
+  (let ((jsonrpc-deferred-actions-budget nil)
+        (jsonrpc-deferred-actions-defer-on-input t)
+        (conn (make-instance 'jsonrpc-connection :name "jsonrpc-deferred-test"))
+        called)
+    (unwind-protect
+        (progn
+          (dotimes (i 3)
+            (let ((key (list (format "deferred-%d" i) (current-buffer)))
+                  (id i))
+              (puthash key
+                       (list (lambda ()
+                               (push id called)
+                               (remhash key (jsonrpc--deferred-actions conn)))
+                             nil id)
+                       (jsonrpc--deferred-actions conn))))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&optional _) t)))
+            (should (equal (jsonrpc--call-deferred conn)
+                           '(:processed 1 :remaining 2))))
+          (should (= (hash-table-count (jsonrpc--deferred-actions conn)) 2))
+          (should (timerp (jsonrpc--deferred-actions-timer conn)))
+          (should (= (length called) 1)))
+      (when-let* ((timer (jsonrpc--deferred-actions-timer conn)))
+        (cancel-timer timer))
+      (kill-buffer (jsonrpc--events-buffer conn)))))
+
+(ert-deftest deferred-actions-do-not-reschedule-redeferred-actions ()
+  "Deferred JSON-RPC actions do not timer-loop while still not ready."
+  (let ((jsonrpc-deferred-actions-budget nil)
+        (jsonrpc-deferred-actions-defer-on-input t)
+        (conn (make-instance 'jsonrpc-connection :name "jsonrpc-redefer-test"))
+        called)
+    (unwind-protect
+        (let ((key (list "deferred" (current-buffer))))
+          (puthash key
+                   (list (lambda ()
+                           (push t called))
+                         nil 1)
+                   (jsonrpc--deferred-actions conn))
+          (should (equal (jsonrpc--call-deferred conn)
+                         '(:processed 1 :remaining 1)))
+          (should (= (hash-table-count (jsonrpc--deferred-actions conn)) 1))
+          (should-not (jsonrpc--deferred-actions-timer conn))
+          (should (= (length called) 1)))
+      (when-let* ((timer (jsonrpc--deferred-actions-timer conn)))
+        (cancel-timer timer))
+      (kill-buffer (jsonrpc--events-buffer conn)))))
+
 (defun jsonrpc--test-wire-message (message)
   "Return MESSAGE encoded with JSON-RPC content-length headers."
   (let ((json (jsonrpc--json-encode message)))

@@ -86,6 +86,10 @@
     :documentation "Map (DEFERRED BUF) to (FN TIMER ID).  FN is\
 a saved DEFERRED `async-request' from BUF, to be sent not later\
 than TIMER as ID.")
+   (-deferred-actions-timer
+    :initform nil
+    :accessor jsonrpc--deferred-actions-timer
+    :documentation "Timer resuming budgeted deferred action replay.")
    (-scontrol ; bug#67945
     :initform nil
     :accessor jsonrpc--scontrol
@@ -603,6 +607,30 @@ a later timer turn if input is pending."
   :safe #'booleanp
   :group 'jsonrpc)
 
+(defcustom jsonrpc-deferred-actions-budget 0.005
+  "Maximum seconds spent replaying deferred JSON-RPC actions per timer.
+The default is a small positive budget so large deferred request bursts
+yield back to the command loop.  If nil, drain deferred actions in one
+turn.  When this is a positive number, process at least one deferred
+action and then yield once the budget is exhausted."
+  :version "32.1"
+  :type '(choice (const :tag "Drain deferred actions in one turn" nil)
+                 (number :tag "Seconds"))
+  :safe (lambda (value)
+          (or (null value)
+              (and (numberp value) (>= value 0))))
+  :group 'jsonrpc)
+
+(defcustom jsonrpc-deferred-actions-defer-on-input t
+  "Non-nil means deferred JSON-RPC action replay yields on pending input.
+When this is non-nil, `jsonrpc--call-deferred' replays at least one
+deferred action and then leaves any remaining deferred actions for a
+later timer turn if input is pending."
+  :version "32.1"
+  :type 'boolean
+  :safe #'booleanp
+  :group 'jsonrpc)
+
 
 ;;; Specific to `jsonrpc-process-connection'
 ;;;
@@ -797,12 +825,31 @@ Move point to end of buffer.")
 
 (defun jsonrpc--call-deferred (connection)
   "Call CONNECTION's deferred actions, who may again defer themselves."
+  (when-let* ((timer (jsonrpc--deferred-actions-timer connection)))
+    (cancel-timer timer)
+    (setf (jsonrpc--deferred-actions-timer connection) nil))
   (when-let* ((actions (hash-table-values (jsonrpc--deferred-actions connection))))
     (jsonrpc--event
      connection 'internal
      :log-text (format "re-attempting deferred requests %s"
                        (mapcar (apply-partially #'nth 2) actions)))
-    (mapc #'funcall (mapcar #'car actions))))
+    (let ((budget (jsonrpc--deferred-actions-budget))
+          (started (float-time))
+          (processed 0))
+      (while (and actions
+                  (or (zerop processed)
+                      (and (not (and jsonrpc-deferred-actions-defer-on-input
+                                     (input-pending-p)))
+                           (or (not budget)
+                               (< (- (float-time) started) budget)))))
+        (let ((action (pop actions)))
+          (setq processed (1+ processed))
+          (funcall (car action))))
+      (let ((remaining (hash-table-count
+                        (jsonrpc--deferred-actions connection))))
+        (when (and actions (> remaining 0))
+          (jsonrpc--ensure-deferred-actions-timer connection))
+        (list :processed processed :remaining remaining)))))
 
 (defun jsonrpc--process-sentinel (proc change)
   "Called when PROC undergoes CHANGE."
@@ -820,6 +867,9 @@ Move point to end of buffer.")
                  (pcase-let ((`(,_ ,timer ,_) triplet))
                    (when timer (cancel-timer timer))))
                (jsonrpc--deferred-actions connection))
+      (when-let* ((timer (jsonrpc--deferred-actions-timer connection)))
+        (cancel-timer timer)
+        (setf (jsonrpc--deferred-actions-timer connection) nil))
       (dolist (prop '(jsonrpc-parse-timer jsonrpc-dispatch-timer))
         (when-let* ((timer (process-get proc prop)))
           (cancel-timer timer)
@@ -837,6 +887,18 @@ Move point to end of buffer.")
 
 (defvar jsonrpc--in-process-filter nil
   "Non-nil if inside `jsonrpc--process-filter'.")
+
+(defun jsonrpc--deferred-actions-budget ()
+  "Return the active deferred action replay budget, or nil."
+  (and (numberp jsonrpc-deferred-actions-budget)
+       (> jsonrpc-deferred-actions-budget 0)
+       jsonrpc-deferred-actions-budget))
+
+(defun jsonrpc--ensure-deferred-actions-timer (connection)
+  "Ensure CONNECTION has one active deferred action replay timer."
+  (unless (timerp (jsonrpc--deferred-actions-timer connection))
+    (setf (jsonrpc--deferred-actions-timer connection)
+          (run-at-time 0 nil #'jsonrpc--call-deferred connection))))
 
 (defun jsonrpc--process-message-dispatch-budget ()
   "Return the active process message dispatch budget, or nil."
