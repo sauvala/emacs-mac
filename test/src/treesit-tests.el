@@ -51,6 +51,7 @@
 (defvar treesit--syntax-propertize-start)
 (defvar treesit-primary-parser)
 (defvar treesit--pre-redisplay-tick)
+(defvar treesit--pre-redisplay-pending-ranges)
 
 (declare-function treesit--async-query-string-spans "treesit"
                   (string query language &rest args))
@@ -454,6 +455,39 @@
         (should-not parser-calls)
         (should-not mark-calls)
         (should-not treesit--pre-redisplay-tick)))))
+
+(ert-deftest treesit-pre-redisplay-preserves-ranges-when-input-arrives ()
+  "Tree-sitter pre-redisplay preserves parsed ranges when yielding."
+  (with-temp-buffer
+    (insert "abcdef")
+    (let ((treesit-primary-parser 'parser)
+          (treesit--pre-redisplay-tick nil)
+          (treesit--pre-redisplay-pending-ranges nil)
+          (treesit-pre-redisplay-defer-on-input t)
+          (input-pending nil)
+          (parser-calls 0)
+          mark-calls)
+      (cl-letf (((symbol-function 'input-pending-p)
+                 (lambda (&optional _) input-pending))
+                ((symbol-function 'treesit-parser-changed-regions)
+                 (lambda (_parser)
+                   (setq parser-calls (1+ parser-calls))
+                   (when (= parser-calls 1)
+                     (setq input-pending t)
+                     '((2 . 5)))))
+                ((symbol-function 'treesit--font-lock-mark-ranges-to-fontify)
+                 (lambda (ranges)
+                   (push ranges mark-calls))))
+        (treesit--pre-redisplay)
+        (should-not mark-calls)
+        (should (equal treesit--pre-redisplay-pending-ranges
+                       '((2 . 5))))
+        (should-not treesit--pre-redisplay-tick)
+        (setq input-pending nil)
+        (treesit--pre-redisplay)
+        (should (equal mark-calls '(((2 . 5)))))
+        (should-not treesit--pre-redisplay-pending-ranges)
+        (should treesit--pre-redisplay-tick)))))
 
 (ert-deftest treesit-pre-syntax-ppss-defers-while-input-is-pending ()
   "Tree-sitter syntax extension preserves pending work while input is pending."

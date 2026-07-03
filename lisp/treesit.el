@@ -2563,6 +2563,9 @@ Because `pre-redisplay-functions' could be called multiple times
 during a single command loop, we use this variable to debounce
 calls to `treesit--pre-redisplay'.")
 
+(defvar-local treesit--pre-redisplay-pending-ranges nil
+  "Tree-sitter ranges waiting for pre-redisplay font-lock marking.")
+
 (defun treesit--font-lock-mark-ranges-to-fontify (ranges)
   "A notifier that marks ranges that needs refontification.
 
@@ -2623,15 +2626,23 @@ parser."
   (unless (eq treesit--pre-redisplay-tick (buffer-chars-modified-tick))
     (unless (and treesit-pre-redisplay-defer-on-input
                  (input-pending-p))
-      (when treesit-primary-parser
-        ;; Force a reparse on the primary parser and update embedded
-        ;; parser ranges in the changed ranges.
-        (let ((affected-ranges (treesit-parser-changed-regions
-                                treesit-primary-parser)))
+      (let ((affected-ranges treesit--pre-redisplay-pending-ranges))
+        (setq treesit--pre-redisplay-pending-ranges nil)
+        (when treesit-primary-parser
+          ;; Force a reparse on the primary parser and update embedded
+          ;; parser ranges in the changed ranges.
+          (setq affected-ranges
+                (append affected-ranges
+                        (treesit-parser-changed-regions
+                         treesit-primary-parser))))
+        (if (and affected-ranges
+                 treesit-pre-redisplay-defer-on-input
+                 (input-pending-p))
+            (setq treesit--pre-redisplay-pending-ranges affected-ranges)
           (when affected-ranges
-            (treesit--font-lock-mark-ranges-to-fontify affected-ranges))))
-
-      (setq treesit--pre-redisplay-tick (buffer-chars-modified-tick)))))
+            (treesit--font-lock-mark-ranges-to-fontify affected-ranges))
+          (setq treesit--pre-redisplay-tick
+                (buffer-chars-modified-tick)))))))
 
 (defun treesit--pre-syntax-ppss (start end)
   "Force reparse and consequently run all notifiers.
