@@ -52,6 +52,7 @@
 (defvar treesit-primary-parser)
 (defvar treesit--pre-redisplay-tick)
 (defvar treesit--pre-redisplay-pending-ranges)
+(defvar treesit--pre-redisplay-pending-tick)
 
 (declare-function treesit--async-query-string-spans "treesit"
                   (string query language &rest args))
@@ -486,6 +487,7 @@
         (setq input-pending nil)
         (treesit--pre-redisplay)
         (should (equal mark-calls '(((2 . 5)))))
+        (should (= parser-calls 1))
         (should-not treesit--pre-redisplay-pending-ranges)
         (should treesit--pre-redisplay-tick)))))
 
