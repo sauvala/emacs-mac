@@ -84,6 +84,56 @@
           (should (equal result "alpha\nbeta")))
       (elisp-worker-shutdown worker))))
 
+(ert-deftest elisp-worker-filter-yields-while-input-is-pending ()
+  "Worker response dispatch leaves backlog while input is pending."
+  (skip-unless (executable-find "cat"))
+  (let ((elisp-worker-response-dispatch-budget nil)
+        (elisp-worker-response-dispatch-defer-on-input t)
+        (worker (elisp-worker--make))
+        called
+        proc)
+    (unwind-protect
+        (progn
+          (setq proc (make-process
+                      :name "elisp-worker-filter-test"
+                      :buffer (generate-new-buffer
+                               " *elisp-worker-filter-test*")
+                      :command (list "cat")
+                      :connection-type 'pipe
+                      :noquery t))
+          (process-put proc 'elisp-worker worker)
+          (setf (elisp-worker-process worker) proc)
+          (dotimes (i 3)
+            (push (cons (1+ i)
+                        (list :success-fn
+                              (lambda (value)
+                                (push value called))))
+                  (elisp-worker-callbacks worker)))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&optional _) t)))
+            (elisp-worker--filter
+             proc
+             (concat
+              (mapconcat
+               #'prin1-to-string
+               '((:id 1 :status ok :value 1)
+                 (:id 2 :status ok :value 2)
+                 (:id 3 :status ok :value 3))
+               "\n")
+              "\n")))
+          (should (= (length called) 1))
+          (should (= (length (elisp-worker-pending-responses worker)) 2))
+          (should (timerp (elisp-worker-dispatch-timer worker))))
+      (when (and worker (timerp (elisp-worker-dispatch-timer worker)))
+        (cancel-timer (elisp-worker-dispatch-timer worker)))
+      (when proc
+        (when (process-live-p proc)
+          (set-process-sentinel proc #'ignore)
+          (delete-process proc))
+        (when-let* ((buffer (process-buffer proc)))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
 (ert-deftest elisp-worker-pool-runs-jobs-concurrently ()
   "A worker pool can run independent Lisp jobs in parallel processes."
   (let ((pool (elisp-worker-pool-start 2))

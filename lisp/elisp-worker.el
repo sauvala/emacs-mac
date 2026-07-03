@@ -34,11 +34,37 @@
   "Asynchronous Emacs Lisp worker processes."
   :group 'lisp)
 
+(defcustom elisp-worker-response-dispatch-budget 0.005
+  "Maximum seconds spent dispatching worker responses per timer.
+The default is a small positive budget so bursts of worker responses yield
+back to the command loop.  If nil, drain responses in one callback.  When
+this is a positive number, process at least one response and then yield once
+the budget is exhausted."
+  :type '(choice (const :tag "Drain responses in one callback" nil)
+                 (number :tag "Seconds"))
+  :safe (lambda (value)
+          (or (null value)
+              (and (numberp value) (>= value 0))))
+  :version "32.1"
+  :group 'elisp-worker)
+
+(defcustom elisp-worker-response-dispatch-defer-on-input t
+  "Non-nil means worker response dispatch yields while input is pending.
+When this is non-nil, worker filters dispatch at least one completed
+response and then leave remaining responses for a later timer turn if
+input is pending."
+  :type 'boolean
+  :safe #'booleanp
+  :version "32.1"
+  :group 'elisp-worker)
+
 (cl-defstruct (elisp-worker
                (:constructor elisp-worker--make))
   process
   stderr-buffer
   (callbacks nil)
+  (pending-responses nil)
+  dispatch-timer
   (partial-output "")
   (next-id 0))
 
@@ -87,7 +113,11 @@
                                  (string-trim-right event))
                          nil)))
             (elisp-worker-callbacks worker))
-      (setf (elisp-worker-callbacks worker) nil))))
+      (when (timerp (elisp-worker-dispatch-timer worker))
+        (cancel-timer (elisp-worker-dispatch-timer worker)))
+      (setf (elisp-worker-callbacks worker) nil
+            (elisp-worker-pending-responses worker) nil
+            (elisp-worker-dispatch-timer worker) nil))))
 
 (defun elisp-worker--dispatch-response (worker response)
   "Dispatch one worker RESPONSE for WORKER."
@@ -106,11 +136,48 @@
                   (plist-get response :message)
                   (plist-get response :data)))))))
 
+(defun elisp-worker--response-dispatch-budget ()
+  "Return the active worker response dispatch budget, or nil."
+  (and (numberp elisp-worker-response-dispatch-budget)
+       (> elisp-worker-response-dispatch-budget 0)
+       elisp-worker-response-dispatch-budget))
+
+(defun elisp-worker--ensure-dispatch-timer (worker)
+  "Ensure WORKER has one active response dispatch timer."
+  (unless (timerp (elisp-worker-dispatch-timer worker))
+    (setf (elisp-worker-dispatch-timer worker)
+          (run-at-time 0 nil #'elisp-worker--dispatch-pending-responses
+                       worker))))
+
+(defun elisp-worker--dispatch-pending-responses (worker)
+  "Dispatch queued responses for WORKER within the responsiveness budget."
+  (when (timerp (elisp-worker-dispatch-timer worker))
+    (cancel-timer (elisp-worker-dispatch-timer worker)))
+  (setf (elisp-worker-dispatch-timer worker) nil)
+  (let ((responses (elisp-worker-pending-responses worker))
+        (budget (elisp-worker--response-dispatch-budget))
+        (started (float-time))
+        (processed 0))
+    (while (and responses
+                (or (zerop processed)
+                    (and (not (and elisp-worker-response-dispatch-defer-on-input
+                                   (input-pending-p)))
+                         (or (not budget)
+                             (< (- (float-time) started) budget)))))
+      (let ((response (pop responses)))
+        (setf (elisp-worker-pending-responses worker) responses)
+        (setq processed (1+ processed))
+        (elisp-worker--dispatch-response worker response)))
+    (when (elisp-worker-pending-responses worker)
+      (elisp-worker--ensure-dispatch-timer worker))
+    (list :processed processed
+          :remaining (length (elisp-worker-pending-responses worker)))))
+
 (defun elisp-worker--filter (process string)
   "Parse worker PROCESS output from STRING."
   (let* ((worker (process-get process 'elisp-worker))
          (output (concat (elisp-worker-partial-output worker) string))
-         line)
+         line responses)
     (while (string-match "\n" output)
       (setq line (substring output 0 (match-beginning 0))
             output (substring output (match-end 0)))
@@ -118,11 +185,15 @@
         (setq line (substring line (length "Lisp expression: "))))
       (unless (string-empty-p line)
         (condition-case err
-            (elisp-worker--dispatch-response
-             worker (car (read-from-string line)))
+            (push (car (read-from-string line)) responses)
           (error
            (message "Failed to parse elisp-worker response: %s"
                     (error-message-string err))))))
+    (when responses
+      (setf (elisp-worker-pending-responses worker)
+            (nconc (elisp-worker-pending-responses worker)
+                   (nreverse responses)))
+      (elisp-worker--dispatch-pending-responses worker))
     (setf (elisp-worker-partial-output worker) output)))
 
 (defun elisp-worker-start (&optional name)
@@ -180,7 +251,11 @@ data object.  FORM and its result must be printable and readable."
     (when-let* ((buffer (elisp-worker-stderr-buffer worker)))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))
+    (when (timerp (elisp-worker-dispatch-timer worker))
+      (cancel-timer (elisp-worker-dispatch-timer worker)))
     (setf (elisp-worker-callbacks worker) nil
+          (elisp-worker-pending-responses worker) nil
+          (elisp-worker-dispatch-timer worker) nil
           (elisp-worker-process worker) nil
           (elisp-worker-stderr-buffer worker) nil)))
 
