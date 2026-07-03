@@ -471,6 +471,9 @@ This can be an \"!\" or the \"n\" in \"ifndef\".")
 (defvar font-lock--async-pending-jobs (make-hash-table :test #'equal)
   "Pending async font-lock jobs keyed by buffer snapshot and region.")
 
+(defvar-local font-lock--async-split-keywords-cache nil
+  "Buffer-local cache for async font-lock keyword splitting.")
+
 (defun font-lock--commit-dispatch-budget ()
   "Return the active font-lock commit dispatch budget, or nil."
   (and (numberp font-lock-commit-dispatch-budget)
@@ -931,6 +934,18 @@ is normalized data for the worker-safe suffix that follows it."
         (list :sync (when sync-items
                       `(t ,(cadr compiled) ,@(nreverse sync-items)))
               :async async-keywords)))))
+
+(defun font-lock--async-buffer-keyword-split (keywords)
+  "Return cached async keyword split for KEYWORDS in the current buffer."
+  (if (and font-lock--async-split-keywords-cache
+           (eq keywords (nth 0 font-lock--async-split-keywords-cache))
+           (equal font-lock-ignore
+                  (nth 1 font-lock--async-split-keywords-cache)))
+      (nth 2 font-lock--async-split-keywords-cache)
+    (let ((split (font-lock--async-split-buffer-keywords keywords)))
+      (setq font-lock--async-split-keywords-cache
+            (list keywords font-lock-ignore split))
+      split)))
 
 (defun font-lock--async-simple-span-form (text keywords case-fold offset)
   "Return a worker form computing simple font-lock spans.
@@ -1472,7 +1487,8 @@ see the variables `c-font-lock-extra-types', `c++-font-lock-extra-types',
 	   ;; If the keywords were compiled before, compile them again.
 	   (if was-compiled
 	       (setq font-lock-keywords
-                     (font-lock-compile-keywords font-lock-keywords)))))))
+                     (font-lock-compile-keywords font-lock-keywords)))
+           (setq font-lock--async-split-keywords-cache nil)))))
 
 (defun font-lock-update-removed-keyword-alist (mode keywords how)
   "Update `font-lock-removed-keywords-alist' when adding new KEYWORDS to MODE."
@@ -1582,7 +1598,8 @@ happens, so the major mode can be corrected."
 	   ;; If the keywords were compiled before, compile them again.
 	   (if was-compiled
 	       (setq font-lock-keywords
-                     (font-lock-compile-keywords font-lock-keywords)))))))
+                     (font-lock-compile-keywords font-lock-keywords)))
+           (setq font-lock--async-split-keywords-cache nil)))))
 
 ;;; Font Lock Support mode.
 
@@ -1903,7 +1920,7 @@ This function is the default `font-lock-fontify-region-function'."
        (font-lock-fontify-syntactically-region beg end loudly))
      (if-let* ((async-work
                 (and font-lock-async-keywords
-                     (font-lock--async-split-buffer-keywords
+                     (font-lock--async-buffer-keyword-split
                       font-lock-keywords))))
          (progn
            (when-let* ((sync-keywords (plist-get async-work :sync)))
@@ -2663,6 +2680,7 @@ Sets various variables using `font-lock-defaults' and
       (unless (eq (car font-lock-keywords) t)
 	(setq font-lock-keywords
               (font-lock-compile-keywords font-lock-keywords))))
+    (setq font-lock--async-split-keywords-cache nil)
     (font-lock-flush)))
 
 ;;; Color etc. support.

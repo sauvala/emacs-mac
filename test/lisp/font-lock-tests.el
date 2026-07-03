@@ -1135,6 +1135,34 @@
             font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
 
+(ert-deftest font-lock-default-fontify-region-reuses-async-keyword-split ()
+  "Repeated default fontification reuses foreground async keyword splitting."
+  (with-temp-buffer
+    (insert "alpha\nalpha")
+    (let ((font-lock-async-keywords t)
+          (font-lock-keywords '(("alpha" . font-lock-keyword-face)))
+          (font-lock-keywords-only t)
+          (font-lock-keywords-case-fold-search nil)
+          (font-lock-set-defaults t)
+          (font-lock-syntax-table nil)
+          (font-lock-syntactic-keywords nil)
+          (font-lock-syntactically-fontified 0)
+          (font-lock-extend-region-functions nil)
+          (split-calls 0)
+          scheduled)
+      (cl-letf (((symbol-function 'font-lock--async-split-buffer-keywords)
+                 (lambda (_keywords)
+                   (setq split-calls (1+ split-calls))
+                   '(:sync nil :async (("alpha" 0 font-lock-keyword-face nil nil)))))
+                ((symbol-function 'font-lock--async-fontify-region)
+                 (lambda (beg end keywords &optional normalized)
+                   (push (list beg end keywords normalized) scheduled))))
+        (font-lock-default-fontify-region (point-min) (line-end-position) nil)
+        (forward-line 1)
+        (font-lock-default-fontify-region (point) (point-max) nil)
+        (should (= split-calls 1))
+        (should (= (length scheduled) 2))))))
+
 (ert-deftest font-lock-default-fontify-region-can-use-compiled-async-keywords ()
   "The async keyword path accepts compiled simple keyword specs."
   (let ((old-pool font-lock--async-worker-pool)
