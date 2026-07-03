@@ -362,6 +362,21 @@ face application can yield between chunks according to
   :group 'font-lock
   :version "31.1")
 
+(defcustom font-lock-async-commit-span-batch-characters nil
+  "Maximum number of characters covered by one async font-lock commit.
+When this is a positive integer, worker-computed span commits are split
+before their covered text exceeds this many characters.  This bounds
+main-thread text property application even when a worker returns a small
+number of very large spans.  If nil, split only by
+`font-lock-async-commit-span-batch-size'."
+  :type '(choice (const :tag "No character limit" nil)
+                 (natnum :tag "Characters"))
+  :safe (lambda (value)
+          (or (null value)
+              (and (integerp value) (> value 0))))
+  :group 'font-lock
+  :version "32.1")
+
 
 ;; Obsolete face variables.
 
@@ -542,19 +557,35 @@ modified tick changes before dispatch, the queued commit is dropped."
   "Queue worker-computed SPANS as bounded font-lock commits.
 BUFFER, TICK, FUNCTION and ARGS are as in `font-lock--queue-commit',
 except SPANS is split into chunks no larger than
-`font-lock-async-commit-span-batch-size' and passed as FUNCTION's first
-argument.  If `font-lock-commit-defer-on-input' is non-nil, queue one
-chunk and leave remaining split work for a continuation."
+`font-lock-async-commit-span-batch-size' or
+`font-lock-async-commit-span-batch-characters' and passed as FUNCTION's
+first argument.  If `font-lock-commit-defer-on-input' is non-nil, queue
+one chunk and leave remaining split work for a continuation."
   (let ((batch-size (max 1 font-lock-async-commit-span-batch-size))
+        (batch-characters (and (integerp
+                                font-lock-async-commit-span-batch-characters)
+                               (> font-lock-async-commit-span-batch-characters
+                                  0)
+                               font-lock-async-commit-span-batch-characters))
         (queued 0))
     (while (and spans
                 (or (not font-lock-commit-defer-on-input)
                     (zerop queued)))
       (let ((chunk nil)
-            (count 0))
-        (while (and spans (< count batch-size))
-          (push (pop spans) chunk)
-          (setq count (1+ count)))
+            (count 0)
+            (characters 0))
+        (while (and spans
+                    (< count batch-size)
+                    (or (not batch-characters)
+                        (zerop count)
+                        (<= (+ characters
+                               (font-lock--async-span-width (car spans)))
+                            batch-characters)))
+          (let* ((span (pop spans))
+                 (width (font-lock--async-span-width span)))
+            (push span chunk)
+            (setq count (1+ count)
+                  characters (+ characters width))))
         (apply #'font-lock--queue-commit
                buffer tick function (nreverse chunk) args)
         (setq queued (1+ queued))))
@@ -567,6 +598,20 @@ chunk and leave remaining split work for a continuation."
   "Continue queueing worker-computed SPANS for the current buffer."
   (apply #'font-lock--queue-span-commits
          (current-buffer) tick function spans args))
+
+(defun font-lock--async-span-width (span)
+  "Return the character width covered by async font-lock SPAN."
+  (let ((start (if (integer-or-marker-p (car-safe span))
+                   (nth 0 span)
+                 (nth 1 span)))
+        (end (if (integer-or-marker-p (car-safe span))
+                 (nth 1 span)
+               (nth 2 span))))
+    (if (and (integer-or-marker-p start)
+             (integer-or-marker-p end)
+             (< start end))
+        (- end start)
+      1)))
 
 (defun font-lock--redisplay-request-region (request)
   "Return the region described by redisplay REQUEST, or nil."

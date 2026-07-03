@@ -275,6 +275,39 @@
       (setq font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
 
+(ert-deftest font-lock-queue-span-commits-splits-large-covered-ranges ()
+  "Async span commit queueing limits the text covered by one commit."
+  (let ((font-lock-async-commit-span-batch-size 10)
+        (font-lock-async-commit-span-batch-characters 3)
+        (font-lock-commit-defer-on-input nil)
+        (old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((buffer (current-buffer))
+                (tick (buffer-chars-modified-tick)))
+            (font-lock--queue-span-commits
+             buffer tick #'font-lock--apply-async-spans
+             '((1 3 font-lock-keyword-face)
+               (3 6 font-lock-string-face)
+               (6 8 font-lock-comment-face)))
+            (when (timerp font-lock--commit-timer)
+              (cancel-timer font-lock--commit-timer)
+              (setq font-lock--commit-timer nil))
+            (should (= (length font-lock--commit-queue) 3))
+            (should (equal (nth 3 (car font-lock--commit-queue))
+                           '(((1 3 font-lock-keyword-face)))))
+            (should (equal (nth 3 (cadr font-lock--commit-queue))
+                           '(((3 6 font-lock-string-face)))))
+            (should (equal (nth 3 (caddr font-lock--commit-queue))
+                           '(((6 8 font-lock-comment-face)))))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (setq font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
 (ert-deftest font-lock-queue-span-commits-yields-while-input-is-pending ()
   "Async span commit queueing leaves remaining split work for later."
   (let ((font-lock-async-commit-span-batch-size 1)
