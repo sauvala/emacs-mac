@@ -89,6 +89,7 @@
   (skip-unless (executable-find "cat"))
   (let ((elisp-worker-response-dispatch-budget nil)
         (elisp-worker-response-dispatch-defer-on-input t)
+        (elisp-worker-response-parse-defer-on-input nil)
         (worker (elisp-worker--make))
         called
         proc)
@@ -126,6 +127,67 @@
           (should (timerp (elisp-worker-dispatch-timer worker))))
       (when (and worker (timerp (elisp-worker-dispatch-timer worker)))
         (cancel-timer (elisp-worker-dispatch-timer worker)))
+      (when proc
+        (when (process-live-p proc)
+          (set-process-sentinel proc #'ignore)
+          (delete-process proc))
+        (when-let* ((buffer (process-buffer proc)))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest elisp-worker-filter-parsing-yields-while-input-is-pending ()
+  "Worker response parsing leaves raw output backlog while input is pending."
+  (skip-unless (executable-find "cat"))
+  (let ((elisp-worker-response-dispatch-budget nil)
+        (elisp-worker-response-dispatch-defer-on-input nil)
+        (elisp-worker-response-parse-budget nil)
+        (elisp-worker-response-parse-defer-on-input t)
+        (worker (elisp-worker--make))
+        called
+        input-pending
+        proc)
+    (unwind-protect
+        (progn
+          (setq proc (make-process
+                      :name "elisp-worker-parse-test"
+                      :buffer (generate-new-buffer
+                               " *elisp-worker-parse-test*")
+                      :command (list "cat")
+                      :connection-type 'pipe
+                      :noquery t))
+          (process-put proc 'elisp-worker worker)
+          (setf (elisp-worker-process worker) proc)
+          (dotimes (i 3)
+            (push (cons (1+ i)
+                        (list :success-fn
+                              (lambda (value)
+                                (push value called))))
+                  (elisp-worker-callbacks worker)))
+          (setq input-pending t)
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&optional _) input-pending)))
+            (elisp-worker--filter
+             proc
+             (concat
+              (mapconcat
+               #'prin1-to-string
+               '((:id 1 :status ok :value 1)
+                 (:id 2 :status ok :value 2)
+                 (:id 3 :status ok :value 3))
+               "\n")
+              "\n")))
+          (should (= (length called) 1))
+          (should (string-match-p ":id 2" (elisp-worker-partial-output worker)))
+          (should (timerp (elisp-worker-parse-timer worker)))
+          (setq input-pending nil)
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&optional _) input-pending)))
+            (elisp-worker--filter proc ""))
+          (should (= (length called) 3))
+          (should (string-empty-p (elisp-worker-partial-output worker)))
+          (should-not (elisp-worker-parse-timer worker)))
+      (when (and worker (timerp (elisp-worker-parse-timer worker)))
+        (cancel-timer (elisp-worker-parse-timer worker)))
       (when proc
         (when (process-live-p proc)
           (set-process-sentinel proc #'ignore)
