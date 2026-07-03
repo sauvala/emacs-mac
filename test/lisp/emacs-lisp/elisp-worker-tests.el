@@ -220,6 +220,20 @@
           (should (equal (sort results #'<) '(0 1))))
       (elisp-worker-pool-shutdown pool))))
 
+(ert-deftest elisp-worker-pool-prefers-idle-worker ()
+  "Worker pool scheduling prefers workers with less pending work."
+  (let* ((busy-worker (elisp-worker--make
+                       :callbacks '((1 . (:success-fn ignore))
+                                    (2 . (:success-fn ignore)))))
+         (idle-worker (elisp-worker--make))
+         (pool (elisp-worker-pool--make
+                :workers (list busy-worker idle-worker)
+                :cursor 0
+                :target-size 2
+                :name "worker-scheduling-test")))
+    (should (eq (elisp-worker-pool--next-worker pool) idle-worker))
+    (should (= (elisp-worker-pool-cursor pool) 0))))
+
 (ert-deftest elisp-worker-pool-start-lazy-grows-after-startup ()
   "A lazy worker pool starts one worker and grows later."
   (let ((pool (elisp-worker-pool-start-lazy 2 "lazy-worker-test")))

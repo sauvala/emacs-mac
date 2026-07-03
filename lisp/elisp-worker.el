@@ -383,9 +383,18 @@ process startup work on the calling command."
   (let* ((workers (elisp-worker-pool-workers pool))
          (length (length workers))
          (cursor (mod (elisp-worker-pool-cursor pool) length))
-         (worker (nth cursor workers)))
-    (setf (elisp-worker-pool-cursor pool) (mod (1+ cursor) length))
-    worker))
+         (best-index cursor)
+         (best-load nil))
+    (dotimes (offset length)
+      (let* ((index (mod (+ cursor offset) length))
+             (worker (nth index workers))
+             (load (+ (length (elisp-worker-callbacks worker))
+                      (length (elisp-worker-pending-responses worker)))))
+        (when (or (null best-load) (< load best-load))
+          (setq best-load load
+                best-index index))))
+    (setf (elisp-worker-pool-cursor pool) (mod (1+ best-index) length))
+    (nth best-index workers)))
 
 (cl-defun elisp-worker-pool-async-eval
     (pool form &key success-fn error-fn)
