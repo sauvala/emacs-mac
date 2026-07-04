@@ -196,6 +196,42 @@
           (when (buffer-live-p buffer)
             (kill-buffer buffer)))))))
 
+(ert-deftest elisp-worker-submission-yields-while-input-is-pending ()
+  "Worker request submission leaves queued work while input is pending."
+  (skip-unless (executable-find "cat"))
+  (let ((worker (elisp-worker--make))
+        sent
+        proc)
+    (unwind-protect
+        (progn
+          (setq proc (make-process
+                      :name "elisp-worker-submit-test"
+                      :buffer (generate-new-buffer
+                               " *elisp-worker-submit-test*")
+                      :command (list "cat")
+                      :connection-type 'pipe
+                      :noquery t))
+          (setf (elisp-worker-process worker) proc)
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&optional _) t))
+                    ((symbol-function 'process-send-string)
+                     (lambda (_process string)
+                       (push string sent))))
+            (dotimes (i 3)
+              (elisp-worker-async-eval worker `(+ ,i 1))))
+          (should (= (length sent) 1))
+          (should (= (length (elisp-worker-pending-requests worker)) 2))
+          (should (timerp (elisp-worker-submit-timer worker))))
+      (when (and worker (timerp (elisp-worker-submit-timer worker)))
+        (cancel-timer (elisp-worker-submit-timer worker)))
+      (when proc
+        (when (process-live-p proc)
+          (set-process-sentinel proc #'ignore)
+          (delete-process proc))
+        (when-let* ((buffer (process-buffer proc)))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
 (ert-deftest elisp-worker-pool-runs-jobs-concurrently ()
   "A worker pool can run independent Lisp jobs in parallel processes."
   (let ((pool (elisp-worker-pool-start 2))

@@ -83,12 +83,38 @@ input is pending."
   :version "32.1"
   :group 'elisp-worker)
 
+(defcustom elisp-worker-request-submit-budget 0.005
+  "Maximum seconds spent submitting queued worker requests per timer.
+The default is a small positive budget so bursts of worker requests yield
+back to the command loop before all forms are serialized and sent.  If nil,
+drain queued requests in one callback.  When this is a positive number,
+submit at least one request and then yield once the budget is exhausted."
+  :type '(choice (const :tag "Submit all queued requests" nil)
+                 (number :tag "Seconds"))
+  :safe (lambda (value)
+          (or (null value)
+              (and (numberp value) (>= value 0))))
+  :version "32.1"
+  :group 'elisp-worker)
+
+(defcustom elisp-worker-request-submit-defer-on-input t
+  "Non-nil means worker request submission yields while input is pending.
+When this is non-nil, `elisp-worker-async-eval' submits the first request
+eagerly, but leaves later burst requests for timer turns while input is
+pending."
+  :type 'boolean
+  :safe #'booleanp
+  :version "32.1"
+  :group 'elisp-worker)
+
 (cl-defstruct (elisp-worker
                (:constructor elisp-worker--make))
   process
   stderr-buffer
   (callbacks nil)
+  (pending-requests nil)
   (pending-responses nil)
+  submit-timer
   dispatch-timer
   parse-timer
   (partial-output "")
@@ -143,10 +169,58 @@ input is pending."
         (cancel-timer (elisp-worker-dispatch-timer worker)))
       (when (timerp (elisp-worker-parse-timer worker))
         (cancel-timer (elisp-worker-parse-timer worker)))
+      (when (timerp (elisp-worker-submit-timer worker))
+        (cancel-timer (elisp-worker-submit-timer worker)))
       (setf (elisp-worker-callbacks worker) nil
+            (elisp-worker-pending-requests worker) nil
             (elisp-worker-pending-responses worker) nil
+            (elisp-worker-submit-timer worker) nil
             (elisp-worker-dispatch-timer worker) nil
             (elisp-worker-parse-timer worker) nil))))
+
+(defun elisp-worker--request-submit-budget ()
+  "Return the active worker request submission budget, or nil."
+  (and (numberp elisp-worker-request-submit-budget)
+       (> elisp-worker-request-submit-budget 0)
+       elisp-worker-request-submit-budget))
+
+(defun elisp-worker--ensure-submit-timer (worker)
+  "Ensure WORKER has one active request submission timer."
+  (unless (timerp (elisp-worker-submit-timer worker))
+    (setf (elisp-worker-submit-timer worker)
+          (run-at-time 0 nil #'elisp-worker--submit-pending-requests
+                       worker))))
+
+(defun elisp-worker--send-request (worker request)
+  "Serialize and send queued REQUEST to WORKER."
+  (process-send-string
+   (elisp-worker-process worker)
+   (let ((print-escape-newlines t))
+     (concat (prin1-to-string request) "\n"))))
+
+(defun elisp-worker--submit-pending-requests (worker)
+  "Submit queued requests for WORKER within the responsiveness budget."
+  (when (timerp (elisp-worker-submit-timer worker))
+    (cancel-timer (elisp-worker-submit-timer worker)))
+  (setf (elisp-worker-submit-timer worker) nil)
+  (let ((requests (elisp-worker-pending-requests worker))
+        (budget (elisp-worker--request-submit-budget))
+        (started (float-time))
+        (submitted 0))
+    (while (and requests
+                (or (zerop submitted)
+                    (and (not (and elisp-worker-request-submit-defer-on-input
+                                   (input-pending-p)))
+                         (or (not budget)
+                             (< (- (float-time) started) budget)))))
+      (let ((request (pop requests)))
+        (setf (elisp-worker-pending-requests worker) requests)
+        (setq submitted (1+ submitted))
+        (elisp-worker--send-request worker request)))
+    (when (elisp-worker-pending-requests worker)
+      (elisp-worker--ensure-submit-timer worker))
+    (list :submitted submitted
+          :remaining (length (elisp-worker-pending-requests worker)))))
 
 (defun elisp-worker--dispatch-response (worker response)
   "Dispatch one worker RESPONSE for WORKER."
@@ -296,12 +370,14 @@ data object.  FORM and its result must be printable and readable."
       (push (cons id (list :success-fn success-fn
                            :error-fn error-fn))
             (elisp-worker-callbacks worker))
-      (process-send-string
-       process
-       (let ((print-escape-newlines t))
-         (concat (prin1-to-string
-                  (list :op 'eval :id id :form form))
-                 "\n")))
+      (setf (elisp-worker-pending-requests worker)
+            (nconc (elisp-worker-pending-requests worker)
+                   (list (list :op 'eval :id id :form form))))
+      (if (and elisp-worker-request-submit-defer-on-input
+               (input-pending-p)
+               (> (length (elisp-worker-callbacks worker)) 1))
+          (elisp-worker--ensure-submit-timer worker)
+        (elisp-worker--submit-pending-requests worker))
       id)))
 
 (defun elisp-worker-shutdown (worker)
@@ -320,8 +396,12 @@ data object.  FORM and its result must be printable and readable."
       (cancel-timer (elisp-worker-dispatch-timer worker)))
     (when (timerp (elisp-worker-parse-timer worker))
       (cancel-timer (elisp-worker-parse-timer worker)))
+    (when (timerp (elisp-worker-submit-timer worker))
+      (cancel-timer (elisp-worker-submit-timer worker)))
     (setf (elisp-worker-callbacks worker) nil
+          (elisp-worker-pending-requests worker) nil
           (elisp-worker-pending-responses worker) nil
+          (elisp-worker-submit-timer worker) nil
           (elisp-worker-dispatch-timer worker) nil
           (elisp-worker-parse-timer worker) nil
           (elisp-worker-process worker) nil
@@ -389,6 +469,7 @@ process startup work on the calling command."
       (let* ((index (mod (+ cursor offset) length))
              (worker (nth index workers))
              (load (+ (length (elisp-worker-callbacks worker))
+                      (length (elisp-worker-pending-requests worker))
                       (length (elisp-worker-pending-responses worker)))))
         (when (or (null best-load) (< load best-load))
           (setq best-load load
