@@ -5400,6 +5400,26 @@ initial delay and repeat rate, and may not be 100% accurate."
 
 (eglot--semtok-define-things)
 
+(defcustom eglot-semantic-token-font-lock-token-budget 1000
+  "Maximum semantic tokens painted by one font-lock matcher call.
+If nil, paint all tokens for the requested region in one call.  When
+this is a positive integer, paint at least one token and then leave the
+remaining region for a later font-lock pass once the budget is
+exhausted."
+  :version "32.1"
+  :type '(choice (const :tag "Paint requested region in one call" nil)
+                 (integer :tag "Tokens"))
+  :safe (lambda (value)
+          (or (null value)
+              (and (integerp value) (> value 0))))
+  :group 'eglot-semantic-fontification)
+
+(defun eglot--semtok-font-lock-token-budget ()
+  "Return the active semantic token font-lock budget, or nil."
+  (and (integerp eglot-semantic-token-font-lock-token-budget)
+       (> eglot-semantic-token-font-lock-token-budget 0)
+       eglot-semantic-token-font-lock-token-budget))
+
 (defun eglot--semtok-decode-token (tok)
   "Decode TOK.  Return (NAMES . FACES).  Filter FACES via user options."
   (with-slots (semtok-cache capabilities)
@@ -5541,34 +5561,44 @@ lock machinery calls us again."
 (defun eglot--semtok-font-lock-1 (beg end data)
   "Do the face-painting work for `eglot--semtok-font-lock'."
   (eglot--widening
-   (with-silent-modifications
-     (remove-list-of-text-properties beg end '(eglot--semtok-token
-                                               eglot--semtok-faces))
-     (goto-char (point-min))
-     (cl-loop
-      with column = 0 with p-beg = 0 with p-end = 0
-      for i from 0 below (length data) by 5
-      when (> (aref data i) 0) do
-        (setq column 0)
-        (forward-line (aref data i))
-      unless (< (point) beg) do
-        (setq column (+ column (aref data (+ i 1))))
-        (funcall eglot-move-to-linepos-function column)
-        (when (> (point) end) (cl-return (cons napplied 'early)))
-        (setq p-beg (point))
-        (funcall eglot-move-to-linepos-function (+ column (aref data (+ i 2))))
-        (setq p-end (point))
-        (let* ((tok (cons (aref data (+ i 3))
-                          (aref data (+ i 4))))
-               (decoded (eglot--semtok-decode-token tok)))
-          ;; The `eglot--semtok-token' prop doesn't serve much purpose:
-          ;; just for debug...
-          (put-text-property p-beg p-end 'eglot--semtok-names (car decoded))
-          (put-text-property p-beg p-end 'eglot--semtok-faces (cdr decoded))
-          (dolist (f (cdr decoded))
-            (add-face-text-property p-beg p-end f)))
-      count 1 into napplied
-      finally (cl-return (cons napplied 'normal))))))
+   (let ((budget (eglot--semtok-font-lock-token-budget))
+         result)
+     (with-silent-modifications
+       (remove-list-of-text-properties beg end '(eglot--semtok-token
+                                                 eglot--semtok-faces))
+       (goto-char (point-min))
+       (setq
+        result
+        (cl-loop
+         with column = 0 with p-beg = 0 with p-end = 0
+         for i from 0 below (length data) by 5
+         when (> (aref data i) 0) do
+           (setq column 0)
+           (forward-line (aref data i))
+         unless (< (point) beg) do
+           (setq column (+ column (aref data (+ i 1))))
+           (funcall eglot-move-to-linepos-function column)
+           (when (> (point) end) (cl-return (cons napplied 'early)))
+           (setq p-beg (point))
+           (funcall eglot-move-to-linepos-function
+                    (+ column (aref data (+ i 2))))
+           (setq p-end (point))
+           (let* ((tok (cons (aref data (+ i 3))
+                             (aref data (+ i 4))))
+                  (decoded (eglot--semtok-decode-token tok)))
+             ;; The `eglot--semtok-token' prop doesn't serve much purpose:
+             ;; just for debug...
+             (put-text-property p-beg p-end 'eglot--semtok-names (car decoded))
+             (put-text-property p-beg p-end 'eglot--semtok-faces (cdr decoded))
+             (dolist (f (cdr decoded))
+               (add-face-text-property p-beg p-end f)))
+           count 1 into napplied
+           when (and budget (>= napplied budget) (< p-end end))
+             return (cons napplied 'deferred)
+           finally (cl-return (cons napplied 'normal)))))
+     (when (eq (cdr result) 'deferred)
+       (font-lock-flush (point) end))
+     result)))
 
 (defun eglot--semtok-font-lock-2 (beg end)
   "Repaint from stale-but-not-that-much local properties."

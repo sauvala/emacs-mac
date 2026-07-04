@@ -1589,6 +1589,37 @@ GUESSED-MAJOR-MODES-SYM are bound to the useful return values of
       (accept-process-output nil 0.1)
       (font-lock-ensure))))
 
+(ert-deftest eglot-test-semtok-font-lock-token-budget-defers-tail ()
+  "Semantic token painting leaves tail work for a later font-lock pass."
+  (let ((old-budget-bound (boundp 'eglot-semantic-token-font-lock-token-budget))
+        (old-budget (and (boundp 'eglot-semantic-token-font-lock-token-budget)
+                         (symbol-value
+                          'eglot-semantic-token-font-lock-token-budget)))
+        flushes)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "aa bb cc")
+          (set 'eglot-semantic-token-font-lock-token-budget 1)
+          (cl-letf (((symbol-function 'eglot--semtok-decode-token)
+                     (lambda (_tok) '(nil . (font-lock-keyword-face))))
+                    ((symbol-function 'font-lock-flush)
+                     (lambda (beg end)
+                       (push (cons beg end) flushes)))
+                    (eglot-move-to-linepos-function #'move-to-column))
+            (should (equal (eglot--semtok-font-lock-1
+                            (point-min) (point-max)
+                            [0 0 2 0 0 0 3 2 0 0 0 3 2 0 0])
+                           '(1 . deferred)))
+            (should (eq (get-text-property 1 'face)
+                        'font-lock-keyword-face))
+            (should-not (get-text-property 4 'face))
+            (should (= (length flushes) 1))
+            (should (> (caar flushes) (point-min)))
+            (should (= (cdar flushes) (point-max)))))
+      (if old-budget-bound
+          (set 'eglot-semantic-token-font-lock-token-budget old-budget)
+        (makunbound 'eglot-semantic-token-font-lock-token-budget)))))
+
 (ert-deftest eglot-test-semtok-basic ()
   "Test basic semantic tokens fontification."
   (skip-unless (executable-find "clangd"))
