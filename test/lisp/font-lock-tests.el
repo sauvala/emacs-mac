@@ -1126,6 +1126,41 @@
             font-lock--commit-queue old-queue
             font-lock--commit-timer old-timer))))
 
+(ert-deftest font-lock-default-fontify-region-defers-before-unfontify-on-input ()
+  "Default font-lock keeps existing faces while input is pending."
+  (let ((old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "alpha beta")
+          (put-text-property 1 6 'face 'font-lock-keyword-face)
+          (let ((font-lock-async-keywords t)
+                (font-lock-keywords '(("alpha" . font-lock-keyword-face)))
+                (font-lock-keywords-only t)
+                (font-lock-keywords-case-fold-search nil)
+                (font-lock-set-defaults t)
+                (font-lock-syntax-table nil)
+                (font-lock-syntactic-keywords nil)
+                (font-lock-syntactically-fontified 0)
+                (font-lock-extend-region-functions nil)
+                unfontified)
+            (cl-letf (((symbol-function 'input-pending-p)
+                       (lambda (&optional _) t))
+                      ((symbol-function 'font-lock-unfontify-region)
+                       (lambda (&rest _)
+                         (setq unfontified t))))
+              (font-lock-default-fontify-region (point-min) (point-max) nil))
+            (should-not unfontified)
+            (should (eq (get-text-property 1 'face)
+                        'font-lock-keyword-face))
+            (should (= (length font-lock--commit-queue) 1))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (setq font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
 (ert-deftest font-lock-default-fontify-region-can-use-async-keyword-suffix ()
   "The async keyword path can process a safe suffix after sync keywords."
   (let ((old-pool font-lock--async-worker-pool)

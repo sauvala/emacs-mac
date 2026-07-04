@@ -1952,28 +1952,36 @@ This function is the default `font-lock-fontify-region-function'."
                       font-lock-extend-region-functions)))
        (setq beg font-lock-beg end font-lock-end))
      ;; Now do the fontification.
-     (font-lock-unfontify-region beg end)
-     (when (and font-lock-syntactic-keywords
-                (null syntax-propertize-function))
-       ;; Ensure the beginning of the file is properly syntactic-fontified.
-       (let ((start beg))
-         (when (< font-lock-syntactically-fontified start)
-           (setq start (max font-lock-syntactically-fontified (point-min)))
-           (setq font-lock-syntactically-fontified end))
-         (font-lock-fontify-syntactic-keywords-region start end)))
-     (unless font-lock-keywords-only
-       (font-lock-fontify-syntactically-region beg end loudly))
-     (if-let* ((async-work
-                (and font-lock-async-keywords
-                     (font-lock--async-buffer-keyword-split
-                      font-lock-keywords))))
-         (progn
-           (when-let* ((sync-keywords (plist-get async-work :sync)))
-             (let ((font-lock-keywords sync-keywords))
-               (font-lock-fontify-keywords-region beg end loudly)))
-           (font-lock--async-fontify-region
-            beg end (plist-get async-work :async) t))
-       (font-lock-fontify-keywords-region beg end loudly))
+     (if (and font-lock-commit-defer-on-input
+              font-lock-async-keywords
+              font-lock-keywords-only
+              (input-pending-p)
+              (font-lock--async-buffer-keyword-split font-lock-keywords))
+         (font-lock--queue-commit
+          (current-buffer) (buffer-chars-modified-tick)
+          #'font-lock-default-fontify-region beg end loudly)
+       (font-lock-unfontify-region beg end)
+       (when (and font-lock-syntactic-keywords
+                  (null syntax-propertize-function))
+         ;; Ensure the beginning of the file is properly syntactic-fontified.
+         (let ((start beg))
+           (when (< font-lock-syntactically-fontified start)
+             (setq start (max font-lock-syntactically-fontified (point-min)))
+             (setq font-lock-syntactically-fontified end))
+           (font-lock-fontify-syntactic-keywords-region start end)))
+       (unless font-lock-keywords-only
+         (font-lock-fontify-syntactically-region beg end loudly))
+       (if-let* ((async-work
+                  (and font-lock-async-keywords
+                       (font-lock--async-buffer-keyword-split
+                        font-lock-keywords))))
+           (progn
+             (when-let* ((sync-keywords (plist-get async-work :sync)))
+               (let ((font-lock-keywords sync-keywords))
+                 (font-lock-fontify-keywords-region beg end loudly)))
+             (font-lock--async-fontify-region
+              beg end (plist-get async-work :async) t))
+         (font-lock-fontify-keywords-region beg end loudly)))
      `(jit-lock-bounds ,beg . ,end))))
 
 ;; The following must be rethought, since keywords can override fontification.
