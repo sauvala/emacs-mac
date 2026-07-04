@@ -147,6 +147,20 @@ later idle fontification instead of running fontification functions while
 there is pending input, even if `jit-lock-defer-time' is nil."
   :type 'boolean
   :version "32.1")
+
+(defcustom jit-lock-deferred-scan-budget 0.005
+  "Maximum seconds spent scanning deferred fontification per timer.
+The default is a small positive budget so large deferred fontification
+backlogs yield back to the command loop before forcing redisplay.  If nil,
+scan all deferred regions in one callback.  When this is a positive number,
+scan at least one deferred region and then yield once the budget is
+exhausted."
+  :type '(choice (const :tag "Scan all deferred regions" nil)
+                 (number :tag "Seconds"))
+  :safe (lambda (value)
+          (or (null value)
+              (and (numberp value) (>= value 0))))
+  :version "32.1")
 
 ;;; Variables that are not customizable.
 
@@ -409,6 +423,12 @@ Only applies to the current buffer."
     (push (current-buffer) jit-lock-defer-buffers))
   (put-text-property start end 'fontified 'defer))
 
+(defun jit-lock--deferred-scan-budget ()
+  "Return the active deferred fontification scan budget, or nil."
+  (and (numberp jit-lock-deferred-scan-budget)
+       (> jit-lock-deferred-scan-budget 0)
+       jit-lock-deferred-scan-budget))
+
 (defun jit-lock-function (start)
   "Fontify current buffer starting at position START.
 This function is added to `fontification-functions' when `jit-lock-mode'
@@ -655,7 +675,10 @@ non-nil in a repeated invocation of this function."
              (not memory-full)
              (not (and jit-lock-defer-on-input
                        (input-pending-p))))
-    (let (yielded)
+    (let ((budget (jit-lock--deferred-scan-budget))
+          (started (float-time))
+          (scanned 0)
+          yielded)
       ;; Mark the deferred regions back to `fontified = nil'
       (let ((buffers jit-lock-defer-buffers))
         (while (and buffers (not yielded))
@@ -671,15 +694,25 @@ non-nil in a repeated invocation of this function."
 			  (let ((next (next-single-property-change
 				       pos 'fontified nil limit)))
 		            (put-text-property pos next 'fontified nil)
+                            (setq scanned (1+ scanned))
 			    (setq pos (and (< next limit) next)
-				  yielded (and jit-lock-defer-on-input
-					       (input-pending-p))))
+				  yielded
+                                  (or (and jit-lock-defer-on-input
+                                           (input-pending-p))
+                                      (and (> scanned 0)
+                                           budget
+                                           (>= (- (float-time) started)
+                                               budget)))))
 			(setq pos (next-single-property-change
 				   pos 'fontified nil limit))
                         (when (and pos (not (< pos limit)))
                           (setq pos nil))))))))
             (setq yielded
                   (or yielded
+                      (and (> scanned 0)
+                           budget
+                           buffers
+                           (>= (- (float-time) started) budget))
                       (and buffers
                            jit-lock-defer-on-input
                            (input-pending-p)))))))
