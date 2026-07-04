@@ -2512,6 +2512,8 @@ If LOUDLY is non-nil, display some debugging information."
      start end treesit-font-lock-settings loudly))
   `(jit-lock-bounds ,start . ,end))
 
+(put 'treesit-font-lock-fontify-region 'font-lock-defer-while-input t)
+
 (defun treesit--font-lock-fontify-region-1 (node query start end override loudly)
   "Fontify the region between START and END by querying NODE with QUERY.
 

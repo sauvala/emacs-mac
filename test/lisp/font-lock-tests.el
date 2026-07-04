@@ -246,6 +246,46 @@
             font-lock--commit-queue-tail old-tail
             font-lock--commit-timer old-timer))))
 
+(ert-deftest font-lock-commit-queue-preserves-idle-only-work-on-input ()
+  "Idle-only commits stay queued while input is pending."
+  (let ((old-queue font-lock--commit-queue)
+        (old-tail font-lock--commit-queue-tail)
+        (old-timer font-lock--commit-timer)
+        (font-lock-commit-defer-on-input t)
+        called)
+    (setq font-lock--commit-queue nil
+          font-lock--commit-queue-tail nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "abc")
+          (cl-letf (((symbol-function 'font-lock-tests--idle-only-commit)
+                     (lambda ()
+                       (setq called t))))
+            (put 'font-lock-tests--idle-only-commit
+                 'font-lock-defer-while-input t)
+            (font-lock--queue-commit
+             (current-buffer) (buffer-chars-modified-tick)
+             #'font-lock-tests--idle-only-commit)
+            (when (timerp font-lock--commit-timer)
+              (cancel-timer font-lock--commit-timer)
+              (setq font-lock--commit-timer nil))
+            (cl-letf (((symbol-function 'input-pending-p)
+                       (lambda (&optional _) t)))
+              (should (equal (font-lock--dispatch-commits)
+                             '(:processed 0 :dropped 0 :remaining 1))))
+            (should-not called)
+            (should (= (length font-lock--commit-queue) 1))
+            (should (eq font-lock--commit-queue-tail
+                        (last font-lock--commit-queue)))))
+      (put 'font-lock-tests--idle-only-commit
+           'font-lock-defer-while-input nil)
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (setq font-lock--commit-queue old-queue
+            font-lock--commit-queue-tail old-tail
+            font-lock--commit-timer old-timer))))
+
 (ert-deftest font-lock-queue-span-commits-splits-large-span-lists ()
   "Large async span lists are split into multiple queued commits."
   (let ((font-lock-async-commit-span-batch-size 1)

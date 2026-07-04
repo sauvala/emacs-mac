@@ -613,6 +613,11 @@ one chunk and leave remaining split work for a continuation."
         (- end start)
       1)))
 
+(defun font-lock--commit-defer-while-input-p (function)
+  "Return non-nil if queued commit FUNCTION should wait for no input."
+  (and (symbolp function)
+       (get function 'font-lock-defer-while-input)))
+
 (defun font-lock--redisplay-request-region (request)
   "Return the region described by redisplay REQUEST, or nil."
   (pcase request
@@ -672,6 +677,10 @@ Return a plist with commit progress metrics."
             (redisplay-requests font-lock--pending-redisplay-requests))
         (setq font-lock--pending-redisplay-requests nil)
         (while (and font-lock--commit-queue
+                    (not (and font-lock-commit-defer-on-input
+                              (font-lock--commit-defer-while-input-p
+                               (nth 2 (car font-lock--commit-queue)))
+                              (input-pending-p)))
                     (or (zerop (+ processed dropped))
                         (and (not (and font-lock-commit-defer-on-input
                                        (input-pending-p)))
@@ -1981,8 +1990,10 @@ This function is the default `font-lock-fontify-region-function'."
                  (font-lock-fontify-keywords-region beg end loudly)))
              (font-lock--async-fontify-region
               beg end (plist-get async-work :async) t))
-         (font-lock-fontify-keywords-region beg end loudly)))
+       (font-lock-fontify-keywords-region beg end loudly)))
      `(jit-lock-bounds ,beg . ,end))))
+
+(put 'font-lock-default-fontify-region 'font-lock-defer-while-input t)
 
 ;; The following must be rethought, since keywords can override fontification.
 ;;    ;; Now scan for keywords, but not if we are inside a comment now.
