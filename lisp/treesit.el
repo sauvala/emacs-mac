@@ -2502,9 +2502,14 @@ later font-lock commit turn."
 If LOUDLY is non-nil, display some debugging information."
   (when (or loudly treesit--font-lock-verbose)
     (message "Fontifying region: %s-%s" start end))
-  (font-lock-unfontify-region start end)
-  (treesit--font-lock-fontify-settings
-   start end treesit-font-lock-settings loudly)
+  (if (and treesit-pre-redisplay-defer-on-input
+           (input-pending-p))
+      (font-lock--queue-commit
+       (current-buffer) (buffer-chars-modified-tick)
+       #'treesit-font-lock-fontify-region start end loudly)
+    (font-lock-unfontify-region start end)
+    (treesit--font-lock-fontify-settings
+     start end treesit-font-lock-settings loudly))
   `(jit-lock-bounds ,start . ,end))
 
 (defun treesit--font-lock-fontify-region-1 (node query start end override loudly)

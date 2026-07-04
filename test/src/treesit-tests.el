@@ -417,6 +417,40 @@
       (should (eq (get-text-property 2 'face)
                   'font-lock-string-face)))))
 
+(ert-deftest treesit-font-lock-defers-before-unfontify-on-input ()
+  "Tree-sitter font-lock keeps existing faces while input is pending."
+  (skip-unless (treesit-language-available-p 'json))
+  (let ((old-queue font-lock--commit-queue)
+        (old-timer font-lock--commit-timer))
+    (setq font-lock--commit-queue nil
+          font-lock--commit-timer nil)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "{\"name\":\"Bob\"}")
+          (put-text-property 2 8 'face 'font-lock-string-face)
+          (let ((treesit-primary-parser (treesit-parser-create 'json))
+                (treesit-font-lock-settings
+                 (treesit-font-lock-rules
+                  :language 'json
+                  :feature 'string
+                  '((string) @font-lock-string-face)))
+                (treesit-pre-redisplay-defer-on-input t)
+                unfontified)
+            (cl-letf (((symbol-function 'input-pending-p)
+                       (lambda (&optional _) t))
+                      ((symbol-function 'font-lock-unfontify-region)
+                       (lambda (&rest _)
+                         (setq unfontified t))))
+              (treesit-font-lock-fontify-region (point-min) (point-max)))
+            (should-not unfontified)
+            (should (eq (get-text-property 2 'face)
+                        'font-lock-string-face))
+            (should (= (length font-lock--commit-queue) 1))))
+      (when (timerp font-lock--commit-timer)
+        (cancel-timer font-lock--commit-timer))
+      (setq font-lock--commit-queue old-queue
+            font-lock--commit-timer old-timer))))
+
 (ert-deftest treesit-font-lock-mark-ranges-skips-unused-range-update ()
   "Pre-redisplay range marking skips range updates when no ranges exist."
   (with-temp-buffer
