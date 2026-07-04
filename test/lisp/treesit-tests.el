@@ -53,6 +53,7 @@
         (treesit--font-lock-fast-mode nil)
         (treesit-range-settings nil)
         (treesit-font-lock-defer-on-input t)
+        (treesit-pre-redisplay-defer-on-input nil)
         (font-lock-commit-defer-on-input nil)
         (fontified nil)
         (input-checks 0))

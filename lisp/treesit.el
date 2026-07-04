@@ -234,6 +234,20 @@ catch up and mark changed ranges for refontification."
   :group 'treesit
   :version "32.1")
 
+(defcustom treesit-pre-redisplay-range-budget 0.005
+  "Maximum seconds spent marking tree-sitter pre-redisplay ranges.
+The default is a small positive budget so large changed-region lists
+yield back to the command loop before redisplay.  If nil, mark all
+ranges in one call.  When this is a positive number, mark at least one
+range and then yield once the budget is exhausted."
+  :type '(choice (const :tag "Mark all changed ranges" nil)
+                 (number :tag "Seconds"))
+  :safe (lambda (value)
+          (or (null value)
+              (and (numberp value) (>= value 0))))
+  :group 'treesit
+  :version "32.1")
+
 ;;; Parser API supplement
 
 ;; The primary parser will be accessed frequently (after each re-parse,
@@ -2576,10 +2590,27 @@ calls to `treesit--pre-redisplay'.")
 (defvar-local treesit--pre-redisplay-pending-tick nil
   "Buffer modification tick for `treesit--pre-redisplay-pending-ranges'.")
 
+(defun treesit--pre-redisplay-range-budget ()
+  "Return the active pre-redisplay range marking budget, or nil."
+  (and (numberp treesit-pre-redisplay-range-budget)
+       (> treesit-pre-redisplay-range-budget 0)
+       treesit-pre-redisplay-range-budget))
+
+(defun treesit--range-list-p (ranges)
+  "Return non-nil if RANGES is a list of (BEG . END) ranges."
+  (and (consp ranges)
+       (cl-every (lambda (range)
+                   (and (consp range)
+                        (integer-or-marker-p (car range))
+                        (integer-or-marker-p (cdr range))))
+                 ranges)))
+
 (defun treesit--font-lock-mark-ranges-to-fontify (ranges)
   "A notifier that marks ranges that needs refontification.
 
 For RANGES and PARSER see `treesit-parser-add-notifier'.
+Return any ranges left unprocessed because the range budget was
+exhausted.
 
 After the parser reparses, we get the changed ranges, and
 1) update non-primary parsers' ranges in the changed ranges
@@ -2593,22 +2624,34 @@ that needs to be refontified.  For example, when the user types the
 final slash of a C block comment /* xxx */, not only do we need to
 fontify the slash, but also the whole block comment, which previously
 wasn't fontified as comment due to incomplete parse tree."
-  (dolist (range ranges)
-    ;; 1. Update ranges.
-    (when (or treesit-range-settings
-              (treesit-local-parsers-on (car range) (cdr range)))
-      (treesit-update-ranges (car range) (cdr range)))
-    ;; 2. Mark the changed ranges to be fontified.
-    (when treesit--font-lock-verbose
-      (message "Notifier received range: %s-%s"
-               (car range) (cdr range)))
-    (with-silent-modifications
-      (put-text-property (car range) (cdr range) 'fontified nil))
-    ;; 3. Set `treesit--syntax-propertize-start'.
-    (if (null treesit--syntax-propertize-start)
-        (setq treesit--syntax-propertize-start (car range))
-      (setq treesit--syntax-propertize-start
-            (min treesit--syntax-propertize-start (car range))))))
+  (catch 'done
+    (let ((budget (treesit--pre-redisplay-range-budget))
+          (started (float-time))
+          (marked 0))
+      (while ranges
+        (let ((range (pop ranges)))
+          ;; 1. Update ranges.
+          (when (or treesit-range-settings
+                    (treesit-local-parsers-on (car range) (cdr range)))
+            (treesit-update-ranges (car range) (cdr range)))
+          ;; 2. Mark the changed ranges to be fontified.
+          (when treesit--font-lock-verbose
+            (message "Notifier received range: %s-%s"
+                     (car range) (cdr range)))
+          (with-silent-modifications
+            (put-text-property (car range) (cdr range) 'fontified nil))
+          ;; 3. Set `treesit--syntax-propertize-start'.
+          (if (null treesit--syntax-propertize-start)
+              (setq treesit--syntax-propertize-start (car range))
+            (setq treesit--syntax-propertize-start
+                  (min treesit--syntax-propertize-start (car range))))
+          (setq marked (1+ marked)))
+        (when (and ranges
+                   budget
+                   (> marked 0)
+                   (>= (- (float-time) started) budget))
+          (throw 'done ranges)))
+      nil)))
 
 (defun treesit--guess-primary-parser ()
   "Guess the primary parser of the current buffer and return it.
@@ -2652,9 +2695,18 @@ parser."
                    (input-pending-p))
               (setq treesit--pre-redisplay-pending-ranges affected-ranges
                     treesit--pre-redisplay-pending-tick tick)
-            (when affected-ranges
-              (treesit--font-lock-mark-ranges-to-fontify affected-ranges))
-            (setq treesit--pre-redisplay-tick tick)))))))
+            (let* ((mark-result
+                    (and affected-ranges
+                         (treesit--font-lock-mark-ranges-to-fontify
+                          affected-ranges)))
+                   (remaining-ranges
+                    (and (treesit--range-list-p mark-result)
+                         mark-result)))
+              (if remaining-ranges
+                  (setq treesit--pre-redisplay-pending-ranges
+                        remaining-ranges
+                        treesit--pre-redisplay-pending-tick tick)
+                (setq treesit--pre-redisplay-tick tick)))))))))
 
 (defun treesit--pre-syntax-ppss (start end)
   "Force reparse and consequently run all notifiers.

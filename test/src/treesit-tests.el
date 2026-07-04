@@ -525,6 +525,39 @@
         (should-not treesit--pre-redisplay-pending-ranges)
         (should treesit--pre-redisplay-tick)))))
 
+(ert-deftest treesit-pre-redisplay-preserves-unmarked-budgeted-ranges ()
+  "Tree-sitter pre-redisplay keeps unmarked ranges for a later turn."
+  (with-temp-buffer
+    (insert "abcdef")
+    (let ((treesit-primary-parser 'parser)
+          (treesit--pre-redisplay-tick nil)
+          (treesit--pre-redisplay-pending-ranges nil)
+          (treesit--pre-redisplay-pending-tick nil)
+          (treesit-pre-redisplay-defer-on-input t)
+          (parser-calls 0)
+          mark-calls)
+      (cl-letf (((symbol-function 'input-pending-p)
+                 (lambda (&optional _) nil))
+                ((symbol-function 'treesit-parser-changed-regions)
+                 (lambda (_parser)
+                   (setq parser-calls (1+ parser-calls))
+                   '((2 . 3) (4 . 5))))
+                ((symbol-function 'treesit--font-lock-mark-ranges-to-fontify)
+                 (lambda (ranges)
+                   (push ranges mark-calls)
+                   (cdr ranges))))
+        (treesit--pre-redisplay)
+        (should (equal mark-calls '(((2 . 3) (4 . 5)))))
+        (should (equal treesit--pre-redisplay-pending-ranges '((4 . 5))))
+        (should (= treesit--pre-redisplay-pending-tick
+                   (buffer-chars-modified-tick)))
+        (should-not treesit--pre-redisplay-tick)
+        (treesit--pre-redisplay)
+        (should (equal mark-calls '(((4 . 5)) ((2 . 3) (4 . 5)))))
+        (should (= parser-calls 1))
+        (should-not treesit--pre-redisplay-pending-ranges)
+        (should treesit--pre-redisplay-tick)))))
+
 (ert-deftest treesit-pre-syntax-ppss-defers-while-input-is-pending ()
   "Tree-sitter syntax extension preserves pending work while input is pending."
   (with-temp-buffer
