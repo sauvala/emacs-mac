@@ -198,6 +198,16 @@ objects from the current buffer."
   :group 'treesit
   :version "31.1")
 
+(defcustom treesit-async-snapshot-defer-on-input t
+  "Non-nil means async tree-sitter snapshots yield on pending input.
+When this is non-nil, `treesit--async-font-lock-region' queues snapshot
+creation for a later font-lock commit turn instead of copying buffer text
+while input is pending."
+  :type 'boolean
+  :safe #'booleanp
+  :group 'treesit
+  :version "32.1")
+
 (defcustom treesit-font-lock-settings-budget 0.005
   "Maximum seconds spent visiting tree-sitter font-lock settings per call.
 The default is a small positive budget so buffers with many tree-sitter
@@ -760,8 +770,22 @@ tick still matches the snapshot."
          (buffer (current-buffer))
          (tick (buffer-chars-modified-tick))
          (key (treesit--async-font-lock-job-key
-               buffer tick beg end query language override query-beg query-end)))
-    (unless (gethash key treesit--async-pending-jobs)
+               buffer tick beg end query language override query-beg query-end))
+         (pending (gethash key treesit--async-pending-jobs)))
+    (cond
+     ((and (eq pending 'deferred)
+           treesit-async-snapshot-defer-on-input
+           (input-pending-p)))
+     ((and pending (not (eq pending 'deferred))))
+     ((and treesit-async-snapshot-defer-on-input
+           (input-pending-p))
+      (puthash key 'deferred treesit--async-pending-jobs)
+      (font-lock--queue-commit
+       buffer tick #'treesit--async-font-lock-region
+       beg end query language override query-beg query-end))
+     (t
+      (when (eq pending 'deferred)
+        (remhash key treesit--async-pending-jobs))
       (treesit--async-prune-superseded-font-lock-jobs key)
       (let ((text (buffer-substring-no-properties query-beg query-end)))
         (puthash key t treesit--async-pending-jobs)
@@ -778,7 +802,10 @@ tick still matches the snapshot."
          :error-fn
          (lambda (message _data)
            (remhash key treesit--async-pending-jobs)
-           (message "Async tree-sitter font-lock worker failed: %s" message)))))))
+           (message "Async tree-sitter font-lock worker failed: %s"
+                    message))))))))
+
+(put 'treesit--async-font-lock-region 'font-lock-defer-while-input t)
 
 (defsubst treesit--range-start (range)
   "Return the start of RANGE.
