@@ -169,6 +169,19 @@ buffers if input is pending."
   :type 'boolean
   :safe #'booleanp
   :version "32.1")
+
+(defcustom jit-lock-context-scan-budget 0.005
+  "Maximum seconds spent scanning contextual refontification per timer.
+The default is a small positive budget so contextual refontification
+across many buffers yields back to the command loop.  If nil, scan all
+buffers in one callback.  When this is a positive number, scan at least
+one buffer and then yield once the budget is exhausted."
+  :type '(choice (const :tag "Scan all contextual buffers" nil)
+                 (number :tag "Seconds"))
+  :safe (lambda (value)
+          (or (null value)
+              (and (numberp value) (>= value 0))))
+  :version "32.1")
 
 ;;; Variables that are not customizable.
 
@@ -436,6 +449,12 @@ Only applies to the current buffer."
   (and (numberp jit-lock-deferred-scan-budget)
        (> jit-lock-deferred-scan-budget 0)
        jit-lock-deferred-scan-budget))
+
+(defun jit-lock--context-scan-budget ()
+  "Return the active contextual refontification scan budget, or nil."
+  (and (numberp jit-lock-context-scan-budget)
+       (> jit-lock-context-scan-budget 0)
+       jit-lock-context-scan-budget))
 
 (defun jit-lock-function (start)
   "Fontify current buffer starting at position START.
@@ -749,35 +768,47 @@ non-nil in a repeated invocation of this function."
   (unless (or memory-full
               (and jit-lock-context-defer-on-input
                    (input-pending-p)))
-    (dolist (buffer (buffer-list))
-      (with-current-buffer buffer
-	(when jit-lock-context-unfontify-pos
-	  ;; (message "Jit-Context %s" (buffer-name))
-	  (save-restriction
-            ;; Don't be blindsided by narrowing that starts in the middle
-            ;; of a jit-lock-defer-multiline.
-	    (widen)
-	    (when (and (>= jit-lock-context-unfontify-pos (point-min))
-		       (< jit-lock-context-unfontify-pos (point-max)))
-	      ;; If we're in text that matches a complex multi-line
-	      ;; font-lock pattern, make sure the whole text will be
-	      ;; redisplayed eventually.
-	      ;; Despite its name, we treat jit-lock-defer-multiline here
-	      ;; rather than in jit-lock-defer since it has to do with multiple
-	      ;; lines, i.e. with context.
-	      (when (get-text-property jit-lock-context-unfontify-pos
-				       'jit-lock-defer-multiline)
-		(setq jit-lock-context-unfontify-pos
-		      (or (previous-single-property-change
-			   jit-lock-context-unfontify-pos
-			   'jit-lock-defer-multiline)
-			  (point-min))))
-	      (with-silent-modifications
-	       ;; Force contextual refontification.
-	       (remove-text-properties
-		jit-lock-context-unfontify-pos (point-max)
-		'(fontified nil jit-lock-defer-multiline nil)))
-	      (setq jit-lock-context-unfontify-pos (point-max)))))))))
+    (let ((budget (jit-lock--context-scan-budget))
+          (started (float-time))
+          (scanned 0)
+          yielded)
+      (dolist (buffer (buffer-list))
+        (unless yielded
+          (with-current-buffer buffer
+	    (when jit-lock-context-unfontify-pos
+	      ;; (message "Jit-Context %s" (buffer-name))
+	      (save-restriction
+                ;; Don't be blindsided by narrowing that starts in the middle
+                ;; of a jit-lock-defer-multiline.
+	        (widen)
+	        (when (and (>= jit-lock-context-unfontify-pos (point-min))
+		           (< jit-lock-context-unfontify-pos (point-max)))
+	          ;; If we're in text that matches a complex multi-line
+	          ;; font-lock pattern, make sure the whole text will be
+	          ;; redisplayed eventually.
+	          ;; Despite its name, we treat jit-lock-defer-multiline here
+	          ;; rather than in jit-lock-defer since it has to do with multiple
+	          ;; lines, i.e. with context.
+	          (when (get-text-property jit-lock-context-unfontify-pos
+				           'jit-lock-defer-multiline)
+		    (setq jit-lock-context-unfontify-pos
+		          (or (previous-single-property-change
+			       jit-lock-context-unfontify-pos
+			       'jit-lock-defer-multiline)
+			      (point-min))))
+	          (with-silent-modifications
+	           ;; Force contextual refontification.
+	           (remove-text-properties
+		    jit-lock-context-unfontify-pos (point-max)
+		    '(fontified nil jit-lock-defer-multiline nil)))
+	          (setq jit-lock-context-unfontify-pos (point-max))
+                  (setq scanned (1+ scanned)))))))
+        (setq yielded
+              (or (and (> scanned 0)
+                       budget
+                       (>= (- (float-time) started) budget))
+                  (and jit-lock-context-defer-on-input
+                       (input-pending-p))))))))
 
 (defvar jit-lock-start) (defvar jit-lock-end) ; Dynamically scoped variables.
 (defvar jit-lock-after-change-extend-region-functions nil

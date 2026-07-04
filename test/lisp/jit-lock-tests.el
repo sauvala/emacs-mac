@@ -291,4 +291,40 @@
       (should (= jit-lock-context-unfontify-pos 4))
       (should-not (text-property-not-all 4 (point-max) 'fontified t)))))
 
+(ert-deftest jit-lock-context-fontify-respects-scan-budget ()
+  (let ((buffer-a (generate-new-buffer "jit-lock-context-a"))
+        (buffer-b (generate-new-buffer "jit-lock-context-b"))
+        (jit-lock-context-scan-budget 0.001)
+        (time-checks 0))
+    (unwind-protect
+        (progn
+          (dolist (buffer (list buffer-a buffer-b))
+            (with-current-buffer buffer
+              (insert "aa\nbb\ncc")
+              (setq-local jit-lock-context-unfontify-pos 4)
+              (with-silent-modifications
+                (put-text-property 4 (point-max) 'fontified t))))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&optional _) nil))
+                    ((symbol-function 'float-time)
+                     (lambda (&optional _)
+                       (prog1 (if (zerop time-checks) 0.0 1.0)
+                         (setq time-checks (1+ time-checks)))))
+                    ((symbol-function 'buffer-list)
+                     (lambda (&optional _frame)
+                       (list buffer-a buffer-b))))
+            (jit-lock-context-fontify))
+          (with-current-buffer buffer-a
+            (should (= jit-lock-context-unfontify-pos (point-max)))
+            (should-not (text-property-not-all 4 (point-max)
+                                               'fontified nil)))
+          (with-current-buffer buffer-b
+            (should (= jit-lock-context-unfontify-pos 4))
+            (should-not (text-property-not-all 4 (point-max)
+                                               'fontified t))))
+      (when (buffer-live-p buffer-a)
+        (kill-buffer buffer-a))
+      (when (buffer-live-p buffer-b)
+        (kill-buffer buffer-b)))))
+
 ;;; jit-lock-tests.el ends here
