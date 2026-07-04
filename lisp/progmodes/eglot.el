@@ -5414,6 +5414,16 @@ exhausted."
               (and (integerp value) (> value 0))))
   :group 'eglot-semantic-fontification)
 
+(defcustom eglot-semantic-token-font-lock-defer-on-input t
+  "Non-nil means semantic token painting yields while input is pending.
+When this is non-nil, `eglot--semtok-font-lock-1' paints at least one
+semantic token and then leaves any remaining requested region for a later
+font-lock pass if input is pending."
+  :version "32.1"
+  :type 'boolean
+  :safe #'booleanp
+  :group 'eglot-semantic-fontification)
+
 (defun eglot--semtok-font-lock-token-budget ()
   "Return the active semantic token font-lock budget, or nil."
   (and (integerp eglot-semantic-token-font-lock-token-budget)
@@ -5593,7 +5603,10 @@ lock machinery calls us again."
              (dolist (f (cdr decoded))
                (add-face-text-property p-beg p-end f)))
            count 1 into napplied
-           when (and budget (>= napplied budget) (< p-end end))
+           when (and (< p-end end)
+                     (or (and budget (>= napplied budget))
+                         (and eglot-semantic-token-font-lock-defer-on-input
+                              (input-pending-p))))
              return (cons napplied 'deferred)
            finally (cl-return (cons napplied 'normal)))))
      (when (eq (cdr result) 'deferred)
