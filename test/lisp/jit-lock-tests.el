@@ -278,4 +278,17 @@
         (should (eq (get-text-property 7 'fontified) 'defer))
         (should (timerp jit-lock-defer-timer))))))
 
+(ert-deftest jit-lock-context-fontify-yields-while-input-is-pending ()
+  (ert-with-test-buffer (:name "xxx")
+    (insert "aa\nbb\ncc")
+    (let ((jit-lock-context-unfontify-pos 4)
+          (jit-lock-context-defer-on-input t))
+      (with-silent-modifications
+        (put-text-property 4 (point-max) 'fontified t))
+      (cl-letf (((symbol-function 'input-pending-p)
+                 (lambda (&optional _) t)))
+        (jit-lock-context-fontify))
+      (should (= jit-lock-context-unfontify-pos 4))
+      (should-not (text-property-not-all 4 (point-max) 'fontified t)))))
+
 ;;; jit-lock-tests.el ends here
