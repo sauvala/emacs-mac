@@ -161,6 +161,14 @@ exhausted."
           (or (null value)
               (and (numberp value) (>= value 0))))
   :version "32.1")
+
+(defcustom jit-lock-context-defer-on-input t
+  "Non-nil means defer contextual refontification while input is pending.
+When this is non-nil, `jit-lock-context-fontify' yields before scanning
+buffers if input is pending."
+  :type 'boolean
+  :safe #'booleanp
+  :version "32.1")
 
 ;;; Variables that are not customizable.
 
@@ -738,7 +746,9 @@ non-nil in a repeated invocation of this function."
 
 (defun jit-lock-context-fontify ()
   "Refresh fontification to take new context into account."
-  (unless memory-full
+  (unless (or memory-full
+              (and jit-lock-context-defer-on-input
+                   (input-pending-p)))
     (dolist (buffer (buffer-list))
       (with-current-buffer buffer
 	(when jit-lock-context-unfontify-pos
