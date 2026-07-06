@@ -77,7 +77,32 @@
   "The benchmark harness should include typing and process-output workloads."
   (should (assoc "command-loop-input" mac-performance--scenarios))
   (should (assoc "typing-source" mac-performance--scenarios))
-  (should (assoc "process-output" mac-performance--scenarios)))
+  (should (assoc "process-output" mac-performance--scenarios))
+  (should (assoc "coding-edit-churn" mac-performance--scenarios))
+  (should (assoc "coding-input-pressure" mac-performance--scenarios))
+  (should (assoc "coding-deferred-actions" mac-performance--scenarios)))
+
+(ert-deftest mac-performance-benchmark-compares-results ()
+  "Benchmark result comparison should report elapsed and latency ratios."
+  (let* ((baseline '(:status ok :iterations 10
+                     :results ((:name "coding-edit-churn"
+                                :seconds 2.0
+                                :latency ((typing-command
+                                           :count 2
+                                           :p95-seconds 0.020))))))
+         (candidate '(:status ok :iterations 10
+                      :results ((:name "coding-edit-churn"
+                                 :seconds 1.0
+                                 :latency ((typing-command
+                                            :count 2
+                                            :p95-seconds 0.010))))))
+         (summary (mac-performance-compare-results baseline candidate))
+         (row (car (plist-get summary :scenarios))))
+    (should (equal (plist-get row :name) "coding-edit-churn"))
+    (should (= (plist-get row :baseline-seconds) 2.0))
+    (should (= (plist-get row :candidate-seconds) 1.0))
+    (should (= (plist-get row :seconds-ratio) 0.5))
+    (should (= (plist-get row :typing-command-p95-ratio) 0.5))))
 
 (provide 'mac-performance-benchmark-tests)
 
