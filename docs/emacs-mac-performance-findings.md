@@ -11,6 +11,39 @@ The first wave of Metal renderer performance work is now in the `nemesis`
 history.  The plan checklist in `docs/superpowers/plans/2026-03-23-metal-gpu-rendering.md`
 is stale; use this section as the current summary.
 
+### Coding Responsiveness Measurements
+
+The `codex/responsive-coding-bb3c` branch added coding responsiveness
+benchmarks to `test/src/mac-performance-benchmark.el`.  A 2026-07-09
+attribution run compared selected commits against branch base `94306f38ade`
+using the same Emacs binary, 3000 generated source lines, seven repetitions,
+and 50 iterations per run.
+
+Findings:
+
+- `bbe583ccc4f` (`Defer jit-lock while input is pending`) produced the largest
+  measured responsiveness win.  The `coding-input-pressure` p95 latency fell
+  from about 0.000939s at the branch base to about 0.000013s immediately after
+  that commit, with current head around 0.000010s.
+- The accumulated branch improved `coding-edit-churn` p95 latency modestly,
+  from about 0.000105s at the branch base to about 0.000099s.
+- `f3f11303fdc` (`Budget JSONRPC deferred action replay`) improved
+  `coding-deferred-actions` p95 latency but regressed total drain time by
+  replaying only one deferred action while input was pending.
+- A follow-up bounded input batch for JSONRPC deferred actions recovered most
+  of that throughput.  With batch size 8, `coding-deferred-actions` median
+  drain time improved from about 0.0246s to about 0.0041s versus the previous
+  branch head, while p95 latency remained about 50% better than the original
+  branch base.
+
+Batch-size tuning notes:
+
+- Batch 4 had lower p95 than batch 8, but left more throughput on the table.
+- Batch 16 and 32 drained faster, but p95 latency rose past the original
+  baseline in the quick tuning run.
+- Batch 8 is the current default tradeoff: much better throughput than
+  one-action replay, with latency still materially better than baseline.
+
 Completed:
 
 - `cb6b83789ad` — optimized Metal batch vertex buffers so batch flushing uses

@@ -206,6 +206,7 @@ INITARGS are passed to `make-instance' for `jsonrpc--test-client'."
   "Deferred JSON-RPC actions leave backlog while input is pending."
   (let ((jsonrpc-deferred-actions-budget nil)
         (jsonrpc-deferred-actions-defer-on-input t)
+        (jsonrpc-deferred-actions-input-batch-size 1)
         (conn (make-instance 'jsonrpc-connection :name "jsonrpc-deferred-test"))
         called)
     (unwind-protect
@@ -226,6 +227,36 @@ INITARGS are passed to `make-instance' for `jsonrpc--test-client'."
           (should (= (hash-table-count (jsonrpc--deferred-actions conn)) 2))
           (should (timerp (jsonrpc--deferred-actions-timer conn)))
           (should (= (length called) 1)))
+      (when-let* ((timer (jsonrpc--deferred-actions-timer conn)))
+        (cancel-timer timer))
+      (kill-buffer (jsonrpc--events-buffer conn)))))
+
+(ert-deftest deferred-actions-process-input-batch-while-input-is-pending ()
+  "Deferred JSON-RPC actions process a bounded batch under pending input."
+  (let ((jsonrpc-deferred-actions-budget nil)
+        (jsonrpc-deferred-actions-defer-on-input t)
+        (jsonrpc-deferred-actions-input-batch-size 3)
+        (conn (make-instance 'jsonrpc-connection
+                             :name "jsonrpc-deferred-batch-test"))
+        called)
+    (unwind-protect
+        (progn
+          (dotimes (i 5)
+            (let ((key (list (format "deferred-%d" i) (current-buffer)))
+                  (id i))
+              (puthash key
+                       (list (lambda ()
+                               (push id called)
+                               (remhash key (jsonrpc--deferred-actions conn)))
+                             nil id)
+                       (jsonrpc--deferred-actions conn))))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&optional _) t)))
+            (should (equal (jsonrpc--call-deferred conn)
+                           '(:processed 3 :remaining 2))))
+          (should (= (hash-table-count (jsonrpc--deferred-actions conn)) 2))
+          (should (timerp (jsonrpc--deferred-actions-timer conn)))
+          (should (= (length called) 3)))
       (when-let* ((timer (jsonrpc--deferred-actions-timer conn)))
         (cancel-timer timer))
       (kill-buffer (jsonrpc--events-buffer conn)))))

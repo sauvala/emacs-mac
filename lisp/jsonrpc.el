@@ -631,6 +631,18 @@ later timer turn if input is pending."
   :safe #'booleanp
   :group 'jsonrpc)
 
+(defcustom jsonrpc-deferred-actions-input-batch-size 8
+  "Maximum deferred JSON-RPC actions replayed while input is pending.
+This only applies when `jsonrpc-deferred-actions-defer-on-input' is
+non-nil and input is pending.  A small batch avoids replaying large
+backlogs in one command-loop turn while reducing timer churn compared
+with replaying exactly one action per turn."
+  :version "32.1"
+  :type 'integer
+  :safe (lambda (value)
+          (and (integerp value) (> value 0)))
+  :group 'jsonrpc)
+
 
 ;;; Specific to `jsonrpc-process-connection'
 ;;;
@@ -834,14 +846,18 @@ Move point to end of buffer.")
      :log-text (format "re-attempting deferred requests %s"
                        (mapcar (apply-partially #'nth 2) actions)))
     (let ((budget (jsonrpc--deferred-actions-budget))
+          (input-batch-size (jsonrpc--deferred-actions-input-batch-size))
           (started (float-time))
           (processed 0))
       (while (and actions
                   (or (zerop processed)
-                      (and (not (and jsonrpc-deferred-actions-defer-on-input
-                                     (input-pending-p)))
-                           (or (not budget)
-                               (< (- (float-time) started) budget)))))
+                      (let ((input-pending
+                             (and jsonrpc-deferred-actions-defer-on-input
+                                  (input-pending-p))))
+                        (and (or (not input-pending)
+                                 (< processed input-batch-size))
+                             (or (not budget)
+                                 (< (- (float-time) started) budget))))))
         (let ((action (pop actions)))
           (setq processed (1+ processed))
           (funcall (car action))))
@@ -893,6 +909,13 @@ Move point to end of buffer.")
   (and (numberp jsonrpc-deferred-actions-budget)
        (> jsonrpc-deferred-actions-budget 0)
        jsonrpc-deferred-actions-budget))
+
+(defun jsonrpc--deferred-actions-input-batch-size ()
+  "Return the deferred action input batch size."
+  (if (and (integerp jsonrpc-deferred-actions-input-batch-size)
+           (> jsonrpc-deferred-actions-input-batch-size 0))
+      jsonrpc-deferred-actions-input-batch-size
+    1))
 
 (defun jsonrpc--ensure-deferred-actions-timer (connection)
   "Ensure CONNECTION has one active deferred action replay timer."
