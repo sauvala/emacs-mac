@@ -52,6 +52,13 @@ Findings:
   per-pass p95 rises from about 0.000003s to about 0.000010s because each pass
   paints more tokens, but the pass count drops from 6000 to 380 over the
   seven-run, ten-iteration benchmark.
+- JSONRPC process parse/dispatch bursts also benefited from bounded input
+  batches, though less dramatically.  In a seven-run, ten-iteration benchmark
+  with 600 synthetic process messages, batch size 8 improved total
+  `jsonrpc-process-burst` time by about 8.7% versus batch size 1.  Parse-drain
+  p95 improved by about 27.0%; dispatch-drain p95 improved by about 1.7%.
+  This keeps LSP output bursts from requiring one timer turn per parsed or
+  dispatched message while preserving bounded work under pending input.
 
 Batch-size tuning notes:
 

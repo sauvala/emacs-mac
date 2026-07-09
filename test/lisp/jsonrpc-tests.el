@@ -159,6 +159,7 @@ INITARGS are passed to `make-instance' for `jsonrpc--test-client'."
   (skip-unless (executable-find "cat"))
   (let ((jsonrpc-process-message-dispatch-budget nil)
         (jsonrpc-process-message-dispatch-defer-on-input t)
+        (jsonrpc-process-message-dispatch-input-batch-size 1)
         seen
         proc conn)
     (unwind-protect
@@ -190,6 +191,57 @@ INITARGS are passed to `make-instance' for `jsonrpc--test-client'."
                            '(:processed 1 :remaining 1))))
           (should (timerp (process-get proc 'jsonrpc-dispatch-timer)))
           (should (equal '(one) seen)))
+      (when proc
+        (when-let* ((timer (process-get proc 'jsonrpc-dispatch-timer)))
+          (cancel-timer timer))
+        (when (process-live-p proc)
+          (set-process-sentinel proc #'ignore)
+          (delete-process proc)))
+      (dolist (buffer (delq nil (list (and proc (process-buffer proc))
+                                      (and conn (jsonrpc--events-buffer conn))
+                                      (and conn (jsonrpc-stderr-buffer conn)))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest process-message-dispatch-batches-while-input-is-pending ()
+  "JSON-RPC process message dispatch processes a bounded input batch."
+  (skip-unless (executable-find "cat"))
+  (let ((jsonrpc-process-message-dispatch-budget nil)
+        (jsonrpc-process-message-dispatch-defer-on-input t)
+        (jsonrpc-process-message-dispatch-input-batch-size 3)
+        seen
+        proc conn)
+    (unwind-protect
+        (progn
+          (setq proc (make-process
+                      :name "jsonrpc-dispatch-input-batch-test"
+                      :buffer (generate-new-buffer
+                               " *jsonrpc-dispatch-input-batch-test*")
+                      :command (list "cat")
+                      :connection-type 'pipe
+                      :noquery t)
+                conn (make-instance
+                      'jsonrpc-process-connection
+                      :name "jsonrpc-dispatch-input-batch-test"
+                      :process proc
+                      :notification-dispatcher
+                      (lambda (_conn method _params)
+                        (push method seen))))
+          (jsonrpc--enqueue-process-messages
+           proc
+           (list '(:jsonrpc "2.0" :method "one")
+                 '(:jsonrpc "2.0" :method "two")
+                 '(:jsonrpc "2.0" :method "three")
+                 '(:jsonrpc "2.0" :method "four")))
+          (when-let* ((timer (process-get proc 'jsonrpc-dispatch-timer)))
+            (cancel-timer timer)
+            (process-put proc 'jsonrpc-dispatch-timer nil))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&optional _) t)))
+            (should (equal (jsonrpc--dispatch-process-messages proc)
+                           '(:processed 3 :remaining 1))))
+          (should (timerp (process-get proc 'jsonrpc-dispatch-timer)))
+          (should (equal '(three two one) seen)))
       (when proc
         (when-let* ((timer (process-get proc 'jsonrpc-dispatch-timer)))
           (cancel-timer timer))
@@ -340,6 +392,7 @@ INITARGS are passed to `make-instance' for `jsonrpc--test-client'."
   (skip-unless (executable-find "cat"))
   (let ((jsonrpc-process-message-parse-budget nil)
         (jsonrpc-process-message-parse-defer-on-input t)
+        (jsonrpc-process-message-parse-input-batch-size 1)
         proc conn)
     (unwind-protect
         (progn
@@ -371,6 +424,60 @@ INITARGS are passed to `make-instance' for `jsonrpc--test-client'."
           (let ((jsonrpc-process-message-parse-budget nil))
             (jsonrpc--process-filter proc ""))
           (should (= (length (process-get proc 'jsonrpc-dispatch-queue)) 2)))
+      (when proc
+        (dolist (prop '(jsonrpc-parse-timer jsonrpc-dispatch-timer))
+          (when-let* ((timer (process-get proc prop)))
+            (cancel-timer timer)))
+        (when (process-live-p proc)
+          (set-process-sentinel proc #'ignore)
+          (delete-process proc)))
+      (dolist (buffer (delq nil (list (and proc (process-buffer proc))
+                                      (and conn (jsonrpc--events-buffer conn))
+                                      (and conn (jsonrpc-stderr-buffer conn)))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest process-message-parse-batches-while-input-is-pending ()
+  "JSON-RPC process message parsing processes a bounded input batch."
+  (skip-unless (executable-find "cat"))
+  (let ((jsonrpc-process-message-parse-budget nil)
+        (jsonrpc-process-message-parse-defer-on-input t)
+        (jsonrpc-process-message-parse-input-batch-size 3)
+        proc conn)
+    (unwind-protect
+        (progn
+          (setq proc (make-process
+                      :name "jsonrpc-parse-input-batch-test"
+                      :buffer (generate-new-buffer
+                               " *jsonrpc-parse-input-batch-test*")
+                      :command (list "cat")
+                      :connection-type 'pipe
+                      :noquery t)
+                conn (make-instance
+                      'jsonrpc-process-connection
+                      :name "jsonrpc-parse-input-batch-test"
+                      :process proc))
+          (cl-letf (((symbol-function 'input-pending-p)
+                     (lambda (&optional _) t)))
+            (jsonrpc--process-filter
+             proc
+             (concat
+              (jsonrpc--test-wire-message
+               '(:jsonrpc "2.0" :method "one"))
+              (jsonrpc--test-wire-message
+               '(:jsonrpc "2.0" :method "two"))
+              (jsonrpc--test-wire-message
+               '(:jsonrpc "2.0" :method "three"))
+              (jsonrpc--test-wire-message
+               '(:jsonrpc "2.0" :method "four")))))
+          (should (timerp (process-get proc 'jsonrpc-parse-timer)))
+          (should (= (length (process-get proc 'jsonrpc-dispatch-queue)) 3))
+          (when-let* ((timer (process-get proc 'jsonrpc-parse-timer)))
+            (cancel-timer timer)
+            (process-put proc 'jsonrpc-parse-timer nil))
+          (let ((jsonrpc-process-message-parse-budget nil))
+            (jsonrpc--process-filter proc ""))
+          (should (= (length (process-get proc 'jsonrpc-dispatch-queue)) 4)))
       (when proc
         (dolist (prop '(jsonrpc-parse-timer jsonrpc-dispatch-timer))
           (when-let* ((timer (process-get proc prop)))

@@ -582,6 +582,18 @@ for a later timer turn if input is pending."
   :safe #'booleanp
   :group 'jsonrpc)
 
+(defcustom jsonrpc-process-message-dispatch-input-batch-size 8
+  "Maximum process messages dispatched while input is pending.
+This only applies when `jsonrpc-process-message-dispatch-defer-on-input'
+is non-nil and input is pending.  A small batch keeps dispatch bounded
+while reducing timer churn compared with dispatching exactly one message
+per turn."
+  :version "32.1"
+  :type 'integer
+  :safe (lambda (value)
+          (and (integerp value) (> value 0)))
+  :group 'jsonrpc)
+
 (defcustom jsonrpc-process-message-parse-budget 0.005
   "Maximum seconds spent parsing process messages per filter call.
 The default is a small positive budget so bursts of complete JSON-RPC
@@ -605,6 +617,18 @@ a later timer turn if input is pending."
   :version "32.1"
   :type 'boolean
   :safe #'booleanp
+  :group 'jsonrpc)
+
+(defcustom jsonrpc-process-message-parse-input-batch-size 8
+  "Maximum process messages parsed while input is pending.
+This only applies when `jsonrpc-process-message-parse-defer-on-input' is
+non-nil and input is pending.  A small batch keeps parsing bounded while
+reducing timer churn compared with parsing exactly one complete message
+per turn."
+  :version "32.1"
+  :type 'integer
+  :safe (lambda (value)
+          (and (integerp value) (> value 0)))
   :group 'jsonrpc)
 
 (defcustom jsonrpc-deferred-actions-budget 0.005
@@ -929,11 +953,25 @@ Move point to end of buffer.")
        (> jsonrpc-process-message-dispatch-budget 0)
        jsonrpc-process-message-dispatch-budget))
 
+(defun jsonrpc--process-message-dispatch-input-batch-size ()
+  "Return the process message dispatch input batch size."
+  (if (and (integerp jsonrpc-process-message-dispatch-input-batch-size)
+           (> jsonrpc-process-message-dispatch-input-batch-size 0))
+      jsonrpc-process-message-dispatch-input-batch-size
+    1))
+
 (defun jsonrpc--process-message-parse-budget ()
   "Return the active process message parse budget, or nil."
   (and (numberp jsonrpc-process-message-parse-budget)
        (> jsonrpc-process-message-parse-budget 0)
        jsonrpc-process-message-parse-budget))
+
+(defun jsonrpc--process-message-parse-input-batch-size ()
+  "Return the process message parse input batch size."
+  (if (and (integerp jsonrpc-process-message-parse-input-batch-size)
+           (> jsonrpc-process-message-parse-input-batch-size 0))
+      jsonrpc-process-message-parse-input-batch-size
+    1))
 
 (defun jsonrpc--ensure-process-parse-timer (proc)
   "Ensure PROC has one active JSON-RPC parse timer."
@@ -980,14 +1018,19 @@ Return a plist with dispatch progress metrics when PROC has a connection."
   (when-let* ((conn (process-get proc 'jsonrpc-connection)))
     (unwind-protect
         (let ((budget (jsonrpc--process-message-dispatch-budget))
+              (input-batch-size
+               (jsonrpc--process-message-dispatch-input-batch-size))
               (started (float-time))
               (processed 0))
           (while (and (process-get proc 'jsonrpc-dispatch-queue)
                       (or (zerop processed)
-                          (and (not (and jsonrpc-process-message-dispatch-defer-on-input
-                                         (input-pending-p)))
-                               (or (not budget)
-                                   (< (- (float-time) started) budget)))))
+                          (let ((input-pending
+                                 (and jsonrpc-process-message-dispatch-defer-on-input
+                                      (input-pending-p))))
+                            (and (or (not input-pending)
+                                     (< processed input-batch-size))
+                                 (or (not budget)
+                                     (< (- (float-time) started) budget))))))
             (let* ((queue (process-get proc 'jsonrpc-dispatch-queue))
                    (msg (car queue)))
               (process-put proc 'jsonrpc-dispatch-queue (cdr queue))
@@ -1026,6 +1069,8 @@ Return a plist with dispatch progress metrics when PROC has a connection."
         (let* ((conn (process-get proc 'jsonrpc-connection))
                (expected-bytes (jsonrpc--expected-bytes conn))
                (budget (jsonrpc--process-message-parse-budget))
+               (input-batch-size
+                (jsonrpc--process-message-parse-input-batch-size))
                (started (float-time))
                (parsed 0)
                done)
@@ -1040,6 +1085,7 @@ Return a plist with dispatch progress metrics when PROC has a connection."
                          (or (and budget
                                   (>= (- (float-time) started) budget))
                              (and jsonrpc-process-message-parse-defer-on-input
+                                  (>= parsed input-batch-size)
                                   (input-pending-p))))
                     (setq done :parse-budget-exhausted)
                   (cond
