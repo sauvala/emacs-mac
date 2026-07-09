@@ -16,9 +16,45 @@ static id<MTLDevice> shared_device;
 static id<MTLLibrary> shared_library;
 static id<MTLRenderPipelineState> shared_solid_pipeline;
 static id<MTLRenderPipelineState> shared_textured_pipeline;
-static struct emacs_metal_render_stats render_stats;
 static const char *emacs_metal_presenter_queue_label =
   "org.gnu.Emacs.macmetal.presenter";
+
+struct emacs_metal_atomic_render_stats
+{
+  _Atomic uintmax_t frames;
+  _Atomic uintmax_t flushes;
+  _Atomic uintmax_t batches;
+  _Atomic uintmax_t vertices;
+  _Atomic uintmax_t scissor_draws;
+  _Atomic uintmax_t blits;
+  _Atomic uintmax_t blit_bytes;
+  _Atomic uintmax_t present_blits;
+  _Atomic uintmax_t present_blit_bytes;
+  _Atomic uintmax_t scroll_blits;
+  _Atomic uintmax_t scroll_blit_bytes;
+  _Atomic uintmax_t texture_uploads;
+  _Atomic uintmax_t texture_upload_bytes;
+  _Atomic uintmax_t glyph_cache_hits;
+  _Atomic uintmax_t glyph_cache_misses;
+  _Atomic uintmax_t clip_set_rect_calls;
+  _Atomic uintmax_t clip_set_rect_skips;
+  _Atomic uintmax_t clip_set_rects_calls;
+  _Atomic uintmax_t clip_set_rects_skips;
+  _Atomic uintmax_t clip_reset_calls;
+  _Atomic uintmax_t clip_reset_skips;
+  _Atomic uintmax_t next_drawable_calls;
+  _Atomic double next_drawable_seconds;
+  _Atomic double max_next_drawable_seconds;
+  _Atomic uintmax_t presentation_requests;
+  _Atomic uintmax_t presentation_coalesced_requests;
+  _Atomic uintmax_t presentation_task_runs;
+  _Atomic uintmax_t presentation_final_reschedules;
+  _Atomic uintmax_t command_buffers;
+  _Atomic double command_buffer_seconds;
+  _Atomic double max_command_buffer_seconds;
+};
+
+static struct emacs_metal_atomic_render_stats render_stats;
 
 /* Glyph atlas constants and data structures.  */
 
@@ -206,13 +242,143 @@ static void flush_render_batches (emacs_metal_context_t *ctx,
                                   id<MTLCommandBuffer> cmd);
 static void emacs_metal_schedule_presentation (emacs_metal_context_t *ctx);
 
+static uintmax_t
+emacs_metal_stat_load_uint (_Atomic uintmax_t *counter)
+{
+  return atomic_load_explicit (counter, memory_order_relaxed);
+}
+
+static double
+emacs_metal_stat_load_double (_Atomic double *counter)
+{
+  return atomic_load_explicit (counter, memory_order_relaxed);
+}
+
+static void
+emacs_metal_stat_add_uint (_Atomic uintmax_t *counter, uintmax_t amount)
+{
+  atomic_fetch_add_explicit (counter, amount, memory_order_relaxed);
+}
+
+static void
+emacs_metal_stat_add_double (_Atomic double *counter, double amount)
+{
+  double old_value = atomic_load_explicit (counter, memory_order_relaxed);
+
+  while (!atomic_compare_exchange_weak_explicit (counter, &old_value,
+                                                old_value + amount,
+                                                memory_order_relaxed,
+                                                memory_order_relaxed))
+    ;
+}
+
+static void
+emacs_metal_stat_max_double (_Atomic double *counter, double value)
+{
+  double old_value = atomic_load_explicit (counter, memory_order_relaxed);
+
+  while (old_value < value
+         && !atomic_compare_exchange_weak_explicit (counter, &old_value,
+                                                   value,
+                                                   memory_order_relaxed,
+                                                   memory_order_relaxed))
+    ;
+}
+
+#define EMACS_METAL_STAT_SNAPSHOT_FIELD(stats, field) \
+  (stats)->field = emacs_metal_stat_load_uint (&render_stats.field)
+
+#define EMACS_METAL_STAT_SNAPSHOT_DOUBLE_FIELD(stats, field) \
+  (stats)->field = emacs_metal_stat_load_double (&render_stats.field)
+
+#define EMACS_METAL_STAT_RESET_FIELD(field) \
+  atomic_store_explicit (&render_stats.field, 0, memory_order_relaxed)
+
+#define EMACS_METAL_STAT_RESET_DOUBLE_FIELD(field) \
+  atomic_store_explicit (&render_stats.field, 0.0, memory_order_relaxed)
+
+#define EMACS_METAL_STAT_INC(field) \
+  emacs_metal_stat_add_uint (&render_stats.field, 1)
+
+#define EMACS_METAL_STAT_ADD(field, amount) \
+  emacs_metal_stat_add_uint (&render_stats.field, (uintmax_t) (amount))
+
+#define EMACS_METAL_STAT_ADD_DOUBLE(field, amount) \
+  emacs_metal_stat_add_double (&render_stats.field, (amount))
+
+#define EMACS_METAL_STAT_MAX_DOUBLE(field, value) \
+  emacs_metal_stat_max_double (&render_stats.field, (value))
+
 void
 emacs_metal_get_render_stats (struct emacs_metal_render_stats *stats,
                               bool reset)
 {
-  *stats = render_stats;
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, frames);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, flushes);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, batches);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, vertices);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, scissor_draws);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, blits);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, blit_bytes);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, present_blits);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, present_blit_bytes);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, scroll_blits);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, scroll_blit_bytes);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, texture_uploads);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, texture_upload_bytes);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, glyph_cache_hits);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, glyph_cache_misses);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, clip_set_rect_calls);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, clip_set_rect_skips);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, clip_set_rects_calls);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, clip_set_rects_skips);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, clip_reset_calls);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, clip_reset_skips);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, next_drawable_calls);
+  EMACS_METAL_STAT_SNAPSHOT_DOUBLE_FIELD (stats, next_drawable_seconds);
+  EMACS_METAL_STAT_SNAPSHOT_DOUBLE_FIELD (stats, max_next_drawable_seconds);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, presentation_requests);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, presentation_coalesced_requests);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, presentation_task_runs);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, presentation_final_reschedules);
+  EMACS_METAL_STAT_SNAPSHOT_FIELD (stats, command_buffers);
+  EMACS_METAL_STAT_SNAPSHOT_DOUBLE_FIELD (stats, command_buffer_seconds);
+  EMACS_METAL_STAT_SNAPSHOT_DOUBLE_FIELD (stats, max_command_buffer_seconds);
+
   if (reset)
-    memset (&render_stats, 0, sizeof render_stats);
+    {
+      EMACS_METAL_STAT_RESET_FIELD (frames);
+      EMACS_METAL_STAT_RESET_FIELD (flushes);
+      EMACS_METAL_STAT_RESET_FIELD (batches);
+      EMACS_METAL_STAT_RESET_FIELD (vertices);
+      EMACS_METAL_STAT_RESET_FIELD (scissor_draws);
+      EMACS_METAL_STAT_RESET_FIELD (blits);
+      EMACS_METAL_STAT_RESET_FIELD (blit_bytes);
+      EMACS_METAL_STAT_RESET_FIELD (present_blits);
+      EMACS_METAL_STAT_RESET_FIELD (present_blit_bytes);
+      EMACS_METAL_STAT_RESET_FIELD (scroll_blits);
+      EMACS_METAL_STAT_RESET_FIELD (scroll_blit_bytes);
+      EMACS_METAL_STAT_RESET_FIELD (texture_uploads);
+      EMACS_METAL_STAT_RESET_FIELD (texture_upload_bytes);
+      EMACS_METAL_STAT_RESET_FIELD (glyph_cache_hits);
+      EMACS_METAL_STAT_RESET_FIELD (glyph_cache_misses);
+      EMACS_METAL_STAT_RESET_FIELD (clip_set_rect_calls);
+      EMACS_METAL_STAT_RESET_FIELD (clip_set_rect_skips);
+      EMACS_METAL_STAT_RESET_FIELD (clip_set_rects_calls);
+      EMACS_METAL_STAT_RESET_FIELD (clip_set_rects_skips);
+      EMACS_METAL_STAT_RESET_FIELD (clip_reset_calls);
+      EMACS_METAL_STAT_RESET_FIELD (clip_reset_skips);
+      EMACS_METAL_STAT_RESET_FIELD (next_drawable_calls);
+      EMACS_METAL_STAT_RESET_DOUBLE_FIELD (next_drawable_seconds);
+      EMACS_METAL_STAT_RESET_DOUBLE_FIELD (max_next_drawable_seconds);
+      EMACS_METAL_STAT_RESET_FIELD (presentation_requests);
+      EMACS_METAL_STAT_RESET_FIELD (presentation_coalesced_requests);
+      EMACS_METAL_STAT_RESET_FIELD (presentation_task_runs);
+      EMACS_METAL_STAT_RESET_FIELD (presentation_final_reschedules);
+      EMACS_METAL_STAT_RESET_FIELD (command_buffers);
+      EMACS_METAL_STAT_RESET_DOUBLE_FIELD (command_buffer_seconds);
+      EMACS_METAL_STAT_RESET_DOUBLE_FIELD (max_command_buffer_seconds);
+    }
 }
 
 static uint8_t *
@@ -734,15 +900,15 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
           [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                       vertexStart:(NSUInteger)batch->vertex_offset
                       vertexCount:(NSUInteger)batch->vertex_count];
-          render_stats.scissor_draws++;
+          EMACS_METAL_STAT_INC (scissor_draws);
         }
     }
 
   [encoder endEncoding];
 
-  render_stats.flushes++;
-  render_stats.batches += flushed_batches;
-  render_stats.vertices += flushed_vertices;
+  EMACS_METAL_STAT_INC (flushes);
+  EMACS_METAL_STAT_ADD (batches, flushed_batches);
+  EMACS_METAL_STAT_ADD (vertices, flushed_vertices);
 
   ctx->batch_count = 0;
   ctx->batch_clip_rect_count = 0;
@@ -764,7 +930,7 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
           {
             ctx->presentation_scheduled = false;
             ctx->presentation_in_flight = true;
-            render_stats.presentation_task_runs++;
+            EMACS_METAL_STAT_INC (presentation_task_runs);
           }
         else
           ctx->presentation_scheduled = false;
@@ -788,10 +954,11 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
               CACurrentMediaTime () - next_drawable_start;
             if (next_drawable_elapsed < 0.0)
               next_drawable_elapsed = 0.0;
-            render_stats.next_drawable_calls++;
-            render_stats.next_drawable_seconds += next_drawable_elapsed;
-            if (render_stats.max_next_drawable_seconds < next_drawable_elapsed)
-              render_stats.max_next_drawable_seconds = next_drawable_elapsed;
+            EMACS_METAL_STAT_INC (next_drawable_calls);
+            EMACS_METAL_STAT_ADD_DOUBLE (next_drawable_seconds,
+                                         next_drawable_elapsed);
+            EMACS_METAL_STAT_MAX_DOUBLE (max_next_drawable_seconds,
+                                         next_drawable_elapsed);
           }
 
         pthread_mutex_lock (&ctx->presentation_mutex);
@@ -823,26 +990,26 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
                    destinationLevel:0
                   destinationOrigin:MTLOriginMake (0, 0, 0)];
               [blit endEncoding];
-              render_stats.blits++;
-              render_stats.blit_bytes += (uintmax_t) copy_w * copy_h * 4;
-              render_stats.present_blits++;
-              render_stats.present_blit_bytes += (uintmax_t) copy_w * copy_h * 4;
+              uintmax_t bytes = (uintmax_t) copy_w * copy_h * 4;
+              EMACS_METAL_STAT_INC (blits);
+              EMACS_METAL_STAT_ADD (blit_bytes, bytes);
+              EMACS_METAL_STAT_INC (present_blits);
+              EMACS_METAL_STAT_ADD (present_blit_bytes, bytes);
             }
         }
 
         [cmd presentDrawable:drawable];
 
         double command_start = CACurrentMediaTime ();
-        render_stats.frames++;
-        render_stats.command_buffers++;
+        EMACS_METAL_STAT_INC (frames);
+        EMACS_METAL_STAT_INC (command_buffers);
         [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull buffer) {
           double elapsed = CACurrentMediaTime () - command_start;
           bool schedule_again = false;
           if (elapsed < 0.0)
             elapsed = 0.0;
-          render_stats.command_buffer_seconds += elapsed;
-          if (render_stats.max_command_buffer_seconds < elapsed)
-            render_stats.max_command_buffer_seconds = elapsed;
+          EMACS_METAL_STAT_ADD_DOUBLE (command_buffer_seconds, elapsed);
+          EMACS_METAL_STAT_MAX_DOUBLE (max_command_buffer_seconds, elapsed);
 
           pthread_mutex_lock (&ctx->presentation_mutex);
           ctx->presentation_in_flight = false;
@@ -851,7 +1018,7 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
               ctx->presentation_needs_reschedule = false;
               ctx->presentation_scheduled = true;
               emacs_metal_context_retain (ctx);
-              render_stats.presentation_final_reschedules++;
+              EMACS_METAL_STAT_INC (presentation_final_reschedules);
               schedule_again = true;
             }
           pthread_mutex_unlock (&ctx->presentation_mutex);
@@ -874,7 +1041,7 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
               ctx->presentation_needs_reschedule = false;
               ctx->presentation_scheduled = true;
               emacs_metal_context_retain (ctx);
-              render_stats.presentation_final_reschedules++;
+              EMACS_METAL_STAT_INC (presentation_final_reschedules);
               schedule_again = true;
             }
           pthread_mutex_unlock (&ctx->presentation_mutex);
@@ -895,13 +1062,13 @@ emacs_metal_schedule_presentation (emacs_metal_context_t *ctx)
   pthread_mutex_lock (&ctx->presentation_mutex);
   if (ctx->presentation_valid)
     {
-      render_stats.presentation_requests++;
+      EMACS_METAL_STAT_INC (presentation_requests);
       if (ctx->presentation_scheduled)
-        render_stats.presentation_coalesced_requests++;
+        EMACS_METAL_STAT_INC (presentation_coalesced_requests);
       else if (ctx->presentation_in_flight)
         {
           ctx->presentation_needs_reschedule = true;
-          render_stats.presentation_coalesced_requests++;
+          EMACS_METAL_STAT_INC (presentation_coalesced_requests);
         }
       else
         {
@@ -947,14 +1114,13 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
 
   __block dispatch_semaphore_t sema = ctx->buffer_semaphore;
   double command_start = CACurrentMediaTime ();
-  render_stats.command_buffers++;
+  EMACS_METAL_STAT_INC (command_buffers);
   [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull buffer) {
     double elapsed = CACurrentMediaTime () - command_start;
     if (elapsed < 0.0)
       elapsed = 0.0;
-    render_stats.command_buffer_seconds += elapsed;
-    if (render_stats.max_command_buffer_seconds < elapsed)
-      render_stats.max_command_buffer_seconds = elapsed;
+    EMACS_METAL_STAT_ADD_DOUBLE (command_buffer_seconds, elapsed);
+    EMACS_METAL_STAT_MAX_DOUBLE (max_command_buffer_seconds, elapsed);
     dispatch_semaphore_signal (sema);
   }];
 
@@ -1335,7 +1501,7 @@ glyph_cache_lookup (emacs_metal_context_t *ctx,
           && e->subpixel == subpixel && e->scale == scale)
         {
           e->last_used = ++gc->clock;
-          render_stats.glyph_cache_hits++;
+          EMACS_METAL_STAT_INC (glyph_cache_hits);
           return e;
         }
     }
@@ -1350,7 +1516,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
                        CTFontRef font, uint16_t glyph_id, uint8_t subpixel)
 {
   struct emacs_metal_glyph_cache *gc = ctx->glyph_cache;
-  render_stats.glyph_cache_misses++;
+  EMACS_METAL_STAT_INC (glyph_cache_misses);
 
   /* If the cache is nearly full, evict some old entries without discarding
      all atlas pages.  The atlas page eviction path reclaims texture space.  */
@@ -1436,8 +1602,9 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
                                  mipmapLevel:0
                                    withBytes:pixels
                                  bytesPerRow:(NSUInteger)(gw * 4)];
-      render_stats.texture_uploads++;
-      render_stats.texture_upload_bytes += (uintmax_t) gw * gh * 4;
+      EMACS_METAL_STAT_INC (texture_uploads);
+      EMACS_METAL_STAT_ADD (texture_upload_bytes,
+                            (uintmax_t) gw * gh * 4);
     }
   else
     {
@@ -1462,8 +1629,9 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
                                  mipmapLevel:0
                                    withBytes:pixels
                                  bytesPerRow:(NSUInteger)gw];
-      render_stats.texture_uploads++;
-      render_stats.texture_upload_bytes += (uintmax_t) gw * gh;
+      EMACS_METAL_STAT_INC (texture_uploads);
+      EMACS_METAL_STAT_ADD (texture_upload_bytes,
+                            (uintmax_t) gw * gh);
     }
 
   /* Insert into the hash table using open addressing.  */
@@ -1741,7 +1909,7 @@ emacs_metal_set_clip_rect (emacs_metal_context_t *ctx,
   if (!ctx)
     return;
 
-  render_stats.clip_set_rect_calls++;
+  EMACS_METAL_STAT_INC (clip_set_rect_calls);
 
   int s = ctx->scale;
   int nx = x * s;
@@ -1766,7 +1934,7 @@ emacs_metal_set_clip_rect (emacs_metal_context_t *ctx,
   };
 
   if (!clip_set_region_if_changed (ctx, &clip))
-    render_stats.clip_set_rect_skips++;
+    EMACS_METAL_STAT_INC (clip_set_rect_skips);
 }
 
 void
@@ -1776,7 +1944,7 @@ emacs_metal_set_clip_rects (emacs_metal_context_t *ctx,
   if (!ctx)
     return;
 
-  render_stats.clip_set_rects_calls++;
+  EMACS_METAL_STAT_INC (clip_set_rects_calls);
 
   if (!rects || count <= 0)
     {
@@ -1836,7 +2004,7 @@ emacs_metal_set_clip_rects (emacs_metal_context_t *ctx,
                                                     .w = 0, .h = 0 };
 
   if (!clip_set_region_if_changed (ctx, &clip))
-    render_stats.clip_set_rects_skips++;
+    EMACS_METAL_STAT_INC (clip_set_rects_skips);
 }
 
 void
@@ -1845,7 +2013,7 @@ emacs_metal_reset_clip (emacs_metal_context_t *ctx)
   if (!ctx)
     return;
 
-  render_stats.clip_reset_calls++;
+  EMACS_METAL_STAT_INC (clip_reset_calls);
 
   metal_clip_region_t clip = {
     .count = 1,
@@ -1857,7 +2025,7 @@ emacs_metal_reset_clip (emacs_metal_context_t *ctx)
   };
 
   if (!clip_set_region_if_changed (ctx, &clip))
-    render_stats.clip_reset_skips++;
+    EMACS_METAL_STAT_INC (clip_reset_skips);
 }
 
 void
@@ -1919,10 +2087,10 @@ emacs_metal_scroll (emacs_metal_context_t *ctx,
   scroll_blit_count = 2;
   scroll_blit_bytes = (uintmax_t) sw * sh * 4 * 2;
 
-  render_stats.blits += scroll_blit_count;
-  render_stats.blit_bytes += scroll_blit_bytes;
-  render_stats.scroll_blits += scroll_blit_count;
-  render_stats.scroll_blit_bytes += scroll_blit_bytes;
+  EMACS_METAL_STAT_ADD (blits, scroll_blit_count);
+  EMACS_METAL_STAT_ADD (blit_bytes, scroll_blit_bytes);
+  EMACS_METAL_STAT_ADD (scroll_blits, scroll_blit_count);
+  EMACS_METAL_STAT_ADD (scroll_blit_bytes, scroll_blit_bytes);
   ctx->backbuffer_dirty = true;
 }
 
@@ -1974,8 +2142,8 @@ emacs_metal_upload_cg_image (emacs_metal_context_t *ctx,
              mipmapLevel:0
                withBytes:pixels
              bytesPerRow:bpr];
-  render_stats.texture_uploads++;
-  render_stats.texture_upload_bytes += (uintmax_t) height * bpr;
+  EMACS_METAL_STAT_INC (texture_uploads);
+  EMACS_METAL_STAT_ADD (texture_upload_bytes, (uintmax_t) height * bpr);
   free (pixels);
 
   return (__bridge_retained void *)texture;

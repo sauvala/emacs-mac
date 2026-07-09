@@ -71,17 +71,30 @@
 		      "emacs_metal_upload_cg_image")))
     (should (string-match-p "emacs_metal_render_stats" source))
     (should (string-match-p "emacs_metal_get_render_stats" source))
-    (should (string-match-p "render_stats.flushes" flush-body))
-    (should (string-match-p "render_stats.batches" flush-body))
-    (should (string-match-p "render_stats.vertices" flush-body))
-    (should (string-match-p "render_stats.texture_uploads" upload-body))
-    (should (string-match-p "render_stats.texture_upload_bytes" upload-body))
+    (should (string-match-p "EMACS_METAL_STAT_INC (flushes)" flush-body))
+    (should (string-match-p "EMACS_METAL_STAT_ADD (batches"
+			    flush-body))
+    (should (string-match-p "EMACS_METAL_STAT_ADD (vertices"
+			    flush-body))
+    (should (string-match-p "EMACS_METAL_STAT_INC (texture_uploads)"
+			    upload-body))
+    (should (string-match-p "EMACS_METAL_STAT_ADD (texture_upload_bytes"
+			    upload-body))
     (should (string-match-p "next_drawable_seconds" source))
-    (should (string-match-p "render_stats.next_drawable_calls"
+    (should (string-match-p "EMACS_METAL_STAT_INC (next_drawable_calls)"
 			    presentation-body))
-    (should (string-match-p "render_stats.next_drawable_seconds"
+    (should (string-match-p "EMACS_METAL_STAT_ADD_DOUBLE (next_drawable_seconds"
 			    presentation-body))
     (should (string-match-p "command_buffer_seconds" source))))
+
+(ert-deftest macmetal-render-counters-are-thread-safe ()
+  "Metal render counters should tolerate updates from presenter/completion queues."
+  (let ((source (macmetal-tests--source)))
+    (should (string-match-p "emacs_metal_atomic_render_stats" source))
+    (should (string-match-p "_Atomic uintmax_t frames" source))
+    (should (string-match-p "_Atomic double next_drawable_seconds" source))
+    (should (string-match-p "atomic_fetch_add_explicit" source))
+    (should (string-match-p "atomic_compare_exchange_weak_explicit" source))))
 
 (ert-deftest macmetal-can-toggle-layer-display-sync ()
   "Metal should expose a layer display-sync toggle for pacing experiments."
@@ -107,11 +120,14 @@
     (should (string-match-p "present_blit_bytes" source))
     (should (string-match-p "scroll_blits" source))
     (should (string-match-p "scroll_blit_bytes" source))
-    (should (string-match-p "render_stats.present_blits" presentation-body))
-    (should (string-match-p "render_stats.present_blit_bytes"
+    (should (string-match-p "EMACS_METAL_STAT_INC (present_blits)"
 			    presentation-body))
-    (should (string-match-p "render_stats.scroll_blits" scroll-body))
-    (should (string-match-p "render_stats.scroll_blit_bytes" scroll-body))))
+    (should (string-match-p "EMACS_METAL_STAT_ADD (present_blit_bytes"
+			    presentation-body))
+    (should (string-match-p "EMACS_METAL_STAT_ADD (scroll_blits"
+			    scroll-body))
+    (should (string-match-p "EMACS_METAL_STAT_ADD (scroll_blit_bytes"
+			    scroll-body))))
 
 (ert-deftest macmetal-skips-presentation-when-backbuffer-is-unchanged ()
   "Metal should avoid full-drawable presentation for no-op update cycles."
@@ -144,10 +160,10 @@
     (should-not (string-match-p "scroll_backbuffer_in_place" source))
     (should-not (string-match-p "METAL_SCROLL_DIRECT_MAX_BLITS" source))
     (should (string-match-p
-             (regexp-quote "render_stats.scroll_blits += scroll_blit_count")
+             (regexp-quote "EMACS_METAL_STAT_ADD (scroll_blits, scroll_blit_count)")
              scroll-body))
     (should (string-match-p
-             (regexp-quote "render_stats.scroll_blit_bytes += scroll_blit_bytes")
+             (regexp-quote "EMACS_METAL_STAT_ADD (scroll_blit_bytes, scroll_blit_bytes)")
              scroll-body))
     (should (string-match-p
              "scroll_blit_bytes = (uintmax_t) sw \\* sh \\* 4 \\* 2"
@@ -161,8 +177,10 @@
                          "glyph_cache_rasterize")))
     (should (string-match-p "glyph_cache_hits" source))
     (should (string-match-p "glyph_cache_misses" source))
-    (should (string-match-p "render_stats.glyph_cache_hits" lookup-body))
-    (should (string-match-p "render_stats.glyph_cache_misses" rasterize-body))))
+    (should (string-match-p "EMACS_METAL_STAT_INC (glyph_cache_hits)"
+			    lookup-body))
+    (should (string-match-p "EMACS_METAL_STAT_INC (glyph_cache_misses)"
+			    rasterize-body))))
 
 (ert-deftest macmetal-glyph-cache-is-keyed-by-backing-scale ()
   "Glyphs rasterized for one backing scale must not be reused at another scale."

@@ -134,11 +134,10 @@ Still open:
   after changed frames, or whether some paths can render directly to the
   drawable.  Partial dirty-rect copies to `CAMetalDrawable` are not safe by
   themselves because drawable contents are transient.
-- Harden the presenter-queue Metal presentation prototype.  It has the desired
-  first-order benchmark shape, but render-stat updates now happen from the main
-  thread, presenter queue, and Metal completion handlers, so the diagnostics
-  should be made explicitly thread-safe before treating fine-grained counter
-  values as exact.
+- Finish hardening the presenter-queue Metal presentation prototype.  The
+  render-stat accumulator is now explicitly atomic, so the remaining hardening
+  work is a visual/final-frame correctness check and repeated GUI benchmark
+  runs.
 - Re-measure before spending more time on display-sync or maximum-drawable-count
   tuning; the 2026-05-17 benchmark runs did not show meaningful elapsed-time
   improvement from either knob before presentation coalescing.
@@ -554,10 +553,11 @@ Current benchmark status:
   The important result is that cumulative `nextDrawable` wait still exists, but
   it no longer dominates elapsed redisplay time because it is paid by the
   presenter queue instead of the main event loop.  This prototype should be
-  hardened rather than replaced immediately.  The next cleanup should make
-  render-stat updates explicitly thread-safe and add a visual/final-frame check
-  for asynchronous presentation, because counter updates now happen from the
+  hardened rather than replaced immediately.  A follow-up made the shared
+  render-stat accumulator atomic, because counter updates now happen from the
   presenter queue and Metal completion handlers as well as the main thread.
+  The next cleanup should add a visual/final-frame check for asynchronous
+  presentation.
 
 Useful counters:
 
@@ -577,10 +577,10 @@ Useful counters:
 
 ## Suggested Order
 
-1. Harden the presenter-queue coalesced presentation prototype: make
-   render-stat updates thread-safe, add a final-frame/visual correctness check,
-   and repeat the benchmark enough times to verify the large text-heavy win is
-   stable.
+1. Finish hardening the presenter-queue coalesced presentation prototype: add a
+   final-frame/visual correctness check, and repeat the benchmark enough times
+   to verify the large text-heavy win is stable now that render-stat updates are
+   atomic.
 2. Compare bounded direct scroll-copy chunks against the staging path with
    repeated runs and interactive traces.  Keep the chunked path only if the
    lower byte traffic does not regress command-buffer latency on real scrolls.
