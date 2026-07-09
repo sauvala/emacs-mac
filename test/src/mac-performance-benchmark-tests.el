@@ -80,7 +80,9 @@
   (should (assoc "process-output" mac-performance--scenarios))
   (should (assoc "coding-edit-churn" mac-performance--scenarios))
   (should (assoc "coding-input-pressure" mac-performance--scenarios))
-  (should (assoc "coding-deferred-actions" mac-performance--scenarios)))
+  (should (assoc "coding-deferred-actions" mac-performance--scenarios))
+  (should (assoc "treesit-python-edit" mac-performance--scenarios))
+  (should (assoc "treesit-range-mark" mac-performance--scenarios)))
 
 (ert-deftest mac-performance-benchmark-compares-results ()
   "Benchmark result comparison should report elapsed and latency ratios."

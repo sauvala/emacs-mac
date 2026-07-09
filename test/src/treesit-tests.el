@@ -607,6 +607,28 @@
         (should-not treesit--pre-redisplay-pending-ranges)
         (should treesit--pre-redisplay-tick)))))
 
+(ert-deftest treesit-font-lock-mark-ranges-checks-budget-in-batches ()
+  "Tree-sitter range marking should not check the clock for every range."
+  (with-temp-buffer
+    (insert "abcdefghij")
+    (let ((treesit-pre-redisplay-range-budget 0.001)
+          (treesit-pre-redisplay-range-budget-check-interval 4)
+          (clock 0)
+          clock-calls)
+      (cl-letf (((symbol-function 'treesit-local-parsers-on)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'treesit-update-ranges)
+                 #'ignore)
+                ((symbol-function 'float-time)
+                 (lambda (&optional _)
+                   (setq clock-calls (1+ (or clock-calls 0)))
+                   (prog1 clock
+                     (setq clock (+ clock 0.001))))))
+        (should (equal (treesit--font-lock-mark-ranges-to-fontify
+                        '((1 . 2) (2 . 3) (3 . 4) (4 . 5) (5 . 6)))
+                       '((5 . 6))))
+        (should (= clock-calls 2))))))
+
 (ert-deftest treesit-pre-syntax-ppss-defers-while-input-is-pending ()
   "Tree-sitter syntax extension preserves pending work while input is pending."
   (with-temp-buffer

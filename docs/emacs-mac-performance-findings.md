@@ -35,6 +35,15 @@ Findings:
   drain time improved from about 0.0246s to about 0.0041s versus the previous
   branch head, while p95 latency remained about 50% better than the original
   branch base.
+- A follow-up tree-sitter benchmark measured Python edit pre-redisplay and
+  changed-range marking.  The range-budget checks added for responsiveness
+  made `treesit-range-mark` slower than the original non-budgeted baseline, so
+  the range marker now checks the clock every 16 marked ranges by default
+  instead of every range.  In the seven-run tree-sitter benchmark, this improved
+  `treesit-range-mark` median elapsed time by about 25.5% and p95 latency by
+  about 18.5% versus the previous branch head.  The optimized result remains
+  about 30% slower than the original baseline, which is the current cost of
+  preserving bounded pre-redisplay work.
 
 Batch-size tuning notes:
 

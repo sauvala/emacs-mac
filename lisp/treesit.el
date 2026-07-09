@@ -258,6 +258,17 @@ range and then yield once the budget is exhausted."
   :group 'treesit
   :version "32.1")
 
+(defcustom treesit-pre-redisplay-range-budget-check-interval 16
+  "Number of changed ranges marked between pre-redisplay budget checks.
+Checking the clock for every tiny changed range is expensive on large
+range lists.  This interval keeps range marking bounded while avoiding
+unnecessary per-range clock reads."
+  :type 'integer
+  :safe (lambda (value)
+          (and (integerp value) (> value 0)))
+  :group 'treesit
+  :version "32.1")
+
 ;;; Parser API supplement
 
 ;; The primary parser will be accessed frequently (after each re-parse,
@@ -2623,6 +2634,13 @@ calls to `treesit--pre-redisplay'.")
        (> treesit-pre-redisplay-range-budget 0)
        treesit-pre-redisplay-range-budget))
 
+(defun treesit--pre-redisplay-range-budget-check-interval ()
+  "Return the active pre-redisplay range budget check interval."
+  (if (and (integerp treesit-pre-redisplay-range-budget-check-interval)
+           (> treesit-pre-redisplay-range-budget-check-interval 0))
+      treesit-pre-redisplay-range-budget-check-interval
+    1))
+
 (defun treesit--range-list-p (ranges)
   "Return non-nil if RANGES is a list of (BEG . END) ranges."
   (and (consp ranges)
@@ -2652,9 +2670,11 @@ final slash of a C block comment /* xxx */, not only do we need to
 fontify the slash, but also the whole block comment, which previously
 wasn't fontified as comment due to incomplete parse tree."
   (catch 'done
-    (let ((budget (treesit--pre-redisplay-range-budget))
-          (started (float-time))
-          (marked 0))
+    (let* ((budget (treesit--pre-redisplay-range-budget))
+           (check-interval
+            (treesit--pre-redisplay-range-budget-check-interval))
+           (started (and budget (float-time)))
+           (marked 0))
       (while ranges
         (let ((range (pop ranges)))
           ;; 1. Update ranges.
@@ -2676,6 +2696,7 @@ wasn't fontified as comment due to incomplete parse tree."
         (when (and ranges
                    budget
                    (> marked 0)
+                   (zerop (% marked check-interval))
                    (>= (- (float-time) started) budget))
           (throw 'done ranges)))
       nil)))
