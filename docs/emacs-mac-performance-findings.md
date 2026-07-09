@@ -44,6 +44,14 @@ Findings:
   about 18.5% versus the previous branch head.  The optimized result remains
   about 30% slower than the original baseline, which is the current cost of
   preserving bounded pre-redisplay work.
+- Eglot semantic-token painting had the same one-item-yield throughput problem
+  as the first JSONRPC deferred-action implementation.  A benchmark that
+  drains 600 synthetic semantic tokens under pending input showed that batching
+  16 tokens between input checks reduced median drain time by about 87.4% and
+  drain p95 latency by about 94.8% versus the previous batch size of 1.  The
+  per-pass p95 rises from about 0.000003s to about 0.000010s because each pass
+  paints more tokens, but the pass count drops from 6000 to 380 over the
+  seven-run, ten-iteration benchmark.
 
 Batch-size tuning notes:
 

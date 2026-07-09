@@ -81,6 +81,7 @@
   (should (assoc "coding-edit-churn" mac-performance--scenarios))
   (should (assoc "coding-input-pressure" mac-performance--scenarios))
   (should (assoc "coding-deferred-actions" mac-performance--scenarios))
+  (should (assoc "eglot-semantic-tokens" mac-performance--scenarios))
   (should (assoc "treesit-python-edit" mac-performance--scenarios))
   (should (assoc "treesit-range-mark" mac-performance--scenarios)))
 

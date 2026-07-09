@@ -53,6 +53,10 @@
 (require 'subr-x)
 (require 'flymake) ; project-diagnostics
 
+(defvar eglot-semantic-token-font-lock-defer-on-input)
+(defvar eglot-semantic-token-font-lock-input-batch-size)
+(defvar eglot-semantic-token-font-lock-token-budget)
+
 ;;; Helpers
 
 (defun eglot--test-message (format &rest args)
@@ -1621,7 +1625,7 @@ GUESSED-MAJOR-MODES-SYM are bound to the useful return values of
         (makunbound 'eglot-semantic-token-font-lock-token-budget)))))
 
 (ert-deftest eglot-test-semtok-font-lock-yields-on-input ()
-  "Semantic token painting yields after one token while input is pending."
+  "Semantic token painting can yield after one token while input is pending."
   (let ((old-budget-bound (boundp 'eglot-semantic-token-font-lock-token-budget))
         (old-budget (and (boundp 'eglot-semantic-token-font-lock-token-budget)
                          (symbol-value
@@ -1632,12 +1636,19 @@ GUESSED-MAJOR-MODES-SYM are bound to the useful return values of
          (and (boundp 'eglot-semantic-token-font-lock-defer-on-input)
               (symbol-value
                'eglot-semantic-token-font-lock-defer-on-input)))
+        (old-batch-bound
+         (boundp 'eglot-semantic-token-font-lock-input-batch-size))
+        (old-batch
+         (and (boundp 'eglot-semantic-token-font-lock-input-batch-size)
+              (symbol-value
+               'eglot-semantic-token-font-lock-input-batch-size)))
         flushes)
     (unwind-protect
         (with-temp-buffer
           (insert "aa bb cc")
           (set 'eglot-semantic-token-font-lock-token-budget nil)
           (set 'eglot-semantic-token-font-lock-defer-on-input t)
+          (set 'eglot-semantic-token-font-lock-input-batch-size 1)
           (cl-letf (((symbol-function 'eglot--semtok-decode-token)
                      (lambda (_tok) '(nil . (font-lock-keyword-face))))
                     ((symbol-function 'font-lock-flush)
@@ -1659,7 +1670,65 @@ GUESSED-MAJOR-MODES-SYM are bound to the useful return values of
         (makunbound 'eglot-semantic-token-font-lock-token-budget))
       (if old-defer-bound
           (set 'eglot-semantic-token-font-lock-defer-on-input old-defer)
-        (makunbound 'eglot-semantic-token-font-lock-defer-on-input)))))
+        (makunbound 'eglot-semantic-token-font-lock-defer-on-input))
+      (if old-batch-bound
+          (set 'eglot-semantic-token-font-lock-input-batch-size old-batch)
+        (makunbound 'eglot-semantic-token-font-lock-input-batch-size)))))
+
+(ert-deftest eglot-test-semtok-font-lock-batches-while-input-is-pending ()
+  "Semantic token painting processes a bounded batch under pending input."
+  (let ((old-budget-bound (boundp 'eglot-semantic-token-font-lock-token-budget))
+        (old-budget (and (boundp 'eglot-semantic-token-font-lock-token-budget)
+                         (symbol-value
+                          'eglot-semantic-token-font-lock-token-budget)))
+        (old-defer-bound
+         (boundp 'eglot-semantic-token-font-lock-defer-on-input))
+        (old-defer
+         (and (boundp 'eglot-semantic-token-font-lock-defer-on-input)
+              (symbol-value
+               'eglot-semantic-token-font-lock-defer-on-input)))
+        (old-batch-bound
+         (boundp 'eglot-semantic-token-font-lock-input-batch-size))
+        (old-batch
+         (and (boundp 'eglot-semantic-token-font-lock-input-batch-size)
+              (symbol-value
+               'eglot-semantic-token-font-lock-input-batch-size)))
+        flushes)
+    (unwind-protect
+        (with-temp-buffer
+          (insert "aa bb cc dd")
+          (set 'eglot-semantic-token-font-lock-token-budget nil)
+          (set 'eglot-semantic-token-font-lock-defer-on-input t)
+          (set 'eglot-semantic-token-font-lock-input-batch-size 3)
+          (cl-letf (((symbol-function 'eglot--semtok-decode-token)
+                     (lambda (_tok) '(nil . (font-lock-keyword-face))))
+                    ((symbol-function 'font-lock-flush)
+                     (lambda (beg end)
+                       (push (cons beg end) flushes)))
+                    ((symbol-function 'input-pending-p)
+                     (lambda (&optional _) t))
+                    (eglot-move-to-linepos-function #'move-to-column))
+            (should (equal (eglot--semtok-font-lock-1
+                            (point-min) (point-max)
+                            [0 0 2 0 0 0 3 2 0 0 0 3 2 0 0 0 3 2 0 0])
+                           '(3 . deferred)))
+            (should (eq (get-text-property 1 'face)
+                        'font-lock-keyword-face))
+            (should (eq (get-text-property 4 'face)
+                        'font-lock-keyword-face))
+            (should (eq (get-text-property 7 'face)
+                        'font-lock-keyword-face))
+            (should-not (get-text-property 10 'face))
+            (should (= (length flushes) 1))))
+      (if old-budget-bound
+          (set 'eglot-semantic-token-font-lock-token-budget old-budget)
+        (makunbound 'eglot-semantic-token-font-lock-token-budget))
+      (if old-defer-bound
+          (set 'eglot-semantic-token-font-lock-defer-on-input old-defer)
+        (makunbound 'eglot-semantic-token-font-lock-defer-on-input))
+      (if old-batch-bound
+          (set 'eglot-semantic-token-font-lock-input-batch-size old-batch)
+        (makunbound 'eglot-semantic-token-font-lock-input-batch-size)))))
 
 (ert-deftest eglot-test-semtok-basic ()
   "Test basic semantic tokens fontification."
