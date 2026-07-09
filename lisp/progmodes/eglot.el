@@ -5461,11 +5461,30 @@ font-lock pass if input is pending."
   :safe #'booleanp
   :group 'eglot-semantic-fontification)
 
+(defcustom eglot-semantic-token-font-lock-input-batch-size 16
+  "Maximum semantic tokens painted before checking pending input.
+When `eglot-semantic-token-font-lock-defer-on-input' is non-nil,
+semantic token painting checks for pending input after this many
+painted tokens.  A value of 1 gives the most eager yielding, while
+larger values improve throughput for LSP semantic-token bursts."
+  :version "32.1"
+  :type 'integer
+  :safe (lambda (value)
+          (and (integerp value) (> value 0)))
+  :group 'eglot-semantic-fontification)
+
 (defun eglot--semtok-font-lock-token-budget ()
   "Return the active semantic token font-lock budget, or nil."
   (and (integerp eglot-semantic-token-font-lock-token-budget)
        (> eglot-semantic-token-font-lock-token-budget 0)
        eglot-semantic-token-font-lock-token-budget))
+
+(defun eglot--semtok-font-lock-input-batch-size ()
+  "Return the active semantic token input batch size."
+  (if (and (integerp eglot-semantic-token-font-lock-input-batch-size)
+           (> eglot-semantic-token-font-lock-input-batch-size 0))
+      eglot-semantic-token-font-lock-input-batch-size
+    1))
 
 (defun eglot--semtok-decode-token (tok)
   "Decode TOK.  Return (NAMES . FACES).  Filter FACES via user options."
@@ -5609,6 +5628,7 @@ lock machinery calls us again."
   "Do the face-painting work for `eglot--semtok-font-lock'."
   (eglot--widening
    (let ((budget (eglot--semtok-font-lock-token-budget))
+         (input-batch-size (eglot--semtok-font-lock-input-batch-size))
          result)
      (with-silent-modifications
        (remove-list-of-text-properties beg end '(eglot--semtok-token
@@ -5643,6 +5663,7 @@ lock machinery calls us again."
            when (and (< p-end end)
                      (or (and budget (>= napplied budget))
                          (and eglot-semantic-token-font-lock-defer-on-input
+                              (zerop (% napplied input-batch-size))
                               (input-pending-p))))
              return (cons napplied 'deferred)
            finally (cl-return (cons napplied 'normal)))))
