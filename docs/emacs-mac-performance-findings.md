@@ -59,6 +59,12 @@ Findings:
   p95 improved by about 27.0%; dispatch-drain p95 improved by about 1.7%.
   This keeps LSP output bursts from requiring one timer turn per parsed or
   dispatched message while preserving bounded work under pending input.
+- JIT deferred fontification scans also had per-region yield checks.  A
+  seven-run benchmark over 3000 tiny deferred regions and 50 iterations showed
+  that checking every 16 regions instead of every region reduced
+  `jit-deferred-scan` total time by about 15.6% and drain/pass p95 by about
+  21.1%.  The timer-entry pending-input guard is unchanged, so no deferred
+  scan starts when input is already waiting.
 
 Batch-size tuning notes:
 

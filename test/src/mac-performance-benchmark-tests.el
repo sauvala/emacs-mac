@@ -80,6 +80,7 @@
   (should (assoc "process-output" mac-performance--scenarios))
   (should (assoc "coding-edit-churn" mac-performance--scenarios))
   (should (assoc "coding-input-pressure" mac-performance--scenarios))
+  (should (assoc "jit-deferred-scan" mac-performance--scenarios))
   (should (assoc "coding-deferred-actions" mac-performance--scenarios))
   (should (assoc "jsonrpc-process-burst" mac-performance--scenarios))
   (should (assoc "eglot-semantic-tokens" mac-performance--scenarios))
