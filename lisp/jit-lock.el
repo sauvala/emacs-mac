@@ -162,6 +162,16 @@ exhausted."
               (and (numberp value) (>= value 0))))
   :version "32.1")
 
+(defcustom jit-lock-deferred-scan-check-interval 16
+  "Number of deferred regions scanned between yield checks.
+Checking pending input and elapsed time for every tiny deferred region is
+expensive in large buffers.  This interval keeps deferred fontification
+bounded while avoiding unnecessary checks during region scanning."
+  :type 'integer
+  :safe (lambda (value)
+          (and (integerp value) (> value 0)))
+  :version "32.1")
+
 (defcustom jit-lock-context-defer-on-input t
   "Non-nil means defer contextual refontification while input is pending.
 When this is non-nil, `jit-lock-context-fontify' yields before scanning
@@ -450,6 +460,13 @@ Only applies to the current buffer."
        (> jit-lock-deferred-scan-budget 0)
        jit-lock-deferred-scan-budget))
 
+(defun jit-lock--deferred-scan-check-interval ()
+  "Return the active deferred fontification scan check interval."
+  (if (and (integerp jit-lock-deferred-scan-check-interval)
+           (> jit-lock-deferred-scan-check-interval 0))
+      jit-lock-deferred-scan-check-interval
+    1))
+
 (defun jit-lock--context-scan-budget ()
   "Return the active contextual refontification scan budget, or nil."
   (and (numberp jit-lock-context-scan-budget)
@@ -703,6 +720,7 @@ non-nil in a repeated invocation of this function."
              (not (and jit-lock-defer-on-input
                        (input-pending-p))))
     (let ((budget (jit-lock--deferred-scan-budget))
+          (check-interval (jit-lock--deferred-scan-check-interval))
           (started (float-time))
           (scanned 0)
           yielded)
@@ -722,14 +740,15 @@ non-nil in a repeated invocation of this function."
 				       pos 'fontified nil limit)))
 		            (put-text-property pos next 'fontified nil)
                             (setq scanned (1+ scanned))
-			    (setq pos (and (< next limit) next)
-				  yielded
-                                  (or (and jit-lock-defer-on-input
-                                           (input-pending-p))
-                                      (and (> scanned 0)
-                                           budget
-                                           (>= (- (float-time) started)
-                                               budget)))))
+                            (let ((should-yield
+                                   (and (zerop (% scanned check-interval))
+                                        (or (and jit-lock-defer-on-input
+                                                 (input-pending-p))
+                                            (and budget
+                                                 (>= (- (float-time) started)
+                                                     budget))))))
+			      (setq pos (and (< next limit) next)
+				    yielded should-yield)))
 			(setq pos (next-single-property-change
 				   pos 'fontified nil limit))
                         (when (and pos (not (< pos limit)))
