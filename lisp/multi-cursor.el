@@ -59,6 +59,78 @@ operation before changing the buffer or cursor session."
 (defvar-local multi-cursor--next-id 0
   "Next secondary cursor identifier in the current buffer.")
 
+(defconst multi-cursor--valid-policies
+  '(broadcast-movement batch-edit run-once custom-handler unsupported)
+  "Policies accepted by `multi-cursor-register-command'.")
+
+(defvar multi-cursor--command-policies (make-hash-table :test #'eq)
+  "Global command policy registry for native multiple cursors.")
+
+(defvar multi-cursor--dispatching nil
+  "Non-nil while a command is running through the multiple-cursor dispatcher.")
+
+;;;###autoload
+(defun multi-cursor-register-command (command policy &optional handler)
+  "Register COMMAND with POLICY and optional HANDLER.
+
+HANDLER is required for `batch-edit' and `custom-handler'.  It receives
+COMMAND, the raw prefix, KEYS, RECORD-FLAG, and SPECIAL, in that order.
+Handlers which accept interactive input or honor RECORD-FLAG are responsible
+for capturing that input once and updating the variable `command-history'."
+  (unless (commandp command)
+    (error "Not an interactive command: %S" command))
+  (unless (memq policy multi-cursor--valid-policies)
+    (error "Invalid multiple-cursor policy: %S" policy))
+  (when (and (memq policy '(batch-edit custom-handler))
+             (not (functionp handler)))
+    (error "Policy %S requires a handler" policy))
+  (when (and handler (not (functionp handler)))
+    (error "Invalid multiple-cursor handler: %S" handler))
+  (when (and handler (memq policy '(run-once unsupported)))
+    (error "Policy %S does not accept a handler" policy))
+  (puthash command (cons policy handler) multi-cursor--command-policies)
+  command)
+
+(defun multi-cursor--defer-delete-selection-p (command)
+  "Return non-nil when delete-selection must defer for COMMAND.
+
+This predicate only reads the policy registry and session state, so it is
+safe to call from `delete-selection-pre-hook'.  Batch and custom handlers
+own selection replacement.  Unsupported and unknown commands must reach the
+dispatcher without the pre-command hook modifying the primary region."
+  (and multi-cursor-mode
+       (symbolp command)
+       (let ((entry (gethash command multi-cursor--command-policies)))
+         (or (null entry)
+             (memq (car entry)
+                   '(batch-edit custom-handler unsupported))))))
+
+(defun multi-cursor--dispatch-policy
+    (policy handler command record-flag keys special)
+  "Execute COMMAND according to POLICY and optional HANDLER."
+  (pcase policy
+    ('run-once
+     (call-interactively command record-flag keys))
+    ((or 'batch-edit 'custom-handler)
+     (funcall handler command current-prefix-arg keys record-flag special))
+    ('broadcast-movement
+     (if handler
+         (funcall handler command current-prefix-arg keys record-flag special)
+       (user-error "%S movement broadcasting is not implemented" command)))
+    ('unsupported
+     (user-error "%S is not multiple-cursor safe" command))
+    (_
+     (error "Invalid multiple-cursor policy: %S" policy))))
+
+(defun multi-cursor--command-execute (command record-flag keys special)
+  "Dispatch COMMAND with RECORD-FLAG, KEYS, and SPECIAL by its policy."
+  (let ((entry (gethash command multi-cursor--command-policies)))
+    (unless entry
+      (user-error "%S is not multiple-cursor safe" command))
+    (let ((multi-cursor--dispatching t))
+      (multi-cursor--dispatch-policy
+       (car entry) (cdr entry) command record-flag keys special))))
+
 (defvar-local multi-cursor--restriction-before-command nil
   "Restriction bounds and modification tick captured before a command.")
 
@@ -810,6 +882,38 @@ command has no global binding by default."
              "The external Multiple Cursors mode is active in this buffer"))
         (multi-cursor--start))
     (multi-cursor--clear)))
+
+(dolist (command '(multi-cursor-mode
+                   multi-cursor-remove-at-point
+                   multi-cursor-remove-all
+                   multi-cursor-add-above
+                   multi-cursor-add-below
+                   multi-cursor-edit-lines
+                   multi-cursor-select-next-occurrence
+                   multi-cursor-select-previous-occurrence
+                   multi-cursor-select-all-occurrences
+                   multi-cursor-add-at-mouse
+                   multi-cursor-cycle-forward
+                   multi-cursor-cycle-backward
+                   save-buffer
+                   recenter-top-bottom
+                   scroll-up-command
+                   scroll-down-command
+                   universal-argument
+                   universal-argument-more
+                   universal-argument-minus
+                   universal-argument-other-key
+                   digit-argument
+                   negative-argument))
+  (when (commandp command)
+    (multi-cursor-register-command command 'run-once)))
+
+(dolist (command '(undo undo-only undo-redo
+                   keyboard-quit execute-extended-command execute-kbd-macro
+                   isearch-forward isearch-backward
+                   query-replace query-replace-regexp))
+  (when (commandp command)
+    (multi-cursor-register-command command 'unsupported)))
 
 (provide 'multi-cursor)
 

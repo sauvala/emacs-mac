@@ -63,6 +63,9 @@
 (eval-when-compile
   (require 'cl-lib))
 
+(declare-function multi-cursor--defer-delete-selection-p "multi-cursor"
+                  (command))
+
 (defcustom delete-selection-save-to-register nil
   "If non-nil, deleted region text is stored in this register.
 Value must be the register (key) to use."
@@ -315,8 +318,12 @@ See `delete-selection-helper'."
                       (eq (car transient-mark-mode) 'only))
                  (and (not (eq delete-selection-temporary-region 'selection))
                       (eq transient-mark-mode 'lambda))))
-    (delete-selection-helper (and (symbolp this-command)
-                                  (get this-command 'delete-selection)))))
+    (unless (and (bound-and-true-p multi-cursor-mode)
+                 (fboundp 'multi-cursor--defer-delete-selection-p)
+                 (multi-cursor--defer-delete-selection-p this-command))
+      (delete-selection-helper (and (symbolp this-command)
+                                    (get this-command
+                                         'delete-selection))))))
 
 (defun delete-selection-uses-region-p ()
   "Return t when `delete-selection-mode' should not delete the region.

@@ -32,6 +32,8 @@
 
 (declare-function widget-apply "wid-edit" (widget property &rest args))
 (declare-function widget-convert "wid-edit" (type &rest args))
+(declare-function multi-cursor--command-execute "multi-cursor"
+                  (command record-flag keys special))
 
 ;;; From compile.el
 (defvar compilation-current-error)
@@ -2837,7 +2839,13 @@ don't clear it."
           (execute-kbd-macro final prefixarg))
          (t
           ;; Pass `cmd' rather than `final', for the backtrace's sake.
-          (prog1 (call-interactively cmd record-flag keys)
+          (prog1 (if (and (not special)
+                          (bound-and-true-p multi-cursor-mode)
+                          (not (bound-and-true-p multi-cursor--dispatching)))
+                     (multi-cursor--command-execute
+                      cmd record-flag (or keys (this-command-keys-vector))
+                      special)
+                   (call-interactively cmd record-flag keys))
             (when-let* ((info
                          (and (symbolp cmd)
                               (not (get cmd 'command-execute-obsolete-warned))

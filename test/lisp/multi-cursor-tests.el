@@ -20,6 +20,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'ert-x)
 (require 'cl-lib)
 (require 'multi-cursor)
 
@@ -27,6 +28,54 @@
   "Return the internal test cursor whose stable identifier is ID."
   (cl-find id multi-cursor--cursors
            :key #'multi-cursor--cursor-id))
+
+(defvar multi-cursor-tests--command-log nil)
+
+(defun multi-cursor-tests--run-once ()
+  "Record one ordinary interactive invocation for policy tests."
+  (interactive)
+  (push (list (point) current-prefix-arg this-command real-this-command
+              last-command-event last-command)
+        multi-cursor-tests--command-log))
+
+(defun multi-cursor-tests--edit ()
+  "Perform an edit which must be blocked when it has no safe policy."
+  (interactive)
+  (insert "changed"))
+
+(defun multi-cursor-tests--error ()
+  "Signal an error for command-loop policy tests."
+  (interactive)
+  (error "policy test error"))
+
+(defun multi-cursor-tests--quit ()
+  "Signal quit for command-loop policy tests."
+  (interactive)
+  (signal 'quit nil))
+
+(defun multi-cursor-tests--handler
+    (command prefix keys record-flag special)
+  "Record dispatcher arguments for COMMAND."
+  (push (list command prefix keys record-flag special
+              this-command real-this-command last-command-event)
+        multi-cursor-tests--command-log))
+
+(defmacro multi-cursor-tests--with-policy (command policy handler &rest body)
+  "Register COMMAND with POLICY and HANDLER while running BODY."
+  (declare (indent 3) (debug t))
+  (let ((saved (make-symbol "saved"))
+        (missing (make-symbol "missing"))
+        (cmd (make-symbol "command")))
+    `(let* ((,cmd ,command)
+            (,missing (make-symbol "missing-policy"))
+            (,saved (gethash ,cmd multi-cursor--command-policies ,missing)))
+       (unwind-protect
+           (progn
+             (multi-cursor-register-command ,cmd ,policy ,handler)
+             ,@body)
+         (if (eq ,saved ,missing)
+             (remhash ,cmd multi-cursor--command-policies)
+           (puthash ,cmd ,saved multi-cursor--command-policies))))))
 
 (ert-deftest multi-cursor-lifecycle-enable-creates-local-session ()
   (with-temp-buffer
@@ -770,6 +819,252 @@
                              (plist-get selection :point))
                            (multi-cursor-selections))
                    '(4)))))
+
+(ert-deftest multi-cursor-policy-registration-validates-input ()
+  (should-error
+   (multi-cursor-register-command 'ignore 'unknown) :type 'error)
+  (should-error
+   (multi-cursor-register-command 'ignore 'batch-edit) :type 'error)
+  (should-error
+   (multi-cursor-register-command 'ignore 'custom-handler) :type 'error)
+  (should-error
+   (multi-cursor-register-command 'ignore 'run-once #'ignore) :type 'error)
+  (should-error
+   (multi-cursor-register-command 'ignore 'unsupported #'ignore) :type 'error))
+
+(ert-deftest multi-cursor-policy-management-command-can-disable-mode ()
+  (with-temp-buffer
+    (insert "one two")
+    (goto-char 1)
+    (multi-cursor-add-at-point 5)
+    (should (eq (car (gethash 'multi-cursor-mode
+                              multi-cursor--command-policies))
+                'run-once))
+    (command-execute 'multi-cursor-mode)
+    (should-not multi-cursor-mode)))
+
+(ert-deftest multi-cursor-policy-real-loop-run-once-and-prefixes ()
+  (dolist (case '((nil "x") (3 "M-3 x") (- "M-- x")
+                  ((4) "C-u x") ((16) "C-u C-u x")))
+    (ert-with-test-buffer (:selected t)
+      (insert "one two")
+      (goto-char 1)
+      (multi-cursor-add-at-point 5)
+      (let ((multi-cursor-tests--command-log nil)
+            (map (make-sparse-keymap)))
+        (define-key map "x" #'multi-cursor-tests--run-once)
+        (multi-cursor-tests--with-policy
+            'multi-cursor-tests--run-once 'run-once nil
+          (let ((minor-mode-map-alist
+                 (cons (cons t map) minor-mode-map-alist)))
+            (ert-play-keys (kbd (cadr case)))))
+        (should (= (length multi-cursor-tests--command-log) 1))
+        (should (= (caar multi-cursor-tests--command-log) 1))
+        (should (equal (cadar multi-cursor-tests--command-log)
+                       (car case)))))))
+
+(ert-deftest multi-cursor-policy-real-loop-handler-and-recursion-guard ()
+  (ert-with-test-buffer (:selected t)
+    (insert "one two")
+    (goto-char 1)
+    (multi-cursor-add-at-point 5)
+    (let ((multi-cursor-tests--command-log nil)
+          (map (make-sparse-keymap)))
+      (define-key map "x" #'multi-cursor-tests--edit)
+      (multi-cursor-tests--with-policy
+          'multi-cursor-tests--edit 'custom-handler
+          #'multi-cursor-tests--handler
+        (let ((minor-mode-map-alist
+               (cons (cons t map) minor-mode-map-alist)))
+          (ert-play-keys (kbd "C-u x"))))
+      (should (equal (caar multi-cursor-tests--command-log)
+                     'multi-cursor-tests--edit))
+      (should (equal (cadar multi-cursor-tests--command-log) '(4)))
+      (should (equal (nth 2 (car multi-cursor-tests--command-log))
+                     [?x]))
+      (should (eq (nth 6 (car multi-cursor-tests--command-log))
+                  'multi-cursor-tests--edit))
+      (should (eq (nth 7 (car multi-cursor-tests--command-log)) ?x))
+      (setq multi-cursor-tests--command-log nil)
+      (multi-cursor-tests--with-policy
+          'multi-cursor-tests--edit 'custom-handler
+          (lambda (&rest _)
+            (command-execute 'multi-cursor-tests--run-once))
+        (let ((minor-mode-map-alist
+               (cons (cons t map) minor-mode-map-alist)))
+          (ert-play-keys "x")))
+      (should (= (length multi-cursor-tests--command-log) 1)))))
+
+(ert-deftest multi-cursor-policy-direct-forwarding-and-history-contract ()
+  (with-temp-buffer
+    (insert "one two")
+    (goto-char 1)
+    (multi-cursor-add-at-point 5)
+    (let ((multi-cursor-tests--command-log nil)
+          (prefix-arg '(4)))
+      (multi-cursor-tests--with-policy
+          'multi-cursor-tests--edit 'broadcast-movement
+          #'multi-cursor-tests--handler
+        (command-execute 'multi-cursor-tests--edit t [?z]))
+      (let ((entry (car multi-cursor-tests--command-log)))
+        (should (equal (nth 1 entry) '(4)))
+        (should (equal (nth 2 entry) [?z]))
+        (should (eq (nth 3 entry) t))
+        (should-not (nth 4 entry))))
+    (let ((command-history nil))
+      (multi-cursor-tests--with-policy
+          'multi-cursor-tests--run-once 'run-once nil
+        (command-execute 'multi-cursor-tests--run-once t [?x]))
+      (should (equal (car command-history)
+                     '(multi-cursor-tests--run-once))))))
+
+(ert-deftest multi-cursor-policy-real-loop-unsupported-is-atomic ()
+  (ert-with-test-buffer (:selected t)
+    (insert "one two")
+    (goto-char 1)
+    (multi-cursor-add-at-point 5)
+    (let ((before (buffer-string)))
+      (let ((map (make-sparse-keymap)))
+        (define-key map "x" #'multi-cursor-tests--edit)
+        (let ((minor-mode-map-alist
+               (cons (cons t map) minor-mode-map-alist)))
+          (should-error (ert-play-keys "x") :type 'user-error))
+        (should (equal (buffer-string) before)))
+      (multi-cursor-tests--with-policy
+          'multi-cursor-tests--edit 'unsupported nil
+        (let ((delete-selection-mode t))
+          (put 'multi-cursor-tests--edit 'delete-selection t)
+          (unwind-protect
+              (progn
+                (goto-char 4)
+                (set-mark 1)
+                (activate-mark)
+                (run-hooks 'delete-selection-pre-hook)
+                (should-error (command-execute 'multi-cursor-tests--edit)
+                              :type 'user-error)
+                (should (equal (buffer-string) before)))
+            (put 'multi-cursor-tests--edit 'delete-selection nil)))))))
+
+(ert-deftest multi-cursor-policy-delete-selection-defers-to-handler ()
+  (ert-with-test-buffer (:selected t)
+    (require 'delsel)
+    (insert "primary secondary")
+    (goto-char 8)
+    (set-mark 1)
+    (activate-mark)
+    (multi-cursor-add-selection 18 9 t)
+    (let ((delete-selection-mode t)
+          (saw-primary nil)
+          (map (make-sparse-keymap)))
+      (define-key map "x" #'multi-cursor-tests--edit)
+      (multi-cursor-tests--with-policy
+          'multi-cursor-tests--edit 'batch-edit
+          (lambda (&rest _)
+            (setq saw-primary
+                  (equal (buffer-substring (region-beginning) (region-end))
+                         "primary")))
+        (let ((pre-command-hook
+               (cons #'delete-selection-pre-hook pre-command-hook))
+              (minor-mode-map-alist
+               (cons (cons t map) minor-mode-map-alist)))
+          (ert-play-keys "x")))
+      (should saw-primary)
+      (should (equal (buffer-string) "primary secondary")))))
+
+(ert-deftest multi-cursor-policy-real-loop-runs-hooks-once ()
+  (ert-with-test-buffer (:selected t)
+    (insert "one two")
+    (goto-char 1)
+    (multi-cursor-add-at-point 5)
+    (let ((pre 0) (post 0)
+          (map (make-sparse-keymap)))
+      (define-key map "x" #'multi-cursor-tests--run-once)
+      (multi-cursor-tests--with-policy
+          'multi-cursor-tests--run-once 'run-once nil
+        (let ((pre-command-hook
+               (lambda ()
+                 (when (eq this-command 'multi-cursor-tests--run-once)
+                   (cl-incf pre))))
+              (post-command-hook
+               (lambda ()
+                 (when (eq this-command 'multi-cursor-tests--run-once)
+                   (cl-incf post))))
+              (minor-mode-map-alist
+               (cons (cons t map) minor-mode-map-alist)))
+          (ert-play-keys "x")))
+      (should (= pre 1))
+      (should (= post 1)))))
+
+(ert-deftest multi-cursor-policy-dispatch-guard-unwinds-on-error-and-quit ()
+  (with-temp-buffer
+    (insert "one two")
+    (goto-char 1)
+    (multi-cursor-add-at-point 5)
+    (dolist (case '((multi-cursor-tests--error . error)
+                    (multi-cursor-tests--quit . quit)))
+      (multi-cursor-tests--with-policy (car case) 'run-once nil
+        (if (eq (cdr case) 'quit)
+            (should (eq (condition-case nil
+                            (progn (command-execute (car case)) nil)
+                          (quit 'quit))
+                        'quit))
+          (should-error (command-execute (car case)) :type 'error)))
+      (should-not multi-cursor--dispatching))))
+
+(ert-deftest multi-cursor-policy-disabled-and-macro-paths-are-preserved ()
+  (ert-with-test-buffer (:selected t)
+    (insert "one two")
+    (goto-char 1)
+    (multi-cursor-add-at-point 5)
+    (let ((disabled 0) (ran 0)
+          (multi-cursor-tests--command-log nil)
+          (map (make-sparse-keymap)))
+      (define-key map "x" #'multi-cursor-tests--run-once)
+      (put 'multi-cursor-tests--run-once 'disabled t)
+      (unwind-protect
+          (multi-cursor-tests--with-policy
+              'multi-cursor-tests--run-once 'run-once nil
+            (let ((disabled-command-function
+                   (lambda () (cl-incf disabled)))
+                  (minor-mode-map-alist
+                   (cons (cons t map) minor-mode-map-alist)))
+              (ert-play-keys "x")))
+        (put 'multi-cursor-tests--run-once 'disabled nil))
+      (should (= disabled 1))
+      (should-not multi-cursor-tests--command-log)
+      (define-key map "x" [?y])
+      (define-key map "y" (lambda () (interactive) (cl-incf ran)))
+      (let ((macro-command (lookup-key map "y")))
+        (multi-cursor-tests--with-policy macro-command 'run-once nil
+          (let ((minor-mode-map-alist
+                 (cons (cons t map) minor-mode-map-alist)))
+            (ert-play-keys "x"))))
+      (should (= ran 1)))))
+
+(ert-deftest multi-cursor-policy-autoload-and-special-paths-are-preserved ()
+  (ert-with-test-buffer (:selected t)
+    (insert "one two")
+    (goto-char 1)
+    (multi-cursor-add-at-point 5)
+    (let ((autoload-command 'multi-cursor-tests--autoloaded)
+          (special-command (lambda () (interactive)
+                             (push 'special multi-cursor-tests--command-log))))
+      (ert-with-temp-file file
+        :suffix ".el"
+        :text ";;; -*- lexical-binding: t; -*-\n(defun multi-cursor-tests--autoloaded () (interactive) (setq multi-cursor-tests--command-log '(autoloaded)))\n"
+        (autoload autoload-command file nil t)
+        (unwind-protect
+            (multi-cursor-tests--with-policy autoload-command 'run-once nil
+              (let ((map (make-sparse-keymap)))
+                (define-key map "x" autoload-command)
+                (let ((minor-mode-map-alist
+                       (cons (cons t map) minor-mode-map-alist)))
+                  (ert-play-keys "x")))
+              (should (equal multi-cursor-tests--command-log '(autoloaded))))
+          (fmakunbound autoload-command)))
+      (setq multi-cursor-tests--command-log nil)
+      (command-execute special-command nil nil t)
+      (should (equal multi-cursor-tests--command-log '(special))))))
 
 (ert-deftest multi-cursor-creation-narrowed-unrelated-command-does-not-scan ()
   (with-temp-buffer
