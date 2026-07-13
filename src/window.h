@@ -214,6 +214,11 @@ struct window
     /* `cursor-type' to use in this window.  */
     Lisp_Object cursor_type;
 
+    /* Last displayed and next published secondary-cursor snapshots.  The
+       latter is promoted only after a completed window update.  */
+    Lisp_Object cursor_decorations_snapshot;
+    Lisp_Object desired_cursor_decorations_snapshot;
+
     /* The help echo text for this window.  Qnil if there's none.  */
     Lisp_Object mode_line_help_echo;
 
@@ -232,6 +237,9 @@ struct window
     struct cursor_decoration_cache *desired_cursor_decorations;
     ptrdiff_t desired_cursor_decorations_count;
     ptrdiff_t desired_cursor_decorations_capacity;
+
+    /* A published snapshot differs from the last completed update.  */
+    bool cursor_decorations_changed_p;
 
     /* Number saying how recently window was selected.  */
     EMACS_INT use_time;
@@ -553,6 +561,18 @@ INLINE void
 wset_mode_line_help_echo (struct window *w, Lisp_Object val)
 {
   w->mode_line_help_echo = val;
+}
+
+INLINE void
+wset_cursor_decorations_snapshot (struct window *w, Lisp_Object val)
+{
+  w->cursor_decorations_snapshot = val;
+}
+
+INLINE void
+wset_desired_cursor_decorations_snapshot (struct window *w, Lisp_Object val)
+{
+  w->desired_cursor_decorations_snapshot = val;
 }
 
 INLINE void

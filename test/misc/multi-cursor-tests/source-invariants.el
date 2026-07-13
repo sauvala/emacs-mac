@@ -44,15 +44,48 @@
   "Return C FUNCTION's complete body from source FILE."
   (with-temp-buffer
     (insert (multi-cursor-source-tests--source file))
-    (c-mode)
     (goto-char (point-min))
     (should (re-search-forward
              (concat "^" (regexp-quote function)
                      "[[:space:]\n]*(")
              nil t))
     (should (search-forward "{" nil t))
-    (let ((start (1- (point)))
-          (end (scan-sexps (1- (point)) 1)))
+    (let* ((start (1- (point)))
+           (depth 1)
+           (state 'code)
+           end)
+      (while (and (> depth 0) (< (point) (point-max)))
+        (let ((character (char-after))
+              (next (char-after (1+ (point)))))
+          (pcase state
+            ('code
+             (cond
+              ((and (eq character ?/) (eq next ?*))
+               (setq state 'comment)
+               (forward-char 1))
+              ((and (eq character ?/) (eq next ?/))
+               (setq state 'line-comment)
+               (forward-char 1))
+              ((eq character ?\") (setq state 'string))
+              ((eq character ?\') (setq state 'character))
+              ((eq character ?{) (setq depth (1+ depth)))
+              ((eq character ?}) (setq depth (1- depth)))))
+            ('comment
+             (when (and (eq character ?*) (eq next ?/))
+               (setq state 'code)
+               (forward-char 1)))
+            ('line-comment
+             (when (eq character ?\n)
+               (setq state 'code)))
+            ((or 'string 'character)
+             (cond
+              ((eq character ?\\) (forward-char 1))
+              ((or (and (eq state 'string) (eq character ?\"))
+                   (and (eq state 'character) (eq character ?\')))
+               (setq state 'code)))))
+          (forward-char 1)))
+      (when (= depth 0)
+        (setq end (point)))
       (should end)
       (buffer-substring-no-properties start end))))
 
@@ -64,6 +97,30 @@
       (setq start (match-end 0)
             count (1+ count)))
     count))
+
+(defun multi-cursor-source-tests--c-defun (file lisp-name-regexp)
+  "Return a DEFUN form from FILE matching LISP-NAME-REGEXP."
+  (let ((source (multi-cursor-source-tests--source file)))
+    (should (string-match
+             (concat "^DEFUN (\"" lisp-name-regexp "\"") source))
+    (let ((start (match-beginning 0)))
+      (substring source start
+                 (or (string-match "^DEFUN (\"" source (1+ start))
+                     (length source))))))
+
+(defun multi-cursor-source-tests--elisp-defun (file function)
+  "Return Lisp FUNCTION's defining form from FILE."
+  (with-temp-buffer
+    (insert (multi-cursor-source-tests--source file))
+    (emacs-lisp-mode)
+    (goto-char (point-min))
+    (should (re-search-forward
+             (concat "^(defun[[:space:]\n]+" (regexp-quote function)
+                     "\\_>") nil t))
+    (let* ((start (match-beginning 0))
+           (end (scan-sexps start 1)))
+      (should end)
+      (buffer-substring-no-properties start end))))
 
 (ert-deftest multi-cursor-source-has-backend-neutral-decoration-descriptor ()
   "Generic headers should describe resolved cursors without backend state."
@@ -132,6 +189,135 @@
      (>= (multi-cursor-source-tests--match-count
           (concat (regexp-quote name) "[[:space:]\n]*(") source)
          2))))
+
+(ert-deftest multi-cursor-source-publishes-immutable-sorted-snapshot ()
+  "Lisp should replace the selected window's sorted snapshot as one value."
+  (let* ((source (multi-cursor-source-tests--source "lisp/multi-cursor.el"))
+         (body (multi-cursor-source-tests--elisp-defun
+                "lisp/multi-cursor.el"
+                "multi-cursor--publish-redisplay-snapshot")))
+    (should (string-match-p "pre-redisplay-functions" source))
+    (should (string-match-p "multi-cursor--sorted-cursors" body))
+    (should (string-match-p "buffer-chars-modified-tick" body))
+    (should (string-match-p "current-buffer" body))
+    (dolist (accessor '("multi-cursor--cursor-id"
+                        "multi-cursor--cursor-point"
+                        "multi-cursor--cursor-mark"
+                        "multi-cursor--cursor-mark-active"
+                        "multi-cursor--cursor-direction"))
+      (should (string-match-p accessor body)))
+    (should (string-match-p "(vconcat" body))
+    (should (string-match-p "selected-window" body))
+    (should (string-match-p "multi-cursor--set-redisplay-snapshot" body))
+    (should (string-match-p "multi-cursor--redisplay-window" body))
+    (should
+     (>= (multi-cursor-source-tests--match-count
+          "multi-cursor--set-redisplay-snapshot" body)
+         2))
+    (should-not (string-match-p "aset" body))))
+
+(ert-deftest multi-cursor-source-window-traces-published-snapshot ()
+  "The selected window should retain the published Lisp snapshot safely."
+  (let* ((header (multi-cursor-source-tests--source "src/window.h"))
+         (field (string-match
+                 "Lisp_Object[[:space:]\n]+cursor_decorations_snapshot"
+                 header))
+         (desired
+          (string-match
+           "Lisp_Object[[:space:]\n]+desired_cursor_decorations_snapshot"
+           header))
+         (last-lisp (string-match "No Lisp data may follow" header)))
+    (should field)
+    (should desired)
+    (should last-lisp)
+    (should (< field last-lisp))
+    (should (< desired last-lisp))
+    (should
+     (string-match-p "cursor_decorations_changed_p" header))))
+
+(ert-deftest multi-cursor-source-snapshot-setter-invalidates-precisely ()
+  "The dedicated setter should retain snapshots and request redisplay."
+  (let ((body (multi-cursor-source-tests--c-defun
+               "src/window.c" "multi-cursor--set-redisplay-snapshot")))
+    (should (string-match-p "cursor_decorations_snapshot" body))
+    (should (string-match-p "desired_cursor_decorations_snapshot" body))
+    (should (string-match-p "cursor_decorations_changed_p" body))
+    (should (string-match-p "redisplay" body))
+    (should
+     (string-match-p "Fequal\\|internal_equal\\|equal_no_quit" body))))
+
+(ert-deftest multi-cursor-source-promotes-snapshot-after-completed-update ()
+  "Only a completed window update should promote the desired snapshot."
+  (let* ((body (multi-cursor-source-tests--function-body
+                "src/dispnew.c" "update_window"))
+         (completed (string-match "gui_update_window_end" body))
+         (promotion (and completed
+                         (string-match
+                          "desired_cursor_decorations_snapshot"
+                          body completed)))
+         (clear (and promotion
+                     (string-match
+                      (concat "cursor_decorations_changed_p"
+                              "[[:space:]]*=[[:space:]]*false")
+                      body promotion))))
+    (should completed)
+    (should promotion)
+    (should clear)
+    (should (< completed promotion))
+    (should (< promotion clear))))
+
+(ert-deftest multi-cursor-source-invalidates-snapshot-with-window-state ()
+  "Buffer replacement and matrix teardown should invalidate snapshots."
+  (let ((buffer-setter (multi-cursor-source-tests--function-body
+                        "src/window.c" "set_window_buffer"))
+        (matrix-free (multi-cursor-source-tests--function-body
+                      "src/dispnew.c" "free_window_matrices")))
+    (should
+     (string-match-p "desired_cursor_decorations_snapshot" buffer-setter))
+    (should (string-match-p "cursor_decorations_changed_p" buffer-setter))
+    (should (string-match-p "free_window_cursor_decorations" matrix-free))
+    (should
+     (string-match-p "desired_cursor_decorations_snapshot" matrix-free))
+    (should (string-match-p "cursor_decorations_changed_p" matrix-free))))
+
+(ert-deftest multi-cursor-source-changed-only-fast-path-guards ()
+  "No-op and cursor-motion shortcuts should care only about snapshot change."
+  (let ((predicate (multi-cursor-source-tests--function-body
+                    "src/xdisp.c"
+                    "window_cursor_decorations_changed_p")))
+    (should (string-match-p "cursor_decorations_changed_p" predicate))
+    (should-not (string-match-p "cursor_decorations_snapshot" predicate)))
+  (dolist (function '("needs_no_redisplay" "try_cursor_movement"))
+    (let ((body (multi-cursor-source-tests--function-body
+                 "src/xdisp.c" function)))
+      (should
+       (or (string-match-p "w->cursor_decorations_changed_p" body)
+           (string-match-p "window_cursor_decorations_changed_p" body)))
+      (should-not (string-match-p "cursor_decorations_snapshot" body))
+      (should-not (string-match-p "window_has_cursor_decorations_p" body)))))
+
+(ert-deftest multi-cursor-source-active-snapshot-blocks-pixel-reuse ()
+  "Direct scrolling should reject changed or currently active snapshots."
+  (let ((predicate (multi-cursor-source-tests--function-body
+                    "src/xdisp.c" "window_has_cursor_decorations_p")))
+    (dolist (field '("cursor_decorations_changed_p"
+                     "cursor_decorations_snapshot"
+                     "desired_cursor_decorations_snapshot"))
+      (should (string-match-p field predicate))))
+  (dolist (function '("try_window_reusing_current_matrix" "try_window_id"))
+    (let ((body (multi-cursor-source-tests--function-body
+                 "src/xdisp.c" function)))
+      (should
+       (string-match-p "window_has_cursor_decorations_p" body))))
+  (let ((body (multi-cursor-source-tests--function-body
+               "src/dispnew.c" "update_window")))
+    (dolist (field '("cursor_decorations_changed_p"
+                     "cursor_decorations_snapshot"
+                     "desired_cursor_decorations_snapshot"))
+      (should (string-match-p field body)))
+    (should
+     (string-match-p
+      "no_scrolling_p[[:space:]]*=[[:space:]]*true" body))))
 
 (provide 'multi-cursor-source-invariants)
 

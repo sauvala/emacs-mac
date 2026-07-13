@@ -14885,12 +14885,32 @@ gui_consider_frame_title (Lisp_Object frame)
    && (update_mode_lines == 0				\
        || update_mode_lines == REDISPLAY_SOME))
 
+/* Return true when a published snapshot has not reached the display.  */
+static bool
+window_cursor_decorations_changed_p (struct window *w)
+{
+  return w->cursor_decorations_changed_p;
+}
+
+/* Return true when copying pixels could also copy cursor decorations which
+   are not represented by glyph rows.  */
+static bool
+window_has_cursor_decorations_p (struct window *w)
+{
+  return (window_cursor_decorations_changed_p (w)
+	  || !NILP (w->cursor_decorations_snapshot)
+	  || !NILP (w->desired_cursor_decorations_snapshot)
+	  || w->cursor_decorations_count > 0
+	  || w->desired_cursor_decorations_count > 0);
+}
+
 static bool
 needs_no_redisplay (struct window *w)
 {
   struct buffer *buffer = XBUFFER (w->contents);
   struct frame *f = XFRAME (w->frame);
   return (REDISPLAY_SOME_P ()
+          && !w->cursor_decorations_changed_p
           && !w->redisplay
           && !w->update_mode_line
           && !f->face_change
@@ -20706,7 +20726,8 @@ try_cursor_movement (Lisp_Object window, struct text_pos startp,
   /* Handle case where text has not changed, only point, and it has
      not moved off the frame.  */
   if (/* Point may be in this window.  */
-      PT >= CHARPOS (startp)
+      !w->cursor_decorations_changed_p
+      && PT >= CHARPOS (startp)
       /* Selective display hasn't changed.  */
       && !current_buffer->clip_changed
       /* Function force-mode-line-update is used to force a thorough
@@ -22654,6 +22675,7 @@ try_window_reusing_current_matrix (struct window *w)
 
   if (/* This function doesn't handle terminal frames.  */
       !FRAME_WINDOW_P (f)
+      || window_has_cursor_decorations_p (w)
       /* Don't try to reuse the display if windows have been split
 	 or such.  */
       || windows_or_buffers_changed
@@ -23471,6 +23493,9 @@ try_window_id (struct window *w)
      messages and mini-buffers, and we don't handle that here.  */
   if (MINI_WINDOW_P (w))
     GIVE_UP (1);
+
+  if (window_has_cursor_decorations_p (w))
+    GIVE_UP (201);
 
   /* This flag is used to prevent redisplay optimizations.  */
   if (windows_or_buffers_changed || f->cursor_type_changed)

@@ -2413,6 +2413,9 @@ free_window_matrices (struct window *w)
       /* Cached geometry is indexed into these matrices, so its lifetime is
          centralized with matrix ownership.  */
       free_window_cursor_decorations (w);
+      wset_desired_cursor_decorations_snapshot (w, Qnil);
+      if (!NILP (w->cursor_decorations_snapshot))
+	w->cursor_decorations_changed_p = true;
 
       if (WINDOWP (w->contents))
 	free_window_matrices (XWINDOW (w->contents));
@@ -4494,6 +4497,15 @@ update_window (struct window *w)
   while (row < end && !row->enabled_p)
     ++row;
 
+  /* Secondary cursors are not represented by glyph rows.  Never copy their
+     pixels while either displayed or newly published decorations exist.  */
+  if (w->cursor_decorations_changed_p
+      || !NILP (w->cursor_decorations_snapshot)
+      || !NILP (w->desired_cursor_decorations_snapshot)
+      || w->cursor_decorations_count > 0
+      || w->desired_cursor_decorations_count > 0)
+    desired_matrix->no_scrolling_p = true;
+
   /* Try reusing part of the display by copying.  */
   if (row < end && !desired_matrix->no_scrolling_p)
     {
@@ -4622,6 +4634,12 @@ update_window (struct window *w)
      W->output_cursor doesn't contain the cursor location.  */
   gui_update_window_end (w, true, mouse_face_overwritten_p);
 #endif
+  /* Only a completed update may make the published snapshot current.  */
+  wset_cursor_decorations_snapshot
+    (w, w->desired_cursor_decorations_snapshot);
+  wset_desired_cursor_decorations_snapshot (w, Qnil);
+  w->cursor_decorations_changed_p = false;
+
   /* If the update wasn't interrupted, this window has been
      completely updated.  */
   w->must_be_updated_p = false;

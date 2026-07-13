@@ -4358,6 +4358,15 @@ set_window_buffer (Lisp_Object window, Lisp_Object buffer,
   specpdl_ref count = SPECPDL_INDEX ();
   bool samebuf = EQ (buffer, w->contents);
 
+  /* A pending cursor snapshot describes the previously displayed buffer.
+     Retain the displayed snapshot until the full buffer update removes it.  */
+  if (!samebuf)
+    {
+      wset_desired_cursor_decorations_snapshot (w, Qnil);
+      if (!NILP (w->cursor_decorations_snapshot))
+	w->cursor_decorations_changed_p = true;
+    }
+
   /* It's never OK to assign WINDOW a dead buffer.  */
   eassert (BUFFER_LIVE_P (b));
 
@@ -4444,6 +4453,68 @@ set_window_buffer (Lisp_Object window, Lisp_Object buffer,
     FRAME_WINDOW_CHANGE (XFRAME (w->frame)) = true;
 
   unbind_to (count, Qnil);
+}
+
+DEFUN ("multi-cursor--set-redisplay-snapshot",
+       Fmulti_cursor__set_redisplay_snapshot,
+       Smulti_cursor__set_redisplay_snapshot, 2, 2, 0,
+       doc: /* Publish SNAPSHOT for secondary cursors in WINDOW.
+
+This is an internal interface used by `multi-cursor.el'.  SNAPSHOT is nil,
+or a flat vector beginning with WINDOW's buffer and its character-change
+tick, followed by sorted cursor records of five elements each.  */)
+  (Lisp_Object window, Lisp_Object snapshot)
+{
+  CHECK_LIVE_WINDOW (window);
+  struct window *w = XWINDOW (window);
+
+  if (!NILP (snapshot))
+    {
+      CHECK_VECTOR (snapshot);
+      ptrdiff_t size = ASIZE (snapshot);
+      if (size < 2 || (size - 2) % 5 != 0)
+	xsignal1 (Qwrong_type_argument, snapshot);
+      if (!EQ (window, selected_window)
+	  || !EQ (AREF (snapshot, 0), w->contents)
+	  || NILP (Fequal (AREF (snapshot, 1),
+			   Fbuffer_chars_modified_tick (w->contents))))
+	xsignal1 (Qargs_out_of_range, snapshot);
+
+      struct buffer *buffer = XBUFFER (w->contents);
+      ptrdiff_t previous_point = -1;
+      for (ptrdiff_t i = 2; i < size; i += 5)
+	{
+	  Lisp_Object id = AREF (snapshot, i);
+	  Lisp_Object point = AREF (snapshot, i + 1);
+	  Lisp_Object mark = AREF (snapshot, i + 2);
+	  Lisp_Object active = AREF (snapshot, i + 3);
+	  Lisp_Object direction = AREF (snapshot, i + 4);
+
+	  if (!FIXNATP (id) || !FIXNATP (point)
+	      || XFIXNAT (point) < BUF_BEGV (buffer)
+	      || XFIXNAT (point) > BUF_ZV (buffer)
+	      || XFIXNAT (point) < previous_point
+	      || !(NILP (mark)
+		   || (FIXNATP (mark)
+		       && XFIXNAT (mark) >= BUF_BEGV (buffer)
+		       && XFIXNAT (mark) <= BUF_ZV (buffer)))
+	      || !(NILP (active) || EQ (active, Qt))
+	      || !(NILP (direction)
+		   || EQ (direction, Qmulti_cursor_forward)
+		   || EQ (direction, Qmulti_cursor_backward)))
+	    xsignal1 (Qargs_out_of_range, snapshot);
+	  previous_point = XFIXNAT (point);
+	}
+    }
+
+  if (NILP (Fequal (snapshot, w->cursor_decorations_snapshot)))
+    w->cursor_decorations_changed_p = true;
+  wset_desired_cursor_decorations_snapshot (w, snapshot);
+
+  if (w->cursor_decorations_changed_p)
+    wset_redisplay (w);
+
+  return Qnil;
 }
 
 DEFUN ("set-window-buffer", Fset_window_buffer, Sset_window_buffer, 2, 3, 0,
@@ -9283,6 +9354,8 @@ init_window (void)
 void
 syms_of_window (void)
 {
+  DEFSYM (Qmulti_cursor_forward, "forward");
+  DEFSYM (Qmulti_cursor_backward, "backward");
   DEFSYM (Qscroll_up, "scroll-up");
   DEFSYM (Qscroll_down, "scroll-down");
   DEFSYM (Qscroll_command, "scroll-command");
@@ -9756,6 +9829,7 @@ name to `'ignore'.  */);
   defsubr (&Sdelete_window_internal);
   defsubr (&Sresize_mini_window_internal);
   defsubr (&Sset_window_buffer);
+  defsubr (&Smulti_cursor__set_redisplay_snapshot);
   defsubr (&Srun_window_configuration_change_hook);
   defsubr (&Srun_window_scroll_functions);
   defsubr (&Sselect_window);

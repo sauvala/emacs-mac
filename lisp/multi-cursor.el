@@ -67,6 +67,18 @@ operation before changing the buffer or cursor session."
 (defvar-local multi-cursor--next-id 0
   "Next secondary cursor identifier in the current buffer.")
 
+(defvar-local multi-cursor--redisplay-snapshot nil
+  "Last immutable snapshot built for redisplay in the current buffer.")
+
+(defvar-local multi-cursor--redisplay-snapshot-tick nil
+  "Character-change tick represented by the cached redisplay snapshot.")
+
+(defvar-local multi-cursor--redisplay-snapshot-dirty-p t
+  "Non-nil means the cached redisplay snapshot must be rebuilt.")
+
+(defvar multi-cursor--redisplay-window nil
+  "Window which most recently received a secondary-cursor snapshot.")
+
 (defconst multi-cursor--movement-commands
   '(forward-char backward-char
     forward-word backward-word
@@ -158,6 +170,7 @@ dispatcher without the pre-command hook modifying the primary region."
 
 (defun multi-cursor--release-cursor (cursor)
   "Detach every marker owned by CURSOR."
+  (setq multi-cursor--redisplay-snapshot-dirty-p t)
   (set-marker (multi-cursor--cursor-point cursor) nil)
   (when (multi-cursor--cursor-mark cursor)
     (set-marker (multi-cursor--cursor-mark cursor) nil)))
@@ -216,7 +229,8 @@ dispatcher without the pre-command hook modifying the primary region."
           (multi-cursor--release-cursor cursor)
         (push cursor normalized)
         (setq previous cursor)))
-    (setq multi-cursor--cursors (nreverse normalized))))
+    (setq multi-cursor--cursors (nreverse normalized)
+          multi-cursor--redisplay-snapshot-dirty-p t)))
 
 (defun multi-cursor--normalized-cursors ()
   "Normalize and return the current buffer's secondary cursor records."
@@ -227,6 +241,49 @@ dispatcher without the pre-command hook modifying the primary region."
   "Return a non-destructively sorted copy of the secondary cursor list."
   (sort (copy-sequence multi-cursor--cursors)
         #'multi-cursor--cursor-less-p))
+
+(defun multi-cursor--publish-redisplay-snapshot (window)
+  "Publish an immutable secondary-cursor snapshot for selected WINDOW.
+
+The flat vector contains the buffer and its character-change tick followed
+by records of ID, point, mark, active state, and direction.  Publication
+does not ask whether individual cursors are visible; generic redisplay will
+resolve geometry in a later implementation stage."
+  (when (eq window (selected-window))
+    (when (and (window-live-p multi-cursor--redisplay-window)
+               (not (eq multi-cursor--redisplay-window window)))
+      (multi-cursor--set-redisplay-snapshot
+       multi-cursor--redisplay-window nil))
+    (setq multi-cursor--redisplay-window window)
+    (let ((tick (buffer-chars-modified-tick)))
+      (when (or multi-cursor--redisplay-snapshot-dirty-p
+                (not (equal tick multi-cursor--redisplay-snapshot-tick)))
+        (setq multi-cursor--redisplay-snapshot
+              (when (and multi-cursor-mode multi-cursor--cursors)
+                (vconcat
+                 (list (current-buffer) tick)
+                 (mapcan
+                  (lambda (cursor)
+                    (list
+                     (multi-cursor--cursor-id cursor)
+                     (marker-position (multi-cursor--cursor-point cursor))
+                     (and (multi-cursor--cursor-mark cursor)
+                          (marker-position
+                           (multi-cursor--cursor-mark cursor)))
+                     (and (multi-cursor--cursor-mark-active cursor) t)
+                     (multi-cursor--cursor-direction cursor)))
+                  (multi-cursor--sorted-cursors))))
+              multi-cursor--redisplay-snapshot-tick tick
+              multi-cursor--redisplay-snapshot-dirty-p nil))
+      (multi-cursor--set-redisplay-snapshot
+       window multi-cursor--redisplay-snapshot))))
+
+(defun multi-cursor--mark-redisplay-snapshot-dirty (&rest _ignored)
+  "Mark the current buffer's published cursor positions stale."
+  (setq multi-cursor--redisplay-snapshot-dirty-p t))
+
+(add-hook 'pre-redisplay-functions
+          #'multi-cursor--publish-redisplay-snapshot)
 
 (defun multi-cursor--add-cursor (point mark mark-active)
   "Add a secondary cursor at POINT with MARK and MARK-ACTIVE.
@@ -265,6 +322,7 @@ cursor state reuses the existing cursor record."
           :mark-active active
           :direction direction)))
     (push cursor multi-cursor--cursors)
+    (setq multi-cursor--redisplay-snapshot-dirty-p t)
     cursor))
 
 (defun multi-cursor--position (value name)
@@ -729,6 +787,7 @@ command has no global binding by default."
 
 (defun multi-cursor--set-record-state (cursor point mark active goal-column)
   "Set CURSOR to POINT, MARK, ACTIVE, and GOAL-COLUMN."
+  (setq multi-cursor--redisplay-snapshot-dirty-p t)
   (set-marker (multi-cursor--cursor-point cursor) point (current-buffer))
   (if mark
       (if (multi-cursor--cursor-mark cursor)
@@ -1265,13 +1324,18 @@ the variable `command-history'."
   (remove-hook 'pre-command-hook
                #'multi-cursor--record-restriction-before-command t)
   (remove-hook 'post-command-hook
-               #'multi-cursor--maybe-remove-inaccessible-cursors t))
+               #'multi-cursor--maybe-remove-inaccessible-cursors t)
+  (remove-hook 'after-change-functions
+               #'multi-cursor--mark-redisplay-snapshot-dirty t))
 
 (defun multi-cursor--clear ()
   "Release all cursor records and reset the current buffer's session."
   (mapc #'multi-cursor--release-cursor multi-cursor--cursors)
   (setq multi-cursor--cursors nil
-        multi-cursor--next-id 0)
+        multi-cursor--next-id 0
+        multi-cursor--redisplay-snapshot nil
+        multi-cursor--redisplay-snapshot-tick nil
+        multi-cursor--redisplay-snapshot-dirty-p t)
   (multi-cursor--remove-lifecycle-hooks))
 
 (defun multi-cursor--end-session ()
@@ -1285,13 +1349,16 @@ the variable `command-history'."
     (setq-local multi-cursor--cursors nil))
   (unless (local-variable-p 'multi-cursor--next-id)
     (setq-local multi-cursor--next-id 0))
+  (setq multi-cursor--redisplay-snapshot-dirty-p t)
   (add-hook 'kill-buffer-hook #'multi-cursor--end-session nil t)
   (add-hook 'before-revert-hook #'multi-cursor--end-session nil t)
   (add-hook 'change-major-mode-hook #'multi-cursor--end-session nil t)
   (add-hook 'pre-command-hook
             #'multi-cursor--record-restriction-before-command nil t)
   (add-hook 'post-command-hook
-            #'multi-cursor--maybe-remove-inaccessible-cursors nil t))
+            #'multi-cursor--maybe-remove-inaccessible-cursors nil t)
+  (add-hook 'after-change-functions
+            #'multi-cursor--mark-redisplay-snapshot-dirty nil t))
 
 ;;;###autoload
 (define-minor-mode multi-cursor-mode

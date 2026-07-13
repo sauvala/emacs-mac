@@ -1434,6 +1434,132 @@
     (undo 1)
     (should (equal (buffer-string) "abcd"))))
 
+(ert-deftest multi-cursor-redisplay-publisher-reuses-clean-snapshot ()
+  (with-temp-buffer
+    (insert "abcdef")
+    (goto-char 1)
+    (multi-cursor-add-at-point 4)
+    (save-window-excursion
+      (switch-to-buffer (current-buffer))
+      (let ((multi-cursor--redisplay-window nil)
+            snapshots)
+        (cl-letf (((symbol-function 'multi-cursor--set-redisplay-snapshot)
+                   (lambda (_window snapshot) (push snapshot snapshots))))
+          (multi-cursor--publish-redisplay-snapshot (selected-window))
+          (multi-cursor--publish-redisplay-snapshot (selected-window)))
+        (should (= (length snapshots) 2))
+        (should (eq (car snapshots) (cadr snapshots)))))))
+
+(ert-deftest multi-cursor-redisplay-publisher-rebuilds-stale-snapshot ()
+  (with-temp-buffer
+    (insert "abcdef")
+    (goto-char 1)
+    (multi-cursor-add-at-point 4)
+    (save-window-excursion
+      (switch-to-buffer (current-buffer))
+      (let ((multi-cursor--redisplay-window nil)
+            snapshots)
+        (cl-letf (((symbol-function 'multi-cursor--set-redisplay-snapshot)
+                   (lambda (_window snapshot) (push snapshot snapshots))))
+          (multi-cursor--publish-redisplay-snapshot (selected-window))
+          (command-execute 'forward-char)
+          (multi-cursor--publish-redisplay-snapshot (selected-window))
+          (insert "X")
+          (multi-cursor--publish-redisplay-snapshot (selected-window)))
+        (setq snapshots (nreverse snapshots))
+        (should (= (length snapshots) 3))
+        (should-not (eq (nth 0 snapshots) (nth 1 snapshots)))
+        (should-not (eq (nth 1 snapshots) (nth 2 snapshots)))
+        (should-not (equal (nth 0 snapshots) (nth 1 snapshots)))
+        (should-not (equal (aref (nth 1 snapshots) 1)
+                           (aref (nth 2 snapshots) 1)))))))
+
+(ert-deftest multi-cursor-redisplay-publisher-clears-on-mode-exit ()
+  (with-temp-buffer
+    (insert "abcdef")
+    (goto-char 1)
+    (multi-cursor-add-at-point 4)
+    (save-window-excursion
+      (switch-to-buffer (current-buffer))
+      (let ((multi-cursor--redisplay-window nil)
+            snapshots)
+        (cl-letf (((symbol-function 'multi-cursor--set-redisplay-snapshot)
+                   (lambda (_window snapshot) (push snapshot snapshots))))
+          (multi-cursor--publish-redisplay-snapshot (selected-window))
+          (multi-cursor-mode -1)
+          (multi-cursor--publish-redisplay-snapshot (selected-window)))
+        (should (= (length snapshots) 2))
+        (should (vectorp (cadr snapshots)))
+        (should-not (car snapshots))))))
+
+(ert-deftest multi-cursor-redisplay-publisher-clears-previous-window ()
+  (let ((first-buffer (generate-new-buffer " *multi-cursor-first*"))
+        (second-buffer (generate-new-buffer " *multi-cursor-second*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer first-buffer)
+          (with-current-buffer first-buffer
+            (insert "first")
+            (goto-char 1)
+            (multi-cursor-add-at-point 3))
+          (let* ((first-window (selected-window))
+                 (second-window (split-window-right))
+                 (multi-cursor--redisplay-window nil)
+                 calls)
+            (set-window-buffer second-window second-buffer)
+            (with-current-buffer second-buffer
+              (insert "second")
+              (goto-char 1)
+              (multi-cursor-add-at-point 3))
+            (cl-letf
+                (((symbol-function 'multi-cursor--set-redisplay-snapshot)
+                  (lambda (window snapshot)
+                    (push (list window snapshot) calls))))
+              (select-window first-window)
+              (multi-cursor--publish-redisplay-snapshot first-window)
+              (select-window second-window)
+              (multi-cursor--publish-redisplay-snapshot second-window))
+            (setq calls (nreverse calls))
+            (should (= (length calls) 3))
+            (should (eq (caar calls) first-window))
+            (should (vectorp (cadar calls)))
+            (should (eq (car (nth 1 calls)) first-window))
+            (should-not (cadr (nth 1 calls)))
+            (should (eq (car (nth 2 calls)) second-window))
+            (should (vectorp (cadr (nth 2 calls))))))
+      (kill-buffer first-buffer)
+      (kill-buffer second-buffer))))
+
+(ert-deftest multi-cursor-redisplay-primitive-rejects-invalid-snapshots ()
+  (unless (and (fboundp 'multi-cursor--set-redisplay-snapshot)
+               (subrp (symbol-function
+                       'multi-cursor--set-redisplay-snapshot)))
+    (ert-skip "Fresh native multiple-cursor test binary is unavailable"))
+  (with-temp-buffer
+    (insert "abcdef")
+    (save-window-excursion
+      (switch-to-buffer (current-buffer))
+      (let* ((window (selected-window))
+             (buffer (current-buffer))
+             (tick (buffer-chars-modified-tick))
+             (outside (1+ (point-max))))
+        (dolist (snapshot
+                 (list '(not a vector)
+                       []
+                       (vector buffer (1- tick) 1 2 nil nil nil)
+                       (vector buffer tick 1 4 nil nil nil
+                               2 2 nil nil nil)
+                       (vector buffer tick 1 outside nil nil nil)
+                       (vector buffer tick 1 2 nil nil 'sideways)))
+          (should-error
+           (multi-cursor--set-redisplay-snapshot window snapshot)))
+        (let ((other-window (split-window-right)))
+          (should-error
+           (multi-cursor--set-redisplay-snapshot
+            other-window
+            (vector buffer tick 1 2 nil nil nil))))))))
+
 (provide 'multi-cursor-tests)
 
 ;;; multi-cursor-tests.el ends here
