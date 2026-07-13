@@ -53,6 +53,14 @@ operation before changing the buffer or cursor session."
                (:constructor multi-cursor--cursor-create))
   id point mark mark-active direction goal-column last-yank)
 
+(cl-defstruct (multi-cursor--edit-state
+               (:constructor multi-cursor--edit-state-create))
+  cursor id primary point mark active direction goal-column last-yank)
+
+(cl-defstruct (multi-cursor--edit
+               (:constructor multi-cursor--edit-create))
+  beg end string survivor members)
+
 (defvar-local multi-cursor--cursors nil
   "Secondary cursor records owned by the current buffer.")
 
@@ -764,6 +772,329 @@ command has no global binding by default."
   (multi-cursor--set-record-state
    cursor (nth 0 state) (nth 1 state) (nth 2 state) (nth 3 state)))
 
+(defun multi-cursor--snapshot-edit-states ()
+  "Return detached edit snapshots for the primary and secondary cursors."
+  (cons
+   (multi-cursor--edit-state-create
+    :id 0 :primary t :point (point) :mark (mark t)
+    :active (and mark-active t) :goal-column temporary-goal-column)
+   (mapcar
+    (lambda (cursor)
+      (multi-cursor--edit-state-create
+       :cursor cursor :id (multi-cursor--cursor-id cursor)
+       :point (marker-position (multi-cursor--cursor-point cursor))
+       :mark (and (multi-cursor--cursor-mark cursor)
+                  (marker-position (multi-cursor--cursor-mark cursor)))
+       :active (and (multi-cursor--cursor-mark-active cursor) t)
+       :direction (multi-cursor--cursor-direction cursor)
+       :goal-column (multi-cursor--cursor-goal-column cursor)
+       :last-yank (multi-cursor--cursor-last-yank cursor)))
+    (multi-cursor--normalized-cursors))))
+
+(defun multi-cursor--restore-edit-states (states cursors next-id)
+  "Restore cursor STATES, secondary CURSORS, and NEXT-ID."
+  (let ((primary (car states)))
+    (goto-char (multi-cursor--edit-state-point primary))
+    (set-marker (mark-marker) (multi-cursor--edit-state-mark primary)
+                (and (multi-cursor--edit-state-mark primary) (current-buffer)))
+    (setq mark-active (multi-cursor--edit-state-active primary)
+          temporary-goal-column
+          (multi-cursor--edit-state-goal-column primary)))
+  (dolist (cursor multi-cursor--cursors)
+    (unless (memq cursor cursors)
+      (multi-cursor--release-cursor cursor)))
+  (setq multi-cursor--cursors cursors
+        multi-cursor--next-id next-id)
+  (dolist (state (cdr states))
+    (let ((cursor (multi-cursor--edit-state-cursor state)))
+      (multi-cursor--set-record-state
+       cursor (multi-cursor--edit-state-point state)
+       (multi-cursor--edit-state-mark state)
+       (multi-cursor--edit-state-active state)
+       (multi-cursor--edit-state-goal-column state))
+      (setf (multi-cursor--cursor-direction cursor)
+            (multi-cursor--edit-state-direction state)
+            (multi-cursor--cursor-last-yank cursor)
+            (multi-cursor--edit-state-last-yank state)))))
+
+(defun multi-cursor--detach-edit-markers (states)
+  "Detach the markers represented by edit STATES before changing text."
+  (set-marker (mark-marker) nil)
+  (setq mark-active nil)
+  (dolist (state (cdr states))
+    (multi-cursor--release-cursor (multi-cursor--edit-state-cursor state))))
+
+(defun multi-cursor--step-delete-chars (position count)
+  "Return the position COUNT characters from POSITION for raw deletion.
+
+Deleting outwards at an exact accessible boundary is a per-cursor no-op.
+Otherwise an overshooting count rejects the entire batch.  These Task 7
+handlers intentionally match the raw-character contracts of `delete-char'
+and `delete-backward-char'; grapheme-aware `delete-forward-char' remains a
+separate command and is not registered yet."
+  (let ((target (+ position count)))
+    (cond
+     ((and (> count 0) (= position (point-max))) position)
+     ((and (< count 0) (= position (point-min))) position)
+     ((> target (point-max)) (signal 'end-of-buffer nil))
+     ((< target (point-min)) (signal 'beginning-of-buffer nil))
+     (t target))))
+
+(defun multi-cursor--read-only-value-blocks-p (value)
+  "Return non-nil when read-only VALUE is not inhibited."
+  (and value
+       (not (eq inhibit-read-only t))
+       (not (and (listp inhibit-read-only)
+                 (memq value inhibit-read-only)))))
+
+(defun multi-cursor--preflight-edit-range (beg end origin target)
+  "Reject an inaccessible, cross-field, or read-only BEG..END.
+
+ORIGIN and TARGET retain the direction of the edit for field checks."
+  (unless (<= (point-min) beg end (point-max))
+    (user-error "Multiple-cursor edit is outside the accessible buffer"))
+  (unless (= target (constrain-to-field target origin nil nil nil))
+    (user-error "Multiple-cursor edit crosses a field boundary"))
+  (barf-if-buffer-read-only)
+  (let ((position beg)
+        blocked)
+    ;; `get-char-property' includes overlays.  The primitive remains the
+    ;; authority for boundary stickiness and races with modification hooks.
+    (while (and (not blocked) (< position end))
+      (when (and (= (% position 128) 0) quit-flag)
+        (signal 'quit nil))
+      (setq blocked
+            (multi-cursor--read-only-value-blocks-p
+             (get-char-property position 'read-only))
+            position (1+ position)))
+    (when blocked
+      (signal 'text-read-only (list blocked)))))
+
+(defun multi-cursor--edit-survivor-less-p (left right)
+  "Return non-nil when edit state LEFT should survive before RIGHT."
+  (or (multi-cursor--edit-state-primary left)
+      (and (not (multi-cursor--edit-state-primary right))
+           (< (multi-cursor--edit-state-id left)
+              (multi-cursor--edit-state-id right)))))
+
+(defun multi-cursor--merge-edits (edits)
+  "Merge touching or overlapping EDITS in deterministic buffer order."
+  (let (result)
+    (dolist (edit (sort edits
+                        (lambda (left right)
+                          (if (/= (multi-cursor--edit-beg left)
+                                  (multi-cursor--edit-beg right))
+                              (< (multi-cursor--edit-beg left)
+                                 (multi-cursor--edit-beg right))
+                            (< (multi-cursor--edit-state-id
+                                (multi-cursor--edit-survivor left))
+                               (multi-cursor--edit-state-id
+                                (multi-cursor--edit-survivor right)))))))
+      (let ((previous (car result)))
+        (if (and previous
+                 (<= (multi-cursor--edit-beg edit)
+                     (multi-cursor--edit-end previous)))
+            (progn
+              (setf (multi-cursor--edit-end previous)
+                    (max (multi-cursor--edit-end previous)
+                         (multi-cursor--edit-end edit))
+                    (multi-cursor--edit-members previous)
+                    (nconc (multi-cursor--edit-members previous)
+                           (multi-cursor--edit-members edit)))
+              (when (multi-cursor--edit-survivor-less-p
+                     (multi-cursor--edit-survivor edit)
+                     (multi-cursor--edit-survivor previous))
+                (setf (multi-cursor--edit-survivor previous)
+                      (multi-cursor--edit-survivor edit))))
+          (push edit result))))
+    (nreverse result)))
+
+(defun multi-cursor--state-edit (state command argument insertion)
+  "Return the raw edit for STATE under COMMAND and ARGUMENT.
+
+INSERTION is the string used by `self-insert-command'."
+  (let* ((point (multi-cursor--edit-state-point state))
+         (mark (multi-cursor--edit-state-mark state))
+         (active (and (multi-cursor--edit-state-active state)
+                      mark (/= point mark)))
+         beg end replacement)
+    (if active
+        (setq beg (min point mark)
+              end (max point mark)
+              replacement (if (eq command 'self-insert-command)
+                              insertion ""))
+      (pcase command
+        ('self-insert-command
+         (setq beg point end point replacement insertion))
+        ('delete-char
+         (let ((target (multi-cursor--step-delete-chars point argument)))
+           (setq beg (min point target) end (max point target)
+                 replacement "")))
+        ('delete-backward-char
+         (let ((target (multi-cursor--step-delete-chars point (- argument))))
+           (setq beg (min point target) end (max point target)
+                 replacement "")))))
+    (multi-cursor--preflight-edit-range beg end point
+                                        (if (= point beg) end beg))
+    (multi-cursor--edit-create
+     :beg beg :end end :string replacement :survivor state
+     :members (list state))))
+
+(defun multi-cursor--remap-edit-position (position groups positions)
+  "Remap detached marker POSITION through GROUPS and POSITIONS.
+
+GROUPS is an ascending vector of disjoint edits and POSITIONS is the
+parallel vector of their final ends."
+  (let ((low 0)
+        (high (length groups)))
+    ;; Find the first edit whose original end is at or after POSITION.
+    (while (< low high)
+      (let ((middle (/ (+ low high) 2)))
+        (if (< (multi-cursor--edit-end (aref groups middle)) position)
+            (setq low (1+ middle))
+          (setq high middle))))
+    (if (= low (length groups))
+        (if (= low 0)
+            position
+          (+ position (- (aref positions (1- low))
+                         (multi-cursor--edit-end
+                          (aref groups (1- low))))))
+      (let* ((group (aref groups low))
+             (beg (multi-cursor--edit-beg group))
+             (end (multi-cursor--edit-end group))
+             (final-end (aref positions low))
+             (final-beg (- final-end
+                           (length (multi-cursor--edit-string group)))))
+        (cond
+         ((< position beg) (+ position (- final-beg beg)))
+         ((= position beg) final-beg)
+         ((<= position end) final-end)
+         (t (error "Invalid multiple-cursor edit transform")))))))
+
+(defun multi-cursor--install-edit-results (groups positions states)
+  "Install POSITIONS for merged edit GROUPS, releasing losing STATES."
+  (let ((group-vector (vconcat groups))
+        survivors)
+    (cl-mapc
+     (lambda (group position)
+       (let ((survivor (multi-cursor--edit-survivor group)))
+         (if (multi-cursor--edit-state-primary survivor)
+             (progn
+               (goto-char position)
+               (set-marker
+                (mark-marker)
+                (and (multi-cursor--edit-state-mark survivor)
+                     (multi-cursor--remap-edit-position
+                      (multi-cursor--edit-state-mark survivor)
+                      group-vector positions))
+                (and (multi-cursor--edit-state-mark survivor)
+                     (current-buffer)))
+               (setq mark-active nil temporary-goal-column nil))
+           (let ((cursor (multi-cursor--edit-state-cursor survivor)))
+             (multi-cursor--set-record-state
+              cursor position
+              (and (multi-cursor--edit-state-mark survivor)
+                   (multi-cursor--remap-edit-position
+                    (multi-cursor--edit-state-mark survivor)
+                    group-vector positions))
+              nil nil)
+             (push cursor survivors)))))
+     groups (append positions nil))
+    (dolist (state (cdr states))
+      (unless (memq (multi-cursor--edit-state-cursor state) survivors)
+        (multi-cursor--release-cursor
+         (multi-cursor--edit-state-cursor state))))
+    (setq multi-cursor--cursors (nreverse survivors))
+    (multi-cursor--normalize)))
+
+(defun multi-cursor--batch-edit
+    (command prefix _keys record-flag _special)
+  "Apply supported editing COMMAND with PREFIX once at every native cursor.
+
+When RECORD-FLAG is non-nil, add the single logical invocation to command
+history."
+  (when (and prefix (memq command '(delete-char delete-backward-char)))
+    (user-error "Prefix deletion is not multiple-cursor safe yet"))
+  (let* ((argument (prefix-numeric-value prefix))
+         (insertion
+          (when (eq command 'self-insert-command)
+            (unless (characterp last-command-event)
+              (user-error "Self insertion requires a character event"))
+            (when (< argument 0)
+              (user-error "Negative repetition argument"))
+            (make-string argument last-command-event))))
+    (unless (memq command
+                  '(self-insert-command delete-char delete-backward-char))
+      (user-error "%S has no native multiple-cursor batch editor" command))
+    (when (and (not (eq command 'self-insert-command))
+               (not (integerp argument)))
+      (signal 'wrong-type-argument (list 'integerp argument)))
+    (unless (and (= argument 0)
+                 (not (and mark-active (mark t) (/= (point) (mark t))))
+                 (not (cl-some
+                       (lambda (cursor)
+                         (and (multi-cursor--cursor-mark-active cursor)
+                              (multi-cursor--cursor-mark cursor)
+                              (/= (marker-position
+                                   (multi-cursor--cursor-point cursor))
+                                  (marker-position
+                                   (multi-cursor--cursor-mark cursor)))))
+                       multi-cursor--cursors)))
+      (let* ((states (multi-cursor--snapshot-edit-states))
+             (original-cursors (copy-sequence multi-cursor--cursors))
+             (original-next-id multi-cursor--next-id)
+             (buffer (current-buffer))
+             (restriction (cons (point-min) (point-max)))
+             (edits (mapcar (lambda (state)
+                              (multi-cursor--state-edit
+                               state command argument insertion))
+                            states))
+             (groups (multi-cursor--merge-edits edits))
+             (vector
+              (vconcat
+               (mapcar (lambda (edit)
+                         (vector (multi-cursor--edit-beg edit)
+                                 (multi-cursor--edit-end edit)
+                                 (multi-cursor--edit-string edit)))
+                       groups)))
+             positions completed)
+        (multi-cursor--detach-edit-markers states)
+        (save-current-buffer
+          (unwind-protect
+              (progn
+                (atomic-change-group
+                  (setq positions (multi-cursor--apply-edits vector))
+                  (unless (eq (current-buffer) buffer)
+                    (error "Modification hook changed the current buffer"))
+                  (unless
+                      (equal
+                       (cons
+                        (car restriction)
+                        (+ (cdr restriction)
+                           (cl-loop
+                            for group in groups
+                            sum (- (length (multi-cursor--edit-string group))
+                                   (- (multi-cursor--edit-end group)
+                                      (multi-cursor--edit-beg group))))))
+                       (cons (point-min) (point-max)))
+                    (error "Modification hook changed the buffer restriction"))
+                  (unless (and (equal multi-cursor--cursors original-cursors)
+                               (= multi-cursor--next-id original-next-id))
+                    (error "Modification hook changed the cursor session"))
+                  (multi-cursor--install-edit-results groups positions states))
+                (setq completed t))
+            (unless completed
+              (set-buffer buffer)
+              (multi-cursor--restore-edit-states
+               states original-cursors original-next-id))))))
+    (when record-flag
+      (add-to-history
+       'command-history
+       (if (eq command 'self-insert-command)
+           (list command argument last-command-event)
+         (list command argument))
+       nil t))))
+
 (defun multi-cursor--invoke-movement (command argument canonical-last-command)
   "Invoke vetted movement COMMAND once, accepting boundary clamping.
 
@@ -1005,6 +1336,9 @@ the variable `command-history'."
 
 (dolist (command multi-cursor--movement-commands)
   (multi-cursor-register-command command 'broadcast-movement))
+
+(dolist (command '(self-insert-command delete-char delete-backward-char))
+  (multi-cursor-register-command command 'batch-edit #'multi-cursor--batch-edit))
 
 (dolist (command '(undo undo-only undo-redo
                    keyboard-quit execute-extended-command execute-kbd-macro
