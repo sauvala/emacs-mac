@@ -176,7 +176,7 @@
 (ert-deftest multi-cursor-source-decoration-painter-has-null-safe-seam ()
   "An empty cache or absent backend painter should be a safe no-op."
   (let ((body (multi-cursor-source-tests--function-body
-               "src/dispnew.c" "draw_window_cursor_decorations")))
+               "src/dispnew.c" "paint_window_cursor_decorations")))
     (should
      (string-match-p
       "cursor_decorations?_count[[:space:]]*==[[:space:]]*0" body))
@@ -388,6 +388,131 @@
                      "this_line_start_x"
                      "delta_bytes"))
       (should (string-match-p (concat "\\_<" state "\\_>") body)))))
+
+(ert-deftest multi-cursor-source-associates-decoration-rows-monotonically ()
+  "Sorted cursor positions should share a forward base-row scan."
+  (let ((body (multi-cursor-source-tests--function-body
+               "src/xdisp.c" "resolve_window_cursor_decorations")))
+    (should
+     (string-match-p
+      "for[[:space:]\n]*(ptrdiff_t i = 2;"
+      body))
+    (should (string-match-p (regexp-quote "i += 5") body))
+    (should
+     (string-match-p
+      "target[[:space:]]*=[[:space:]]*XFIXNAT[[:space:]\n]*(AREF"
+      body))
+    (should (string-match-p "resolve_cursor_pos_from_row" body))
+    (should (string-match-p (regexp-quote "++row") body))
+    (should-not (string-match-p "--[[:space:]]*row\\_>" body))
+    (should-not (string-match-p "pos_visible_in_window_p" body))
+    (let ((reset (string-match
+                  (concat "desired_cursor_decorations_count"
+                          "[[:space:]]*=[[:space:]]*0")
+                  body))
+          (scan (string-match "resolve_cursor_pos_from_row" body)))
+      (should reset)
+      (should scan)
+      (should (< reset scan)))))
+
+(ert-deftest multi-cursor-source-rejects-stale-decoration-cache-input ()
+  "Cache population should reject snapshots stale for buffer or tick."
+  (let ((body (multi-cursor-source-tests--function-body
+               "src/xdisp.c" "resolve_window_cursor_decorations")))
+    (should (string-match-p "desired_cursor_decorations_valid_p" body))
+    (should
+     (string-match-p
+      "EQ[[:space:]\n]*(AREF[[:space:]\n]*(snapshot,[[:space:]]*0)"
+      body))
+    (should (string-match-p "Fbuffer_chars_modified_tick" body))
+    (let ((validation (string-match "Fbuffer_chars_modified_tick" body))
+          (scan (string-match "resolve_cursor_pos_from_row" body))
+          (valid (string-match
+                  (concat "desired_cursor_decorations_valid_p"
+                          "[[:space:]]*=[[:space:]]*true")
+                  body (string-match "for[[:space:]\n]*(ptrdiff_t i" body))))
+      (should validation)
+      (should scan)
+      (should valid)
+      (should (< validation scan))
+      (should (< scan valid)))))
+
+(ert-deftest multi-cursor-source-damages-old-decorations-before-row-reuse ()
+  "Old decoration pixels should be erased before row reuse."
+  (let* ((update (multi-cursor-source-tests--function-body
+                  "src/dispnew.c" "update_window"))
+         (damage-call (string-match "damage_window_cursor_decorations" update))
+         (scroll (string-match "scrolling_window" update))
+         (damage (multi-cursor-source-tests--function-body
+                  "src/dispnew.c" "damage_window_cursor_decorations")))
+    (should damage-call)
+    (should scroll)
+    (should (< damage-call scroll))
+    (should
+     (string-match-p
+      "paint_window_cursor_decorations[[:space:]\n]*(w,[[:space:]]*false)"
+      damage))
+    (let ((paint (multi-cursor-source-tests--function-body
+                  "src/dispnew.c" "paint_window_cursor_decorations")))
+      (should (string-match-p "cursor_decorations_count" paint))
+      (should
+       (string-match-p
+        "\\.on[[:space:]]*=[[:space:]]*on_p[[:space:]]*&&"
+        paint)))))
+
+(ert-deftest multi-cursor-source-promotes-valid-decoration-cache-atomically ()
+  "Completed glyph repair should publish one valid cache transaction."
+  (let* ((update (multi-cursor-source-tests--function-body
+                  "src/dispnew.c" "update_window"))
+         (repair (string-match "set_window_cursor_after_update" update))
+         (publish (string-match "publish_window_cursor_decorations" update))
+         (gui-end (string-match "gui_update_window_end" update))
+         (snapshot (and gui-end
+                        (string-match
+                         "wset_cursor_decorations_snapshot" update gui-end)))
+         (body (multi-cursor-source-tests--function-body
+                "src/dispnew.c" "publish_window_cursor_decorations")))
+    (should repair)
+    (should publish)
+    (should gui-end)
+    (should snapshot)
+    (should (< repair publish))
+    (should (< publish gui-end))
+    (should (< gui-end snapshot))
+    (should (string-match-p "desired_cursor_decorations_valid_p" body))
+    (dolist (field '("cursor_decorations"
+                     "cursor_decorations_count"
+                     "cursor_decorations_capacity"))
+      (should
+       (string-match-p
+        (concat "w->[[:space:]]*" field
+                "[[:space:]]*=[[:space:]]*w->[[:space:]]*desired_"
+                field)
+        body)))
+    (should
+     (string-match-p
+      "desired_cursor_decorations_count[[:space:]]*=[[:space:]]*0"
+      body))))
+
+(ert-deftest multi-cursor-source-stale-cache-remains-pending ()
+  "A stale desired cache should neither publish nor clear change state."
+  (let* ((body (multi-cursor-source-tests--function-body
+                "src/dispnew.c" "update_window"))
+         (publish (string-match "publish_window_cursor_decorations" body))
+         (condition (and publish
+                         (string-match
+                          "if[[:space:]\n]*(cursor_decorations_published_p)"
+                          body publish)))
+         (clear (and condition
+                     (string-match
+                      (concat "cursor_decorations_changed_p"
+                              "[[:space:]]*=[[:space:]]*false")
+                      body condition))))
+    (should publish)
+    (should condition)
+    (should clear)
+    (should (< publish condition))
+    (should (< condition clear))))
 
 (provide 'multi-cursor-source-invariants)
 

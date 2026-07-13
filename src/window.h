@@ -238,6 +238,10 @@ struct window
     ptrdiff_t desired_cursor_decorations_count;
     ptrdiff_t desired_cursor_decorations_capacity;
 
+    /* The desired cache was resolved from a snapshot which still matches
+       the buffer displayed by the finalized current matrix.  */
+    bool desired_cursor_decorations_valid_p;
+
     /* A published snapshot differs from the last completed update.  */
     bool cursor_decorations_changed_p;
 

@@ -4362,7 +4362,12 @@ set_window_buffer (Lisp_Object window, Lisp_Object buffer,
      Retain the displayed snapshot until the full buffer update removes it.  */
   if (!samebuf)
     {
+      /* The current matrix will be replaced wholesale.  Drop geometry
+         belonging to its old buffer before W->contents changes, so no
+         teardown path validates old rows against the new buffer.  */
+      free_window_cursor_decorations (w);
       wset_desired_cursor_decorations_snapshot (w, Qnil);
+      w->desired_cursor_decorations_valid_p = false;
       if (!NILP (w->cursor_decorations_snapshot))
 	w->cursor_decorations_changed_p = true;
     }
@@ -4510,6 +4515,7 @@ tick, followed by sorted cursor records of five elements each.  */)
   if (NILP (Fequal (snapshot, w->cursor_decorations_snapshot)))
     w->cursor_decorations_changed_p = true;
   wset_desired_cursor_decorations_snapshot (w, snapshot);
+  w->desired_cursor_decorations_valid_p = false;
 
   if (w->cursor_decorations_changed_p)
     wset_redisplay (w);
@@ -4695,6 +4701,7 @@ free_window_cursor_decorations (struct window *w)
   w->desired_cursor_decorations_count = 0;
   w->cursor_decorations_capacity = 0;
   w->desired_cursor_decorations_capacity = 0;
+  w->desired_cursor_decorations_valid_p = false;
 }
 
 /* Make new window from scratch.  */

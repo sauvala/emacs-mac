@@ -95,6 +95,10 @@ static void check_matrix_pointers (struct glyph_matrix *,
 static void mirror_line_dance (struct window *, int, int, int *, char *);
 static void update_window_tree (struct window *);
 static void update_window (struct window *);
+void draw_window_cursor_decorations (struct window *);
+void resolve_window_cursor_decorations (struct window *, struct glyph_matrix *);
+static void damage_window_cursor_decorations (struct window *);
+static bool publish_window_cursor_decorations (struct window *);
 static void write_matrix (struct frame *, bool, bool);
 static void scrolling (struct frame *);
 static void set_window_cursor_after_update (struct window *);
@@ -2414,6 +2418,7 @@ free_window_matrices (struct window *w)
          centralized with matrix ownership.  */
       free_window_cursor_decorations (w);
       wset_desired_cursor_decorations_snapshot (w, Qnil);
+      w->desired_cursor_decorations_valid_p = false;
       if (!NILP (w->cursor_decorations_snapshot))
 	w->cursor_decorations_changed_p = true;
 
@@ -4292,6 +4297,88 @@ update_single_window (struct window *w)
     }
 }
 
+static void
+paint_window_cursor_decorations (struct window *w, bool on_p)
+{
+#ifdef HAVE_WINDOW_SYSTEM
+  struct frame *f = XFRAME (WINDOW_FRAME (w));
+  if (!FRAME_WINDOW_P (f))
+    return;
+  struct redisplay_interface *rif = FRAME_RIF (f);
+  if (w->cursor_decorations_count == 0 || w->current_matrix == NULL
+      || rif->draw_window_cursor_decorations == NULL)
+    return;
+
+  USE_SAFE_ALLOCA;
+  struct cursor_decoration *decorations;
+  SAFE_NALLOCA (decorations, 1, w->cursor_decorations_count);
+  ptrdiff_t count = 0;
+  for (ptrdiff_t i = 0; i < w->cursor_decorations_count; ++i)
+    {
+      const struct cursor_decoration_cache *cached
+	= &w->cursor_decorations[i];
+      if (cached->vpos < 0 || cached->vpos >= w->current_matrix->nrows)
+	continue;
+      struct glyph_row *row = MATRIX_ROW (w->current_matrix, cached->vpos);
+      if (!row->enabled_p || row->mode_line_p
+	  || cached->row_start_charpos != MATRIX_ROW_START_CHARPOS (row)
+	  || cached->row_end_charpos != MATRIX_ROW_END_CHARPOS (row)
+	  || cached->y != row->y || cached->height <= 0
+	  || cached->height > row->visible_height)
+	continue;
+      decorations[count++] = (struct cursor_decoration) {
+	.row = row, .x = cached->x, .y = cached->y,
+	.height = cached->height, .width = cached->width,
+	.color_pixel = cached->color_pixel, .kind = cached->kind,
+	.on = on_p && cached->on,
+      };
+    }
+  if (count > 0)
+    {
+      block_input ();
+      rif->draw_window_cursor_decorations (w, decorations, count);
+      unblock_input ();
+    }
+  SAFE_FREE ();
+#else
+  (void) w;
+  (void) on_p;
+#endif
+}
+
+void
+draw_window_cursor_decorations (struct window *w)
+{
+  paint_window_cursor_decorations (w, true);
+}
+
+static void
+damage_window_cursor_decorations (struct window *w)
+{
+  /* The callback redraws each old cursor's underlying glyph with ON=false.
+     Pixel-copy scrolling and row reuse are separately disabled whenever an
+     active or desired batch exists, so don't invalidate current rows here:
+     a partial desired update might not replace them.  */
+  paint_window_cursor_decorations (w, false);
+}
+
+static bool
+publish_window_cursor_decorations (struct window *w)
+{
+  if (!w->desired_cursor_decorations_valid_p)
+    return false;
+  struct cursor_decoration_cache *cache = w->cursor_decorations;
+  ptrdiff_t capacity = w->cursor_decorations_capacity;
+  w->cursor_decorations = w->desired_cursor_decorations;
+  w->cursor_decorations_count = w->desired_cursor_decorations_count;
+  w->cursor_decorations_capacity = w->desired_cursor_decorations_capacity;
+  w->desired_cursor_decorations = cache;
+  w->desired_cursor_decorations_count = 0;
+  w->desired_cursor_decorations_capacity = capacity;
+  w->desired_cursor_decorations_valid_p = false;
+  return true;
+}
+
 #ifdef HAVE_WINDOW_SYSTEM
 
 /* Redraw lines from the current matrix of window W that are
@@ -4447,12 +4534,14 @@ update_window (struct window *w)
   int yb;
   bool changed_p = 0, mouse_face_overwritten_p = 0;
   bool invisible_rows_marked = false;
+  bool cursor_decorations_published_p;
 
 #ifdef HAVE_WINDOW_SYSTEM
   gui_update_window_begin (w);
 #else
   (void) changed_p;
 #endif
+  damage_window_cursor_decorations (w);
   yb = window_text_bottom_y (w);
   row = MATRIX_ROW (desired_matrix, 0);
   end = MATRIX_MODE_LINE_ROW (desired_matrix);
@@ -4625,6 +4714,17 @@ update_window (struct window *w)
   strcpy (w->current_matrix->method, w->desired_matrix->method);
 #endif
 
+  /* All desired rows have now become current, including partial-update
+     reuse.  Resolve against that finalized matrix so cursor-movement
+     shortcuts cannot publish an empty desired cache.  */
+  resolve_window_cursor_decorations (w, w->current_matrix);
+  cursor_decorations_published_p = publish_window_cursor_decorations (w);
+  if (!cursor_decorations_published_p)
+    /* The old batch was erased before updating rows, and its vpos values no
+       longer describe the completed current matrix.  Keep the old snapshot
+       pending for comparison, but never repaint stale geometry.  */
+    w->cursor_decorations_count = 0;
+
 #ifdef HAVE_WINDOW_SYSTEM
   update_window_fringes (w, 0);
 
@@ -4634,11 +4734,15 @@ update_window (struct window *w)
      W->output_cursor doesn't contain the cursor location.  */
   gui_update_window_end (w, true, mouse_face_overwritten_p);
 #endif
-  /* Only a completed update may make the published snapshot current.  */
-  wset_cursor_decorations_snapshot
-    (w, w->desired_cursor_decorations_snapshot);
-  wset_desired_cursor_decorations_snapshot (w, Qnil);
-  w->cursor_decorations_changed_p = false;
+  /* Only a completed update with a matching resolved cache may make the
+     published snapshot current.  A stale transaction remains pending.  */
+  if (cursor_decorations_published_p)
+    {
+      wset_cursor_decorations_snapshot
+	(w, w->desired_cursor_decorations_snapshot);
+      wset_desired_cursor_decorations_snapshot (w, Qnil);
+      w->cursor_decorations_changed_p = false;
+    }
 
   /* If the update wasn't interrupted, this window has been
      completely updated.  */
@@ -4683,57 +4787,6 @@ gui_update_window_begin (struct window *w)
 
   unblock_input ();
 }
-
-/* Paint W's resolved secondary cursors as one immutable batch.  The cache is
-   intentionally empty until Task 8B installs the generic position resolver.
-   Glyph-row pointers are materialized only for the duration of the callback.  */
-static void
-draw_window_cursor_decorations (struct window *w)
-{
-  struct redisplay_interface *rif = FRAME_RIF (XFRAME (WINDOW_FRAME (w)));
-
-  if (w->cursor_decorations_count == 0 || w->current_matrix == NULL)
-    return;
-  if (rif->draw_window_cursor_decorations == NULL)
-    return;
-
-  USE_SAFE_ALLOCA;
-  struct cursor_decoration *decorations;
-  SAFE_NALLOCA (decorations, 1, w->cursor_decorations_count);
-  ptrdiff_t count = 0;
-
-  for (ptrdiff_t i = 0; i < w->cursor_decorations_count; ++i)
-    {
-      const struct cursor_decoration_cache *cached
-	= &w->cursor_decorations[i];
-      if (cached->vpos < 0 || cached->vpos >= w->current_matrix->nrows)
-	continue;
-
-      struct glyph_row *row = MATRIX_ROW (w->current_matrix, cached->vpos);
-      if (!row->enabled_p || row->mode_line_p)
-	continue;
-
-      decorations[count++] = (struct cursor_decoration) {
-	.row = row,
-	.x = cached->x,
-	.y = cached->y,
-	.height = cached->height,
-	.width = cached->width,
-	.color_pixel = cached->color_pixel,
-	.kind = cached->kind,
-	.on = cached->on,
-      };
-    }
-
-  if (count > 0)
-    {
-      block_input ();
-      rif->draw_window_cursor_decorations (w, decorations, count);
-      unblock_input ();
-    }
-  SAFE_FREE ();
-}
-
 
 /* End update of window W.
 

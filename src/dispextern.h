@@ -249,6 +249,8 @@ struct cursor_decoration
    row pointer, since glyph matrices can be replaced between redisplays.  */
 struct cursor_decoration_cache
 {
+  ptrdiff_t charpos;
+  ptrdiff_t row_start_charpos, row_end_charpos;
   int vpos;
   int x, y, height;
   int width;
@@ -3729,6 +3731,9 @@ extern void handle_tool_bar_click_with_device (struct frame *, int, int, bool,
 					       int, Lisp_Object);
 
 extern void expose_frame (struct frame *, int, int, int, int);
+extern void draw_window_cursor_decorations (struct window *);
+extern void resolve_window_cursor_decorations (struct window *,
+					       struct glyph_matrix *);
 extern bool gui_intersect_rectangles (const Emacs_Rectangle *,
                                       const Emacs_Rectangle *,
                                       Emacs_Rectangle *);

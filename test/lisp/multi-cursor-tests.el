@@ -1560,6 +1560,96 @@
             other-window
             (vector buffer tick 1 2 nil nil nil))))))))
 
+(ert-deftest multi-cursor-redisplay-resolves-sorted-snapshot-safely ()
+  "A sorted published snapshot should survive a completed redisplay."
+  (unless (and (fboundp 'multi-cursor--set-redisplay-snapshot)
+               (subrp (symbol-function
+                       'multi-cursor--set-redisplay-snapshot)))
+    (ert-skip "Fresh native multiple-cursor test binary is unavailable"))
+  (with-temp-buffer
+    (dotimes (line 8)
+      (insert (format "line %d: abcdefghijklmnopqrstuvwxyz\n" line)))
+    (save-window-excursion
+      (switch-to-buffer (current-buffer))
+      (let* ((window (selected-window))
+             (buffer (current-buffer))
+             (tick (buffer-chars-modified-tick))
+             (primary-point 6)
+             (snapshot
+              (vector buffer tick
+                      1 3 nil nil 'forward
+                      2 15 nil nil 'backward
+                      3 40 nil nil nil
+                      4 77 nil nil 'forward)))
+        (goto-char primary-point)
+        (multi-cursor--set-redisplay-snapshot window snapshot)
+        (unwind-protect
+            (progn
+              (let ((redisplay-skip-initial-frame nil))
+                (redisplay 'force))
+              (should (= (point) primary-point))
+              (should (= (window-point window) primary-point)))
+          (multi-cursor--set-redisplay-snapshot window nil))))))
+
+(ert-deftest multi-cursor-redisplay-discards-stale-published-snapshot-safely ()
+  "A snapshot made stale before redisplay should not corrupt display state."
+  (unless (and (fboundp 'multi-cursor--set-redisplay-snapshot)
+               (subrp (symbol-function
+                       'multi-cursor--set-redisplay-snapshot)))
+    (ert-skip "Fresh native multiple-cursor test binary is unavailable"))
+  (with-temp-buffer
+    (insert "alpha beta gamma\n")
+    (save-window-excursion
+      (switch-to-buffer (current-buffer))
+      (let* ((window (selected-window))
+             (buffer (current-buffer))
+             (tick (buffer-chars-modified-tick))
+             (snapshot
+              (vector buffer tick
+                      1 7 nil nil 'forward)))
+        (multi-cursor--set-redisplay-snapshot window snapshot)
+        ;; Make the published tick and cursor position stale before the
+        ;; redisplay cache is populated.
+        (erase-buffer)
+        (insert "x\n")
+        (goto-char (point-min))
+        (unwind-protect
+            (progn
+              (let ((redisplay-skip-initial-frame nil))
+                (redisplay 'force))
+              (should (= (point) (point-min)))
+              (should (= (window-point window) (point-min))))
+          (multi-cursor--set-redisplay-snapshot window nil))))))
+
+(ert-deftest multi-cursor-redisplay-resolves-same-continuation-row-safely ()
+  "Sorted cursors on one continued row should share redisplay resolution."
+  (unless (and (fboundp 'multi-cursor--set-redisplay-snapshot)
+               (subrp (symbol-function
+                       'multi-cursor--set-redisplay-snapshot)))
+    (ert-skip "Fresh native multiple-cursor test binary is unavailable"))
+  (with-temp-buffer
+    (insert (make-string 500 ?x) "\n")
+    (save-window-excursion
+      (switch-to-buffer (current-buffer))
+      (let* ((window (selected-window))
+             (buffer (current-buffer))
+             (width (max 20 (window-body-width window)))
+             (first (+ (point-min) width 3))
+             (second (+ first 4))
+             (snapshot
+              (vector buffer (buffer-chars-modified-tick)
+                      1 first nil nil 'forward
+                      2 second nil nil 'backward)))
+        (goto-char (point-min))
+        (multi-cursor--set-redisplay-snapshot window snapshot)
+        (unwind-protect
+            (progn
+              (let ((redisplay-skip-initial-frame nil))
+                (redisplay 'force))
+              (should (= (point) (point-min)))
+              (should (= (window-point window) (point-min))))
+          (multi-cursor--set-redisplay-snapshot window nil))))))
+
 (provide 'multi-cursor-tests)
 
 ;;; multi-cursor-tests.el ends here

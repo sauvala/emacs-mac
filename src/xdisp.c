@@ -1156,6 +1156,7 @@ static void block_buffer_flips (void);
 static void unblock_buffer_flips (void);
 static void redisplay_windows (Lisp_Object);
 static void redisplay_window (Lisp_Object, bool);
+void draw_window_cursor_decorations (struct window *);
 static Lisp_Object redisplay_window_error (Lisp_Object);
 static Lisp_Object redisplay_window_0 (Lisp_Object);
 static Lisp_Object redisplay_window_1 (Lisp_Object);
@@ -1163,6 +1164,7 @@ static bool resolve_cursor_pos_from_row (struct window *, struct glyph_row *,
 					struct glyph_matrix *, ptrdiff_t,
 					ptrdiff_t, int, int,
 					struct cursor_pos *);
+void resolve_window_cursor_decorations (struct window *, struct glyph_matrix *);
 static bool set_cursor_from_row (struct window *, struct glyph_row *,
 				 struct glyph_matrix *, ptrdiff_t, ptrdiff_t,
 				 int, int);
@@ -19980,6 +19982,176 @@ set_cursor_from_row (struct window *w, struct glyph_row *row,
 }
 
 
+/* Resolve W's immutable, buffer-ordered secondary-cursor snapshot against
+   completed glyph rows.  The base ROW association moves only forward;
+   continued and bidi rows can be rescanned per cursor to preserve the
+   primary resolver's candidate selection.  Batching those candidate glyph
+   scans is a separate performance optimization.  Persistent cache entries
+   contain no glyph-row pointers.
+
+   A snapshot which became stale while redisplay was producing glyphs leaves
+   the desired cache invalid.  update_window must not publish such a partial
+   transaction.  */
+
+void
+resolve_window_cursor_decorations (struct window *w,
+				   struct glyph_matrix *matrix)
+{
+  Lisp_Object snapshot = w->desired_cursor_decorations_snapshot;
+
+  w->desired_cursor_decorations_count = 0;
+  w->desired_cursor_decorations_valid_p = false;
+
+  if (NILP (snapshot))
+    {
+      w->desired_cursor_decorations_valid_p = true;
+      return;
+    }
+
+  if (!VECTORP (snapshot)
+      || ASIZE (snapshot) < 2
+      || (ASIZE (snapshot) - 2) % 5 != 0
+      || !EQ (AREF (snapshot, 0), w->contents)
+      || NILP (Fequal (AREF (snapshot, 1),
+			    Fbuffer_chars_modified_tick (w->contents)))
+      || matrix == NULL)
+    return;
+
+  ptrdiff_t ncursors = (ASIZE (snapshot) - 2) / 5;
+  struct buffer *buffer = XBUFFER (w->contents);
+  ptrdiff_t previous_point = -1;
+  for (ptrdiff_t i = 2; i < ASIZE (snapshot); i += 5)
+    {
+      Lisp_Object id = AREF (snapshot, i);
+      Lisp_Object point = AREF (snapshot, i + 1);
+      Lisp_Object mark = AREF (snapshot, i + 2);
+      Lisp_Object active = AREF (snapshot, i + 3);
+      Lisp_Object direction = AREF (snapshot, i + 4);
+
+      if (!FIXNATP (id) || !FIXNATP (point)
+	  || XFIXNAT (point) < BUF_BEGV (buffer)
+	  || XFIXNAT (point) > BUF_ZV (buffer)
+	  || XFIXNAT (point) < previous_point
+	  || !(NILP (mark)
+	       || (FIXNATP (mark)
+		   && XFIXNAT (mark) >= BUF_BEGV (buffer)
+		   && XFIXNAT (mark) <= BUF_ZV (buffer)))
+	  || !(NILP (active) || EQ (active, Qt))
+	  || !(NILP (direction)
+	       || EQ (direction, Qmulti_cursor_forward)
+	       || EQ (direction, Qmulti_cursor_backward)))
+	return;
+      previous_point = XFIXNAT (point);
+    }
+
+  if (w->desired_cursor_decorations_capacity < ncursors)
+    {
+      ptrdiff_t increment
+	= ncursors - w->desired_cursor_decorations_capacity;
+      w->desired_cursor_decorations
+	= xpalloc (w->desired_cursor_decorations,
+		   &w->desired_cursor_decorations_capacity,
+		   increment, -1,
+		   sizeof *w->desired_cursor_decorations);
+    }
+
+  struct glyph_row *row = MATRIX_FIRST_TEXT_ROW (matrix);
+  struct glyph_row *end = MATRIX_BOTTOM_TEXT_ROW (matrix, w);
+  struct buffer *old_buffer = current_buffer;
+  bool buffer_changed = buffer != old_buffer;
+  if (buffer_changed)
+    set_buffer_internal_1 (buffer);
+
+  for (ptrdiff_t i = 2; i < ASIZE (snapshot); i += 5)
+    {
+      ptrdiff_t target = XFIXNAT (AREF (snapshot, i + 1));
+      struct cursor_pos cursor = { .vpos = -1 };
+
+      /* Advance the shared row cursor only past rows wholly before this
+         target.  Candidate exploration below uses a separate pointer, so
+         several cursors in one continued visual row all see that row.  */
+      while (row < end && row->enabled_p && !row->mode_line_p)
+	{
+	  ptrdiff_t row_start = MATRIX_ROW_START_CHARPOS (row);
+	  ptrdiff_t row_end = MATRIX_ROW_END_CHARPOS (row);
+	  ptrdiff_t upper = max (row_start, row_end);
+
+	  if (target > upper)
+	    {
+	      ++row;
+	      continue;
+	    }
+	  break;
+	}
+
+      struct glyph_row *candidate_row = row;
+      while (candidate_row < end && candidate_row->enabled_p
+	     && !candidate_row->mode_line_p)
+	{
+	  ptrdiff_t row_start = MATRIX_ROW_START_CHARPOS (candidate_row);
+	  ptrdiff_t row_end = MATRIX_ROW_END_CHARPOS (candidate_row);
+	  ptrdiff_t lower = min (row_start, row_end);
+	  ptrdiff_t upper = max (row_start, row_end);
+
+	  if (target < lower
+	      && !(candidate_row == MATRIX_FIRST_TEXT_ROW (matrix)
+		   && target >= marker_position (w->start)))
+	    break;
+	  if (target > upper)
+	    {
+	      ++candidate_row;
+	      continue;
+	    }
+
+	  bool resolved
+	    = resolve_cursor_pos_from_row (w, candidate_row, matrix, target,
+				       0, 0, 0, &cursor);
+
+	  if (resolved
+	      && !candidate_row->continued_p
+	      && !MATRIX_ROW_CONTINUATION_LINE_P (candidate_row))
+	    break;
+	  ++candidate_row;
+	}
+
+      if (cursor.vpos < 0 || cursor.vpos >= matrix->nrows)
+	continue;
+
+      struct glyph_row *cursor_row = MATRIX_ROW (matrix, cursor.vpos);
+      if (!cursor_row->enabled_p || cursor_row->mode_line_p
+	  || cursor_row->visible_height <= 0)
+	continue;
+
+      int width = FRAME_COLUMN_WIDTH (XFRAME (w->frame));
+      if (0 <= cursor.hpos && cursor.hpos < cursor_row->used[TEXT_AREA])
+	width = cursor_row->glyphs[TEXT_AREA][cursor.hpos].pixel_width;
+      width = max (1, width);
+
+      w->desired_cursor_decorations
+	[w->desired_cursor_decorations_count++]
+	= (struct cursor_decoration_cache) {
+	    .charpos = target,
+	    .row_start_charpos = MATRIX_ROW_START_CHARPOS (cursor_row),
+	    .row_end_charpos = MATRIX_ROW_END_CHARPOS (cursor_row),
+	    .vpos = cursor.vpos,
+	    .x = cursor.x,
+	    .y = cursor.y,
+	    .height = cursor_row->visible_height,
+	    .width = width,
+	    /* DEFAULT_CURSOR and zero color are inheritance sentinels.  The
+	       backend can apply the selected window/frame cursor policy.  */
+	    .color_pixel = 0,
+	    .kind = DEFAULT_CURSOR,
+	    .on = true,
+	  };
+    }
+
+  if (buffer_changed)
+    set_buffer_internal_1 (old_buffer);
+  w->desired_cursor_decorations_valid_p = true;
+}
+
+
 /* Run window scroll functions, if any, for WINDOW with new window
    start STARTP.  Sets the window start of WINDOW to that position.
 
@@ -36396,6 +36568,9 @@ show_mouse_face (Mouse_HLInfo *hlinfo, enum draw_glyphs_face draw,
       bool phys_cursor_on_p = w->phys_cursor_on_p;
 #ifdef HAVE_WINDOW_SYSTEM
       int mouse_off = 0;
+      if (FRAME_WINDOW_P (f)
+	  && phys_cursor_on_p && w->cursor_decorations_count > 0)
+	gui_clear_cursor (w);
 #endif
       struct glyph_row *row, *first, *last;
 
@@ -36481,22 +36656,32 @@ show_mouse_face (Mouse_HLInfo *hlinfo, enum draw_glyphs_face draw,
 #endif
 	}
 
+      /* Mouse-face drawing can overwrite any stateless secondary cursor in
+         the affected rows even when the primary cursor was untouched.  */
+      if (FRAME_WINDOW_P (f))
+	{
+	  draw_window_cursor_decorations (w);
+	}
+
       /* When we've written over the cursor, arrange for it to
 	 be displayed again.  */
       if (FRAME_WINDOW_P (f)
-	  && phys_cursor_on_p && !w->phys_cursor_on_p)
+	  && phys_cursor_on_p)
 	{
 #ifdef HAVE_WINDOW_SYSTEM
 	  int hpos = w->phys_cursor.hpos;
 	  int old_phys_cursor_x = w->phys_cursor.x;
+	  struct glyph_row *cursor_row
+	    = MATRIX_ROW (w->current_matrix, w->phys_cursor.vpos);
 
 	  /* When the window is hscrolled, cursor hpos can legitimately be
 	     out of bounds, but we draw the cursor at the corresponding
 	     window margin in that case.  */
-	  if (!row->reversed_p && hpos < 0)
+	  if (!cursor_row->reversed_p && hpos < 0)
 	    hpos = 0;
-	  if (row->reversed_p && hpos >= row->used[TEXT_AREA])
-	    hpos = row->used[TEXT_AREA] - 1;
+	  if (cursor_row->reversed_p
+	      && hpos >= cursor_row->used[TEXT_AREA])
+	    hpos = cursor_row->used[TEXT_AREA] - 1;
 
 	  block_input ();
 	  display_and_set_cursor (w, true, hpos, w->phys_cursor.vpos,
@@ -38959,10 +39144,15 @@ expose_window (struct window *w, const Emacs_Rectangle *fr)
       r.x -= WINDOW_LEFT_EDGE_X (w);
       r.y -= WINDOW_TOP_EDGE_Y (w);
 
-      /* Turn off the cursor.  */
+      bool phys_cursor_on_p = w->phys_cursor_on_p;
+
+      /* Turn off the cursor.  A whole-batch secondary repaint below can
+         overlap the primary even when the exposure rectangle doesn't.  */
       bool cursor_cleared_p = (!w->pseudo_window_p
 			       && phys_cursor_in_rect_p (w, &r));
-      if (cursor_cleared_p)
+
+      if (cursor_cleared_p
+	  || (phys_cursor_on_p && w->cursor_decorations_count > 0))
 	gui_clear_cursor (w);
 
       /* If the row containing the cursor extends face to end of line,
@@ -38970,8 +39160,6 @@ expose_window (struct window *w, const Emacs_Rectangle *fr)
 	 rectangle and thus notice_overwritten_cursor might clear
 	 w->phys_cursor_on_p.  We remember the original value and
 	 check later if it is changed.  */
-      bool phys_cursor_on_p = w->phys_cursor_on_p;
-
       /* Use a signed int intermediate value to avoid catastrophic
 	 failures due to comparison between signed and unsigned, when
 	 y0 or y1 is negative (can happen for tall images).  */
@@ -39063,9 +39251,12 @@ expose_window (struct window *w, const Emacs_Rectangle *fr)
 	  if (WINDOW_BOTTOM_DIVIDER_WIDTH (w))
 	    gui_draw_bottom_divider (w);
 
+	  /* Exposed glyphs and overlap repair precede stateless secondary
+	     cursors; the ordinary primary cursor remains last.  */
+	  draw_window_cursor_decorations (w);
+
 	  /* Turn the cursor on again.  */
-	  if (cursor_cleared_p
-	      || (phys_cursor_on_p && !w->phys_cursor_on_p))
+	  if (cursor_cleared_p || phys_cursor_on_p)
 	    update_window_cursor (w, true);
 	}
     }
