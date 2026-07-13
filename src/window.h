@@ -224,6 +224,15 @@ struct window
     struct glyph_matrix *current_matrix;
     struct glyph_matrix *desired_matrix;
 
+    /* Row-pointer-free old and new secondary-cursor geometry caches.
+       They remain empty until the Task 8B generic resolver is installed.  */
+    struct cursor_decoration_cache *cursor_decorations;
+    ptrdiff_t cursor_decorations_count;
+    ptrdiff_t cursor_decorations_capacity;
+    struct cursor_decoration_cache *desired_cursor_decorations;
+    ptrdiff_t desired_cursor_decorations_count;
+    ptrdiff_t desired_cursor_decorations_capacity;
+
     /* Number saying how recently window was selected.  */
     EMACS_INT use_time;
 
@@ -1161,6 +1170,7 @@ extern Lisp_Object minibuf_selected_window;
 extern Lisp_Object last_mouse_window;
 
 extern Lisp_Object make_window (void);
+extern void free_window_cursor_decorations (struct window *);
 extern Lisp_Object window_from_coordinates (struct frame *, int, int,
                                             enum window_part *, bool, bool, bool);
 extern void resize_frame_windows (struct frame *, int, bool);

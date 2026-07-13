@@ -232,6 +232,31 @@ enum text_cursor_kinds
   HBAR_CURSOR
 };
 
+/* Backend-neutral geometry for a secondary text cursor.  ROW is ephemeral:
+   callers may use it only for the duration of the redisplay-interface call.
+   Persistent window caches store a row number instead.  */
+struct cursor_decoration
+{
+  struct glyph_row *row;
+  int x, y, height;
+  int width;
+  unsigned long color_pixel;
+  enum text_cursor_kinds kind;
+  bool on;
+};
+
+/* Persistent form of cursor_decoration.  It deliberately contains no glyph
+   row pointer, since glyph matrices can be replaced between redisplays.  */
+struct cursor_decoration_cache
+{
+  int vpos;
+  int x, y, height;
+  int width;
+  unsigned long color_pixel;
+  enum text_cursor_kinds kind;
+  bool on;
+};
+
 /* Values returned from coordinates_in_window.  */
 
 enum window_part
@@ -3200,6 +3225,12 @@ struct redisplay_interface
   /* Called to (re)calculate the default face when changing the font
      backend.  */
   void (*default_font_parameter) (struct frame *f, Lisp_Object parms);
+
+  /* Draw an immutable batch of resolved secondary cursors.  This optional
+     callback is last so existing positional initializers zero-fill it.  It
+     must not modify W's primary physical-cursor state.  */
+  void (*draw_window_cursor_decorations)
+    (struct window *, const struct cursor_decoration *, ptrdiff_t);
 #endif /* HAVE_WINDOW_SYSTEM */
 };
 

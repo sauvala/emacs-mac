@@ -2410,6 +2410,10 @@ free_window_matrices (struct window *w)
 {
   while (w)
     {
+      /* Cached geometry is indexed into these matrices, so its lifetime is
+         centralized with matrix ownership.  */
+      free_window_cursor_decorations (w);
+
       if (WINDOWP (w->contents))
 	free_window_matrices (XWINDOW (w->contents));
       else
@@ -4662,6 +4666,57 @@ gui_update_window_begin (struct window *w)
   unblock_input ();
 }
 
+/* Paint W's resolved secondary cursors as one immutable batch.  The cache is
+   intentionally empty until Task 8B installs the generic position resolver.
+   Glyph-row pointers are materialized only for the duration of the callback.  */
+static void
+draw_window_cursor_decorations (struct window *w)
+{
+  struct redisplay_interface *rif = FRAME_RIF (XFRAME (WINDOW_FRAME (w)));
+
+  if (w->cursor_decorations_count == 0 || w->current_matrix == NULL)
+    return;
+  if (rif->draw_window_cursor_decorations == NULL)
+    return;
+
+  USE_SAFE_ALLOCA;
+  struct cursor_decoration *decorations;
+  SAFE_NALLOCA (decorations, 1, w->cursor_decorations_count);
+  ptrdiff_t count = 0;
+
+  for (ptrdiff_t i = 0; i < w->cursor_decorations_count; ++i)
+    {
+      const struct cursor_decoration_cache *cached
+	= &w->cursor_decorations[i];
+      if (cached->vpos < 0 || cached->vpos >= w->current_matrix->nrows)
+	continue;
+
+      struct glyph_row *row = MATRIX_ROW (w->current_matrix, cached->vpos);
+      if (!row->enabled_p || row->mode_line_p)
+	continue;
+
+      decorations[count++] = (struct cursor_decoration) {
+	.row = row,
+	.x = cached->x,
+	.y = cached->y,
+	.height = cached->height,
+	.width = cached->width,
+	.color_pixel = cached->color_pixel,
+	.kind = cached->kind,
+	.on = cached->on,
+      };
+    }
+
+  if (count > 0)
+    {
+      block_input ();
+      rif->draw_window_cursor_decorations (w, decorations, count);
+      unblock_input ();
+    }
+  SAFE_FREE ();
+}
+
+
 /* End update of window W.
 
    Draw vertical borders between horizontally adjacent windows, and
@@ -4679,6 +4734,11 @@ gui_update_window_end (struct window *w, bool cursor_on_p,
   /* Pseudo windows don't have cursors, so don't display them here.  */
   if (!w->pseudo_window_p)
     {
+      /* Secondary decorations are stateless and paint first.  The ordinary
+         primary cursor remains the sole owner of w->phys_cursor and the
+         platform system caret.  */
+      draw_window_cursor_decorations (w);
+
       block_input ();
 
       if (cursor_on_p)

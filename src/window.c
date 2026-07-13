@@ -2565,6 +2565,11 @@ replace_window (Lisp_Object old, Lisp_Object new, bool setflag)
   Lisp_Object tem;
   struct window *o = XWINDOW (old), *n = XWINDOW (new);
 
+  /* Resolved geometry belongs to a particular pair of glyph matrices and
+     must not migrate through structural window replacement.  */
+  free_window_cursor_decorations (o);
+  free_window_cursor_decorations (n);
+
   /* If OLD is its frame's root window, then NEW is the new
      root window for that frame.  */
   if (EQ (old, FRAME_ROOT_WINDOW (XFRAME (o->frame))))
@@ -4604,6 +4609,21 @@ allocate_window (void)
 {
   return ALLOCATE_ZEROED_PSEUDOVECTOR (struct window, mode_line_help_echo,
 				       PVEC_WINDOW);
+}
+
+/* Release both cursor-decoration caches owned by W.  This is zero-safe,
+   since matrix teardown and window deletion can visit the same window.  */
+void
+free_window_cursor_decorations (struct window *w)
+{
+  xfree (w->cursor_decorations);
+  xfree (w->desired_cursor_decorations);
+  w->cursor_decorations = NULL;
+  w->desired_cursor_decorations = NULL;
+  w->cursor_decorations_count = 0;
+  w->desired_cursor_decorations_count = 0;
+  w->cursor_decorations_capacity = 0;
+  w->desired_cursor_decorations_capacity = 0;
 }
 
 /* Make new window from scratch.  */
