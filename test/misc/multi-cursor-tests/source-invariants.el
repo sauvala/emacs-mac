@@ -98,6 +98,18 @@
             count (1+ count)))
     count))
 
+(defun multi-cursor-source-tests--c-code-match-p (regexp source)
+  "Return non-nil if REGEXP matches C code, not comments, in SOURCE."
+  (with-temp-buffer
+    (insert source)
+    (c-mode)
+    (syntax-propertize (point-max))
+    (catch 'match
+      (while (re-search-forward regexp nil t)
+        (let ((state (syntax-ppss (match-beginning 0))))
+          (unless (or (nth 3 state) (nth 4 state))
+            (throw 'match t)))))))
+
 (defun multi-cursor-source-tests--c-defun (file lisp-name-regexp)
   "Return a DEFUN form from FILE matching LISP-NAME-REGEXP."
   (let ((source (multi-cursor-source-tests--source file)))
@@ -318,6 +330,64 @@
     (should
      (string-match-p
       "no_scrolling_p[[:space:]]*=[[:space:]]*true" body))))
+
+(ert-deftest multi-cursor-source-row-resolver-has-arbitrary-target-contract ()
+  "The row resolver should take an explicit target and result cursor."
+  (let* ((source (multi-cursor-source-tests--source "src/xdisp.c"))
+         (start (string-match "^resolve_cursor_pos_from_row[[:space:]\n]*("
+                              source))
+         (end (and start (string-match "{" source start)))
+         (header (and end (substring source start end))))
+    (should header)
+    (should
+     (string-match-p
+      "ptrdiff_t[[:space:]]+target_charpos\\_>" header))
+    (should
+     (string-match-p
+      (concat "struct[[:space:]]+cursor_pos"
+              "[[:space:]]*\\*[[:space:]]*result\\_>")
+      header))))
+
+(ert-deftest multi-cursor-source-row-resolver-does-not-mutate-primary-state ()
+  "The arbitrary-position resolver should only populate its result."
+  (let ((body (multi-cursor-source-tests--function-body
+               "src/xdisp.c" "resolve_cursor_pos_from_row")))
+    (should (string-match-p "\\_<target_charpos\\_>" body))
+    (should (string-match-p "result[[:space:]]*->" body))
+    (should-not
+     (multi-cursor-source-tests--c-code-match-p
+      "\\_<PT\\_>\\|\\_<PT_BYTE\\_>" body))
+    (should-not
+     (multi-cursor-source-tests--c-code-match-p
+      "w[[:space:]]*->[[:space:]]*cursor\\_>" body))
+    (should-not
+     (multi-cursor-source-tests--c-code-match-p
+      "w[[:space:]]*->[[:space:]]*phys_cursor\\_>" body))
+    (should-not
+     (multi-cursor-source-tests--c-code-match-p "\\_<this_line_" body))))
+
+(ert-deftest multi-cursor-source-primary-row-wrapper-preserves-state-updates ()
+  "The primary wrapper should publish the result and update this-line state."
+  (let ((body (multi-cursor-source-tests--function-body
+               "src/xdisp.c" "set_cursor_from_row")))
+    (should (string-match-p "resolve_cursor_pos_from_row[[:space:]\n]*(" body))
+    (should (string-match-p "\\_<PT\\_>" body))
+    (should
+     (string-match-p
+      "w[[:space:]]*->[[:space:]]*cursor[[:space:]]*=" body))
+    (should
+     (string-match-p
+      "w[[:space:]]*==[[:space:]]*XWINDOW[[:space:]\n]*(selected_window)"
+      body))
+    (dolist (state '("this_line_buffer"
+                     "this_line_start_pos"
+                     "this_line_end_pos"
+                     "this_line_y"
+                     "this_line_pixel_height"
+                     "this_line_vpos"
+                     "this_line_start_x"
+                     "delta_bytes"))
+      (should (string-match-p (concat "\\_<" state "\\_>") body)))))
 
 (provide 'multi-cursor-source-invariants)
 

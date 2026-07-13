@@ -99,6 +99,47 @@
            (width-in-chars (/ (car size) char-width)))
       (should (equal width-in-chars 3)))))
 
+(defun xdisp-tests--redisplay-primary-cursor-case (text position setup)
+  "Redisplay TEXT with point at POSITION after calling SETUP.
+Assert that primary-cursor resolution does not move buffer or window point."
+  (let ((old-buffer (window-buffer)))
+    (unwind-protect
+        (with-temp-buffer
+          (insert text)
+          (funcall setup)
+          (goto-char position)
+          (switch-to-buffer (current-buffer))
+          (let ((redisplay-skip-initial-frame nil))
+            (redisplay 'force))
+          (should (= (point) position))
+          (should (= (window-point) position))
+          (should (>= (window-end nil t) position)))
+      (when (buffer-live-p old-buffer)
+        (switch-to-buffer old-buffer)))))
+
+(ert-deftest xdisp-tests--primary-cursor-resolver-edge-cases ()
+  "Exercise primary cursor resolution across complex glyph-row sources."
+  (dolist
+      (case
+       (list
+        ;; Point on the terminating newline.
+        (list "abc\n" 4 #'ignore)
+        ;; Point in a right-to-left run which is reordered on display.
+        (list "abc \u05d0\u05d1\u05d2 def\n" 6 #'ignore)
+        ;; Point covered by a replacement display string with a cursor hint.
+        (list "abcdef\n" 4
+              (lambda ()
+                (put-text-property
+                 2 5 'display (propertize "XYZ" 'cursor t))))
+        ;; Point represented by an ellipsis for invisible text.
+        (list "abcdef\n" 4
+              (lambda ()
+                (setq-local buffer-invisibility-spec '((mc-test . t)))
+                (put-text-property 2 5 'invisible 'mc-test)))
+        ;; Point inside a composed glyph sequence.
+        (list "abcdef\n" 4 (lambda () (compose-region 2 5)))))
+    (apply #'xdisp-tests--redisplay-primary-cursor-case case)))
+
 (ert-deftest xdisp-tests--find-directional-overrides-case-1 ()
   (with-temp-buffer
     (insert "\

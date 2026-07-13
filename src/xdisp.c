@@ -1159,6 +1159,10 @@ static void redisplay_window (Lisp_Object, bool);
 static Lisp_Object redisplay_window_error (Lisp_Object);
 static Lisp_Object redisplay_window_0 (Lisp_Object);
 static Lisp_Object redisplay_window_1 (Lisp_Object);
+static bool resolve_cursor_pos_from_row (struct window *, struct glyph_row *,
+					struct glyph_matrix *, ptrdiff_t,
+					ptrdiff_t, int, int,
+					struct cursor_pos *);
 static bool set_cursor_from_row (struct window *, struct glyph_row *,
 				 struct glyph_matrix *, ptrdiff_t, ptrdiff_t,
 				 int, int);
@@ -19313,18 +19317,20 @@ update_redisplay_ticks (int ticks, struct window *w)
 
 
 
-/* Set cursor position of W.  PT is assumed to be displayed in ROW.
-   DELTA and DELTA_BYTES are the numbers of characters and bytes by
-   which positions recorded in ROW differ from current buffer
-   positions.
+/* Resolve TARGET_CHARPOS in ROW into RESULT without modifying W's primary
+   cursor or global redisplay state.  DELTA is the number of characters by
+   which positions recorded in ROW differ from current buffer positions.
+   RESULT can contain a candidate from a previously examined continuation
+   row; it is replaced only when ROW is the better candidate.
 
-   Return true iff cursor is on this row.  */
+   Return true iff the target cursor is on this row.  */
 
 static bool
-set_cursor_from_row (struct window *w, struct glyph_row *row,
-		     struct glyph_matrix *matrix,
-		     ptrdiff_t delta, ptrdiff_t delta_bytes,
-		     int dy, int dvpos)
+resolve_cursor_pos_from_row (struct window *w, struct glyph_row *row,
+			     struct glyph_matrix *matrix,
+			     ptrdiff_t target_charpos, ptrdiff_t delta,
+			     int dy, int dvpos,
+			     struct cursor_pos *result)
 {
   struct glyph *glyph = row->glyphs[TEXT_AREA];
   struct glyph *end = glyph + row->used[TEXT_AREA];
@@ -19332,7 +19338,7 @@ set_cursor_from_row (struct window *w, struct glyph_row *row,
   /* The last known character position in row.  */
   ptrdiff_t last_pos = MATRIX_ROW_START_CHARPOS (row) + delta;
   int x = row->x;
-  ptrdiff_t pt_old = PT - delta;
+  ptrdiff_t pt_old = target_charpos - delta;
   ptrdiff_t pos_before = MATRIX_ROW_START_CHARPOS (row) + delta;
   ptrdiff_t pos_after = MATRIX_ROW_END_CHARPOS (row) + delta;
   struct glyph *glyph_before = glyph - 1, *glyph_after = end;
@@ -19791,7 +19797,7 @@ set_cursor_from_row (struct window *w, struct glyph_row *row,
 	      && row->continued_p)
 	    return false;
 	}
-      /* A truncated row may not include PT among its character positions.
+      /* A truncated row may not include the target among its character positions.
 	 Setting the cursor inside the scroll margin will trigger
 	 recalculation of hscroll in hscroll_window_tree.  But if a
 	 display string covers point, defer to the string-handling
@@ -19846,24 +19852,25 @@ set_cursor_from_row (struct window *w, struct glyph_row *row,
 
   /* ROW could be part of a continued line, which, under bidi
      reordering, might have other rows whose start and end charpos
-     occlude point.  Only set w->cursor if we found a better
+     occlude point.  Only set RESULT if we found a better
      approximation to the cursor position than we have from previously
      examined candidate rows belonging to the same continued line.  */
   if (/* We already have a candidate row.  */
-      w->cursor.vpos >= 0
+      result->vpos >= 0
       /* That candidate is not the row we are processing.  */
-      && MATRIX_ROW (matrix, w->cursor.vpos) != row
+      && MATRIX_ROW (matrix, result->vpos) != row
       /* Make sure cursor.vpos specifies a row whose start and end
 	 charpos occlude point, and it is valid candidate for being a
 	 cursor-row.  This is because some callers of this function
 	 leave cursor.vpos at the row where the cursor was displayed
 	 during the last redisplay cycle.  */
-      && MATRIX_ROW_START_CHARPOS (MATRIX_ROW (matrix, w->cursor.vpos)) <= pt_old
-      && pt_old <= MATRIX_ROW_END_CHARPOS (MATRIX_ROW (matrix, w->cursor.vpos))
-      && cursor_row_p (MATRIX_ROW (matrix, w->cursor.vpos)))
+      && MATRIX_ROW_START_CHARPOS (MATRIX_ROW (matrix, result->vpos)) <= pt_old
+      && pt_old <= MATRIX_ROW_END_CHARPOS (MATRIX_ROW (matrix, result->vpos))
+      && row_for_charpos_p (MATRIX_ROW (matrix, result->vpos),
+			    target_charpos))
     {
       struct glyph *g1
-	= MATRIX_ROW_GLYPH_START (matrix, w->cursor.vpos) + w->cursor.hpos;
+	= MATRIX_ROW_GLYPH_START (matrix, result->vpos) + result->hpos;
 
       /* Don't consider glyphs that are outside TEXT_AREA.  */
       if (!(row->reversed_p ? glyph > glyphs_end : glyph < glyphs_end))
@@ -19871,8 +19878,8 @@ set_cursor_from_row (struct window *w, struct glyph_row *row,
       /* Keep the candidate whose buffer position is the closest to
 	 point or has the `cursor' property.  */
       if (/* Previous candidate is a glyph in TEXT_AREA of that row.  */
-	  w->cursor.hpos >= 0
-	  && w->cursor.hpos < MATRIX_ROW_USED (matrix, w->cursor.vpos)
+	  result->hpos >= 0
+	  && result->hpos < MATRIX_ROW_USED (matrix, result->vpos)
 	  && ((BUFFERP (g1->object)
 	       && (g1->charpos == pt_old /* An exact match always wins.  */
 		   || (BUFFERP (glyph->object)
@@ -19907,15 +19914,40 @@ set_cursor_from_row (struct window *w, struct glyph_row *row,
 	     both candidate positions are on glyphs that came from
 	     display strings, for which we cannot compare buffer
 	     positions.  */
-	  && MATRIX_ROW_END_CHARPOS (MATRIX_ROW (matrix, w->cursor.vpos))
-	     - MATRIX_ROW_START_CHARPOS (MATRIX_ROW (matrix, w->cursor.vpos))
+	  && MATRIX_ROW_END_CHARPOS (MATRIX_ROW (matrix, result->vpos))
+	     - MATRIX_ROW_START_CHARPOS (MATRIX_ROW (matrix, result->vpos))
 	     < MATRIX_ROW_END_CHARPOS (row) - MATRIX_ROW_START_CHARPOS (row))
 	return false;
     }
-  w->cursor.hpos = glyph - row->glyphs[TEXT_AREA];
-  w->cursor.x = x;
-  w->cursor.vpos = MATRIX_ROW_VPOS (row, matrix) + dvpos;
-  w->cursor.y = row->y + dy;
+  result->hpos = glyph - row->glyphs[TEXT_AREA];
+  result->x = x;
+  result->vpos = MATRIX_ROW_VPOS (row, matrix) + dvpos;
+  result->y = row->y + dy;
+
+  return true;
+}
+
+
+/* Set cursor position of W.  PT is assumed to be displayed in ROW.
+   DELTA and DELTA_BYTES are the numbers of characters and bytes by
+   which positions recorded in ROW differ from current buffer
+   positions.
+
+   Return true iff cursor is on this row.  */
+
+static bool
+set_cursor_from_row (struct window *w, struct glyph_row *row,
+		     struct glyph_matrix *matrix,
+		     ptrdiff_t delta, ptrdiff_t delta_bytes,
+		     int dy, int dvpos)
+{
+  struct cursor_pos cursor = w->cursor;
+
+  if (!resolve_cursor_pos_from_row (w, row, matrix, PT, delta, dy, dvpos,
+				    &cursor))
+    return false;
+
+  w->cursor = cursor;
 
   if (w == XWINDOW (selected_window))
     {
