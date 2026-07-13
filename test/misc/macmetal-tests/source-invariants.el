@@ -17,6 +17,13 @@
      (expand-file-name "src/macmetal.m" source-directory))
     (buffer-string)))
 
+(defun macmetal-tests--macterm-source ()
+  "Return the contents of src/macterm.c."
+  (with-temp-buffer
+    (insert-file-contents
+     (expand-file-name "src/macterm.c" source-directory))
+    (buffer-string)))
+
 (defun macmetal-tests--function-body (function-name)
   "Return the source body for FUNCTION-NAME in src/macmetal.m."
   (let ((source (macmetal-tests--source)))
@@ -152,6 +159,14 @@
     (should (string-match-p
              "scroll_blit_bytes = (uintmax_t) sw \\* sh \\* 4 \\* 2"
              scroll-body))))
+
+(ert-deftest macmetal-clears-non-overlay-images-before-drawing ()
+  "Metal image masks must replace backgrounds instead of leaving stale pixels."
+  (let ((source (macmetal-tests--macterm-source)))
+    (should (string-match-p
+             (regexp-quote
+              "if (!(flags & MAC_DRAW_CG_IMAGE_OVERLAY))\n      mac_erase_rectangle (f, gc, dest_x, dest_y, width, height, true);")
+             source))))
 
 (ert-deftest macmetal-records-glyph-cache-counters ()
   "Metal should count glyph cache hits and misses for tuning atlas behavior."

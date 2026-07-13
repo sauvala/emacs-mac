@@ -564,6 +564,11 @@ mac_draw_cg_image (struct frame *f, GC gc,
        so the CGBitmapContext fills masked pixels with the correct color,
        matching what the CoreGraphics path does via CGImageIsMask check.  */
     void *fill_color = CGImageIsMask (image) ? (void *)gc->cg_fore_color : NULL;
+    /* Transparent image masks only replace their foreground pixels.  Match
+       the Core Graphics path below by clearing non-overlay destinations
+       first; otherwise successive fringe masks leave stale pixels behind.  */
+    if (!(flags & MAC_DRAW_CG_IMAGE_OVERLAY))
+      mac_erase_rectangle (f, gc, dest_x, dest_y, width, height, true);
     mac_metal_apply_gc_clip (f, gc);
     void *texture =
       emacs_metal_get_cached_cg_image (FRAME_METAL_CTX (f),
