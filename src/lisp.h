@@ -4370,6 +4370,10 @@ extern void replace_range_2 (ptrdiff_t, ptrdiff_t, ptrdiff_t, ptrdiff_t,
 			     const char *, ptrdiff_t, ptrdiff_t, bool);
 extern void syms_of_insdel (void);
 
+/* Defined in multicursor.c.  */
+extern Lisp_Object Fmulti_cursor_apply_edits (Lisp_Object);
+extern void syms_of_multicursor (void);
+
 /* Defined in dispnew.c.  */
 #ifdef PROFILING
 _Noreturn void __executable_start (void);
