@@ -59,6 +59,13 @@ operation before changing the buffer or cursor session."
 (defvar-local multi-cursor--next-id 0
   "Next secondary cursor identifier in the current buffer.")
 
+(defconst multi-cursor--movement-commands
+  '(forward-char backward-char
+    forward-word backward-word
+    move-beginning-of-line move-end-of-line
+    next-logical-line previous-logical-line)
+  "Commands implemented by the native multiple-cursor movement broadcaster.")
+
 (defconst multi-cursor--valid-policies
   '(broadcast-movement batch-edit run-once custom-handler unsupported)
   "Policies accepted by `multi-cursor-register-command'.")
@@ -76,7 +83,10 @@ operation before changing the buffer or cursor session."
 HANDLER is required for `batch-edit' and `custom-handler'.  It receives
 COMMAND, the raw prefix, KEYS, RECORD-FLAG, and SPECIAL, in that order.
 Handlers which accept interactive input or honor RECORD-FLAG are responsible
-for capturing that input once and updating the variable `command-history'."
+for capturing that input once and updating the variable `command-history'.
+Registering `broadcast-movement' without a handler is limited to the vetted
+built-in movement commands; an explicit handler owns any third-party command's
+no-edit, no-prompt, and no-buffer-switch contract."
   (unless (commandp command)
     (error "Not an interactive command: %S" command))
   (unless (memq policy multi-cursor--valid-policies)
@@ -88,6 +98,10 @@ for capturing that input once and updating the variable `command-history'."
     (error "Invalid multiple-cursor handler: %S" handler))
   (when (and handler (memq policy '(run-once unsupported)))
     (error "Policy %S does not accept a handler" policy))
+  (when (and (eq policy 'broadcast-movement)
+             (null handler)
+             (not (memq command multi-cursor--movement-commands)))
+    (error "%S is not a vetted multiple-cursor movement command" command))
   (puthash command (cons policy handler) multi-cursor--command-policies)
   command)
 
@@ -116,7 +130,7 @@ dispatcher without the pre-command hook modifying the primary region."
     ('broadcast-movement
      (if handler
          (funcall handler command current-prefix-arg keys record-flag special)
-       (user-error "%S movement broadcasting is not implemented" command)))
+       (multi-cursor--broadcast-movement command record-flag)))
     ('unsupported
      (user-error "%S is not multiple-cursor safe" command))
     (_
@@ -725,6 +739,87 @@ command has no global binding by default."
         (multi-cursor--cursor-goal-column cursor) goal-column
         (multi-cursor--cursor-last-yank cursor) nil))
 
+(defun multi-cursor--movement-state ()
+  "Return point, mark, active state, and goal column for the primary cursor."
+  (list (point) (mark t) (and mark-active t) temporary-goal-column))
+
+(defun multi-cursor--cursor-movement-state (cursor)
+  "Return CURSOR's point, mark, active state, and goal column."
+  (list (marker-position (multi-cursor--cursor-point cursor))
+        (and (multi-cursor--cursor-mark cursor)
+             (marker-position (multi-cursor--cursor-mark cursor)))
+        (and (multi-cursor--cursor-mark-active cursor) t)
+        (multi-cursor--cursor-goal-column cursor)))
+
+(defun multi-cursor--install-movement-state (state)
+  "Install primary point and selection variables from STATE."
+  (goto-char (nth 0 state))
+  (set-marker (mark-marker) (nth 1 state)
+              (and (nth 1 state) (current-buffer)))
+  (setq mark-active (nth 2 state)
+        temporary-goal-column (nth 3 state)))
+
+(defun multi-cursor--capture-cursor-movement (cursor state)
+  "Store successful movement STATE in CURSOR."
+  (multi-cursor--set-record-state
+   cursor (nth 0 state) (nth 1 state) (nth 2 state) (nth 3 state)))
+
+(defun multi-cursor--invoke-movement (command argument canonical-last-command)
+  "Invoke vetted movement COMMAND once, accepting boundary clamping.
+
+ARGUMENT is the prefix converted once for the whole broadcast.
+CANONICAL-LAST-COMMAND controls logical-line goal-column continuity."
+  (let ((last-command
+         (if (memq command '(next-logical-line previous-logical-line))
+             canonical-last-command
+           last-command)))
+    (condition-case nil
+        (funcall command argument)
+      ((beginning-of-buffer end-of-buffer) nil))))
+
+(defun multi-cursor--broadcast-movement (command record-flag)
+  "Run vetted pure movement COMMAND for the primary and every secondary.
+
+All results are staged before cursor records are changed.  Beginning- and
+end-of-buffer signals retain the clamped result for that cursor; any other
+nonlocal exit restores the original primary state and commits no secondary
+result.  If RECORD-FLAG is non-nil, record one invocation in
+the variable `command-history'."
+  (unless (memq command multi-cursor--movement-commands)
+    (user-error "%S is not a vetted multiple-cursor movement command" command))
+  (let* ((cursors (multi-cursor--normalized-cursors))
+         (primary-before (multi-cursor--movement-state))
+         (argument (prefix-numeric-value current-prefix-arg))
+         (canonical-last-command
+          (pcase last-command
+            ((or 'next-line 'next-logical-line) 'next-line)
+            ((or 'previous-line 'previous-logical-line) 'previous-line)))
+         (states (cons primary-before
+                       (mapcar #'multi-cursor--cursor-movement-state cursors)))
+         results
+         completed)
+    (let ((inhibit-redisplay t)
+          (pre-command-hook nil)
+          (post-command-hook nil)
+          (next-line-add-newlines nil))
+      (unwind-protect
+          (progn
+            (dolist (state states)
+              (multi-cursor--install-movement-state state)
+              (multi-cursor--invoke-movement
+               command argument canonical-last-command)
+              (push (multi-cursor--movement-state) results))
+            (setq results (nreverse results)
+                  completed t))
+        (multi-cursor--install-movement-state
+         (if completed (car results) primary-before))))
+    (cl-mapc #'multi-cursor--capture-cursor-movement
+             cursors (cdr results))
+    (multi-cursor--normalize)
+    (when record-flag
+      (add-to-history 'command-history (list command argument) nil t))
+    nil))
+
 (defun multi-cursor--cycle (direction)
   "Exchange primary state with the next secondary in DIRECTION."
   (multi-cursor--normalized-cursors)
@@ -908,10 +1003,16 @@ command has no global binding by default."
   (when (commandp command)
     (multi-cursor-register-command command 'run-once)))
 
+(dolist (command multi-cursor--movement-commands)
+  (multi-cursor-register-command command 'broadcast-movement))
+
 (dolist (command '(undo undo-only undo-redo
                    keyboard-quit execute-extended-command execute-kbd-macro
                    isearch-forward isearch-backward
-                   query-replace query-replace-regexp))
+                   query-replace query-replace-regexp
+                   right-char left-char right-word left-word
+                   next-line previous-line
+                   beginning-of-visual-line end-of-visual-line))
   (when (commandp command)
     (multi-cursor-register-command command 'unsupported)))
 

@@ -53,6 +53,20 @@
   (interactive)
   (signal 'quit nil))
 
+(defun multi-cursor-tests--movement-maybe-error (&optional arg)
+  "Move by ARG unless point is 5, where a test error is signaled."
+  (interactive "p")
+  (when (= (point) 5)
+    (error "movement test error"))
+  (goto-char (+ (point) (or arg 1))))
+
+(defun multi-cursor-tests--movement-maybe-quit (&optional arg)
+  "Move by ARG unless point is 5, where quit is signaled."
+  (interactive "p")
+  (when (= (point) 5)
+    (signal 'quit nil))
+  (goto-char (+ (point) (or arg 1))))
+
 (defun multi-cursor-tests--handler
     (command prefix keys record-flag special)
   "Record dispatcher arguments for COMMAND."
@@ -1065,6 +1079,187 @@
       (setq multi-cursor-tests--command-log nil)
       (command-execute special-command nil nil t)
       (should (equal multi-cursor-tests--command-log '(special))))))
+
+(ert-deftest multi-cursor-movement-horizontal-preserves-selection-state ()
+  (with-temp-buffer
+    (insert "abcdefghijklmnop")
+    (goto-char 2)
+    (set-mark 1)
+    (activate-mark)
+    (setq temporary-goal-column 2)
+    (let* ((first-id (multi-cursor-add-selection 6 5 t))
+           (second-id (multi-cursor-add-selection 10 12 nil))
+           (first (multi-cursor-tests--cursor first-id))
+           (second (multi-cursor-tests--cursor second-id)))
+      (setf (multi-cursor--cursor-goal-column first) 6
+            (multi-cursor--cursor-goal-column second) 10
+            (multi-cursor--cursor-last-yank first) 'old-yank
+            (multi-cursor--cursor-last-yank second) 'old-yank)
+      (command-execute 'forward-char)
+      (should (= (point) 3))
+      (should (= (mark) 1))
+      (should mark-active)
+      (should (= (marker-position (multi-cursor--cursor-point first)) 7))
+      (should (= (marker-position (multi-cursor--cursor-mark first)) 5))
+      (should (multi-cursor--cursor-mark-active first))
+      (should (= (marker-position (multi-cursor--cursor-point second)) 11))
+      (should (= (marker-position (multi-cursor--cursor-mark second)) 12))
+      (should-not (multi-cursor--cursor-mark-active second))
+      (should-not (multi-cursor--cursor-last-yank first))
+      (should-not (multi-cursor--cursor-last-yank second)))))
+
+(ert-deftest multi-cursor-movement-word-and-line-boundaries ()
+  (with-temp-buffer
+    (insert "one two\nthree four\nfive six")
+    (goto-char 1)
+    (let ((cursor-id (multi-cursor-add-at-point 9)))
+      (command-execute 'forward-word)
+      (should (= (point) 4))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point
+                   (multi-cursor-tests--cursor cursor-id)))
+                 14))
+      (command-execute 'move-end-of-line)
+      (should (= (point) 8))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point
+                   (multi-cursor-tests--cursor cursor-id)))
+                 19))
+      (command-execute 'move-beginning-of-line)
+      (should (= (point) 1))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point
+                   (multi-cursor-tests--cursor cursor-id)))
+                 9)))))
+
+(ert-deftest multi-cursor-movement-logical-lines-keep-independent-goals ()
+  (with-temp-buffer
+    (insert "abcdef\nxy\nabcdef\nabcdef\n")
+    (goto-char 4)
+    (let* ((cursor-id (multi-cursor-add-at-point 10))
+           (cursor (multi-cursor-tests--cursor cursor-id)))
+      (command-execute 'next-logical-line)
+      (should (= (line-number-at-pos) 2))
+      (should (= (current-column) 2))
+      (should (= temporary-goal-column 3))
+      (save-excursion
+        (goto-char (multi-cursor--cursor-point cursor))
+        (should (= (line-number-at-pos) 3))
+        (should (= (current-column) 2)))
+      (should (= (multi-cursor--cursor-goal-column cursor) 2))
+      (let ((last-command 'next-logical-line))
+        (command-execute 'next-logical-line))
+      (should (= (line-number-at-pos) 3))
+      (should (= (current-column) 3))
+      (save-excursion
+        (goto-char (multi-cursor--cursor-point cursor))
+        (should (= (line-number-at-pos) 4))
+        (should (= (current-column) 2)))
+      (should (= (multi-cursor--cursor-goal-column cursor) 2)))))
+
+(ert-deftest multi-cursor-movement-boundaries-clamp-and-continue ()
+  (with-temp-buffer
+    (insert "abcdef")
+    (goto-char (point-max))
+    (let ((cursor-id (multi-cursor-add-at-point 3)))
+      (command-execute 'forward-char)
+      (should (= (point) (point-max)))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point
+                   (multi-cursor-tests--cursor cursor-id)))
+                 4))))
+  (with-temp-buffer
+    (insert "abcdef")
+    (goto-char (point-min))
+    (let ((cursor-id (multi-cursor-add-at-point 5)))
+      (command-execute 'backward-char)
+      (should (= (point) (point-min)))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point
+                   (multi-cursor-tests--cursor cursor-id)))
+                 4)))))
+
+(ert-deftest multi-cursor-movement-normalizes-collisions-after-commit ()
+  (with-temp-buffer
+    (insert "abcdef")
+    (goto-char (point-max))
+    (let* ((cursor-id (multi-cursor-add-at-point (1- (point-max))))
+           (cursor (multi-cursor-tests--cursor cursor-id))
+           (marker (multi-cursor--cursor-point cursor)))
+      (command-execute 'forward-char)
+      (should (= (point) (point-max)))
+      (should-not multi-cursor--cursors)
+      (should-not (marker-buffer marker)))))
+
+(ert-deftest multi-cursor-movement-records-history-once ()
+  (with-temp-buffer
+    (insert "abcdef")
+    (goto-char 1)
+    (multi-cursor-add-at-point 3)
+    (let ((command-history nil)
+          (prefix-arg 2))
+      (command-execute 'forward-char t [?f])
+      (should (equal command-history '((forward-char 2)))))))
+
+(ert-deftest multi-cursor-movement-unexpected-error-restores-all-state ()
+  (with-temp-buffer
+    (insert "abcdefghijkl")
+    (goto-char 2)
+    (set-mark 1)
+    (activate-mark)
+    (setq temporary-goal-column 7)
+    (let* ((early-id (multi-cursor-add-at-point 3))
+           (cursor-id (multi-cursor-add-selection 5 7 t))
+           (early (multi-cursor-tests--cursor early-id))
+           (cursor (multi-cursor-tests--cursor cursor-id))
+           (multi-cursor--movement-commands
+            (cons 'multi-cursor-tests--movement-maybe-error
+                  multi-cursor--movement-commands)))
+      (setf (multi-cursor--cursor-goal-column early) 4
+            (multi-cursor--cursor-last-yank early) 'early-yank
+            (multi-cursor--cursor-goal-column cursor) 9
+            (multi-cursor--cursor-last-yank cursor) 'late-yank)
+      (multi-cursor-tests--with-policy
+          'multi-cursor-tests--movement-maybe-error 'broadcast-movement nil
+        (should-error
+         (command-execute 'multi-cursor-tests--movement-maybe-error)
+         :type 'error))
+      (should (= (point) 2))
+      (should (= (mark) 1))
+      (should mark-active)
+      (should (= temporary-goal-column 7))
+      (should (= (marker-position (multi-cursor--cursor-point early)) 3))
+      (should (= (multi-cursor--cursor-goal-column early) 4))
+      (should (eq (multi-cursor--cursor-last-yank early) 'early-yank))
+      (should (= (marker-position (multi-cursor--cursor-point cursor)) 5))
+      (should (= (marker-position (multi-cursor--cursor-mark cursor)) 7))
+      (should (multi-cursor--cursor-mark-active cursor))
+      (should (= (multi-cursor--cursor-goal-column cursor) 9))
+      (should (eq (multi-cursor--cursor-last-yank cursor) 'late-yank)))))
+
+(ert-deftest multi-cursor-movement-quit-restores-all-state ()
+  (with-temp-buffer
+    (insert "abcdefghijkl")
+    (goto-char 2)
+    (let* ((early-id (multi-cursor-add-at-point 3))
+           (late-id (multi-cursor-add-at-point 5))
+           (early (multi-cursor-tests--cursor early-id))
+           (late (multi-cursor-tests--cursor late-id))
+           (multi-cursor--movement-commands
+            (cons 'multi-cursor-tests--movement-maybe-quit
+                  multi-cursor--movement-commands)))
+      (multi-cursor-tests--with-policy
+          'multi-cursor-tests--movement-maybe-quit 'broadcast-movement nil
+        (should (eq (condition-case nil
+                        (progn
+                          (command-execute
+                           'multi-cursor-tests--movement-maybe-quit)
+                          nil)
+                      (quit 'quit))
+                    'quit)))
+      (should (= (point) 2))
+      (should (= (marker-position (multi-cursor--cursor-point early)) 3))
+      (should (= (marker-position (multi-cursor--cursor-point late)) 5)))))
 
 (ert-deftest multi-cursor-creation-narrowed-unrelated-command-does-not-scan ()
   (with-temp-buffer
