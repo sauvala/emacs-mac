@@ -514,6 +514,84 @@
     (should (< publish condition))
     (should (< condition clear))))
 
+(ert-deftest multi-cursor-source-mac-installs-one-batch-cursor-painter ()
+  "The Mac RIF should install the optional batch painter in its last slot."
+  (let ((source (multi-cursor-source-tests--source "src/macterm.c")))
+    (should
+     (string-match-p
+      (concat "mac_draw_window_cursor_decorations[[:space:]\n]*("
+              "struct window \\*[^,]*,"
+              "[[:space:]\n]*const struct cursor_decoration \\*[^,]*,"
+              "[[:space:]\n]*ptrdiff_t")
+      source))
+    (should
+     (string-match-p
+      (concat "mac_hide_hourglass[[:space:]]*,"
+              "[[:space:]\n]*NULL[[:space:]]*,"
+              "[[:space:]\n]*mac_draw_window_cursor_decorations")
+      source))))
+
+(ert-deftest multi-cursor-source-mac-cursor-painter-is-stateless-batch ()
+  "The Mac painter should draw inherited cursor shapes without primary state."
+  (let ((body (multi-cursor-source-tests--function-body
+               "src/macterm.c" "mac_draw_window_cursor_decorations"))
+        (resolver (multi-cursor-source-tests--function-body
+                   "src/macterm.c" "mac_resolve_cursor_decoration")))
+    (should (string-match-p "\\_<count\\_>" body))
+    (should (string-match-p "decorations" body))
+    (should (string-match-p "DEFAULT_CURSOR" body))
+    (should (string-match-p "mac_resolve_cursor_decoration" body))
+    (should (string-match-p "DEFAULT_CURSOR" resolver))
+    (should (string-match-p "FRAME_DESIRED_CURSOR" resolver))
+    (should (string-match-p "cursor_type" resolver))
+    (should (string-match-p "cursor_pixel" body))
+    (should (string-match-p "window_box" body))
+    (should (string-match-p "WINDOW_TEXT_TO_FRAME_PIXEL_X" body))
+    (should (string-match-p "WINDOW_TO_FRAME_PIXEL_Y" body))
+    (should (string-match-p "draw_glyphs" body))
+    (should (string-match-p "DRAW_NORMAL_TEXT" body))
+    (should (string-match-p "DRAW_MOUSE_FACE" body))
+    (should (string-match-p "mac_cursor_decoration_restore_span" body))
+    (should
+     (string-match-p "calloc[[:space:]\n]*(nrows,[[:space:]]*sizeof" body))
+    (should (string-match-p "span[[:space:]]*->[[:space:]]*used_p" body))
+    (should
+     (string-match-p
+      "for[[:space:]\n]*(ptrdiff_t i = 0; i < count;" body))
+    (should
+     (string-match-p
+      "for[[:space:]\n]*(ptrdiff_t vpos = 0; vpos < nrows;" body))
+    (dolist (kind '("FILLED_BOX_CURSOR" "HOLLOW_BOX_CURSOR"
+                    "BAR_CURSOR" "HBAR_CURSOR"))
+      (should (string-match-p kind body)))
+    (should (string-match-p "mac_cursor_decoration_command" body))
+    (should (string-match-p "ncommands" body))
+    (should
+     (string-match-p "calloc[[:space:]\n]*(count,[[:space:]]*sizeof"
+                     body))
+    (should (string-match-p "free" body))
+    (should (string-match-p "MAC_BEGIN_DRAW_TO_FRAME" body))
+    (should (string-match-p "MAC_END_DRAW_TO_FRAME" body))
+    (should
+     (= (multi-cursor-source-tests--match-count
+         "MAC_BEGIN_DRAW_TO_FRAME" body)
+        1))
+    (should-not
+     (multi-cursor-source-tests--c-code-match-p
+      "w[[:space:]]*->[[:space:]]*phys_cursor" body))
+    (should-not
+     (multi-cursor-source-tests--c-code-match-p
+      "w[[:space:]]*->[[:space:]]*phys_cursor" resolver))
+    (should-not (string-match-p "cursor_off_p" resolver))
+    (dolist (primary-helper '("mac_draw_window_cursor"
+                              "mac_draw_hollow_cursor"
+                              "mac_draw_bar_cursor"))
+      (should-not
+       (multi-cursor-source-tests--c-code-match-p primary-helper body)))
+    (should-not
+     (multi-cursor-source-tests--c-code-match-p
+      "dispatch_\\(?:async\\|sync\\)" body))))
+
 (provide 'multi-cursor-source-invariants)
 
 ;;; source-invariants.el ends here

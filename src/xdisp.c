@@ -20133,6 +20133,7 @@ resolve_window_cursor_decorations (struct window *w,
 	    .charpos = target,
 	    .row_start_charpos = MATRIX_ROW_START_CHARPOS (cursor_row),
 	    .row_end_charpos = MATRIX_ROW_END_CHARPOS (cursor_row),
+	    .hpos = cursor.hpos,
 	    .vpos = cursor.vpos,
 	    .x = cursor.x,
 	    .y = cursor.y,
@@ -33106,7 +33107,7 @@ compute_overhangs_and_x (struct glyph_string *s, int x, bool backward_p)
 
    Value is the x-position reached, relative to AREA of W.  */
 
-static int
+int
 draw_glyphs (struct window *w, int x, struct glyph_row *row,
 	     enum glyph_row_area area, ptrdiff_t start, ptrdiff_t end,
 	     enum draw_glyphs_face hl, int overlaps)

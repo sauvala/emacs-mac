@@ -4381,6 +4381,333 @@ mac_draw_window_cursor (struct window *w, struct glyph_row *glyph_row, int x,
     }
 }
 
+/* Return the backend-neutral cursor kind specified by ARG.  This is the
+   stateless subset of get_specified_cursor_type needed for secondary cursor
+   decorations.  */
+static enum text_cursor_kinds
+mac_cursor_decoration_type (Lisp_Object arg, int *width)
+{
+  if (NILP (arg))
+    return NO_CURSOR;
+  if (EQ (arg, Qbox))
+    return FILLED_BOX_CURSOR;
+  if (EQ (arg, Qhollow))
+    return HOLLOW_BOX_CURSOR;
+  if (EQ (arg, Qbar) || EQ (arg, Qhbar))
+    {
+      *width = 2;
+      return EQ (arg, Qbar) ? BAR_CURSOR : HBAR_CURSOR;
+    }
+  if (CONSP (arg) && RANGED_FIXNUMP (0, XCDR (arg), INT_MAX))
+    {
+      *width = XFIXNUM (XCDR (arg));
+      if (EQ (XCAR (arg), Qbox))
+	return FILLED_BOX_CURSOR;
+      if (EQ (XCAR (arg), Qbar))
+	return BAR_CURSOR;
+      if (EQ (XCAR (arg), Qhbar))
+	return HBAR_CURSOR;
+    }
+  return HOLLOW_BOX_CURSOR;
+}
+
+/* Resolve DEFAULT_CURSOR without consulting or changing the primary physical
+   cursor.  WIDTH is bar thickness, not the width of the glyph cell.  */
+static enum text_cursor_kinds
+mac_resolve_cursor_decoration (struct window *w, struct glyph *glyph,
+			       enum text_cursor_kinds kind, int *width)
+{
+  struct frame *f = XFRAME (w->frame);
+  struct buffer *b = XBUFFER (w->contents);
+
+  if (kind == DEFAULT_CURSOR)
+    {
+      *width = FRAME_CURSOR_WIDTH (f);
+      if (!EQ (Qt, w->cursor_type))
+	kind = mac_cursor_decoration_type (w->cursor_type, width);
+      else if (NILP (BVAR (b, cursor_type)))
+	kind = NO_CURSOR;
+      else if (EQ (BVAR (b, cursor_type), Qt))
+	kind = FRAME_DESIRED_CURSOR (f);
+      else
+	kind = mac_cursor_decoration_type (BVAR (b, cursor_type), width);
+
+      if (w != XWINDOW (f->selected_window)
+	  || f != FRAME_DISPLAY_INFO (f)->highlight_frame)
+	{
+	  Lisp_Object alternate
+	    = BVAR (b, cursor_in_non_selected_windows);
+	  if (!EQ (Qt, alternate))
+	    kind = mac_cursor_decoration_type (alternate, width);
+	  else if (kind == FILLED_BOX_CURSOR)
+	    kind = HOLLOW_BOX_CURSOR;
+	  else if (kind == BAR_CURSOR && *width > 1)
+	    --*width;
+	}
+    }
+
+  if (glyph->type == XWIDGET_GLYPH)
+    return NO_CURSOR;
+  if (glyph->type == IMAGE_GLYPH && kind != FILLED_BOX_CURSOR
+      && kind != NO_CURSOR)
+    return HOLLOW_BOX_CURSOR;
+  return kind;
+}
+
+struct mac_cursor_decoration_command
+{
+  CGRect rect, clip;
+  unsigned long color;
+  bool outline_p;
+};
+
+struct mac_cursor_decoration_restore_span
+{
+  struct glyph_row *row;
+  int start, end, start_x;
+  bool used_p;
+};
+
+/* RIF: Draw an immutable batch of secondary text cursors.  Glyph restoration
+   is widened to at most two glyph-renderer calls per affected row (normal and
+   mouse-face spans).  All cursor shapes are copied to owned primitive commands
+   and issued from one graphics context, so the GCD path never captures the
+   caller's alloca buffer or schedules one block per cursor.  Filled boxes
+   intentionally use the cursor body color in this first backend batch
+   implementation; drawing a contrasting glyph inside each box without
+   reintroducing per-cursor GCD dispatch is follow-up work.  */
+static void
+mac_draw_window_cursor_decorations (struct window *w,
+				    const struct cursor_decoration *decorations,
+				    ptrdiff_t count)
+{
+  struct frame *f = XFRAME (w->frame);
+  if (count <= 0 || w->current_matrix == NULL)
+    return;
+  struct mac_cursor_decoration_command *commands
+    = calloc (count, sizeof *commands);
+  ptrdiff_t nrows = w->current_matrix->nrows;
+  struct mac_cursor_decoration_restore_span *spans
+    = calloc (nrows, sizeof *spans);
+  ptrdiff_t ncommands = 0;
+  CGRect invalid = CGRectNull;
+
+  if (commands == NULL || spans == NULL)
+    {
+      free (commands);
+      free (spans);
+      return;
+    }
+
+  /* Erase first, before painting any remaining secondary cursors.  Merge all
+     damaged glyphs on a row into one widened span, avoiding one asynchronous
+     glyph-renderer dispatch per decoration.  */
+  for (ptrdiff_t i = 0; i < count; ++i)
+    {
+      const struct cursor_decoration *d = &decorations[i];
+      if (d->on || d->row == NULL || !d->row->enabled_p
+	  || d->row->mode_line_p || d->hpos < 0
+	  || d->hpos >= d->row->used[TEXT_AREA])
+	continue;
+      ptrdiff_t vpos = MATRIX_ROW_VPOS (d->row, w->current_matrix);
+      if (vpos < 0 || vpos >= nrows)
+	continue;
+      struct mac_cursor_decoration_restore_span *span = spans + vpos;
+      if (!span->used_p)
+	*span = (struct mac_cursor_decoration_restore_span)
+	  { .row = d->row, .start = d->hpos, .end = d->hpos + 1,
+	    .start_x = d->x, .used_p = true };
+      else
+	{
+	  if (d->hpos < span->start)
+	    {
+	      span->start = d->hpos;
+	      span->start_x = d->x;
+	    }
+	  span->end = max (span->end, d->hpos + 1);
+	}
+    }
+
+  for (ptrdiff_t vpos = 0; vpos < nrows; ++vpos)
+    {
+      struct mac_cursor_decoration_restore_span *span = spans + vpos;
+      if (!span->used_p)
+	continue;
+      struct glyph_row *row = span->row;
+      draw_glyphs (w, span->start_x, row, TEXT_AREA,
+		   span->start, span->end,
+		   DRAW_NORMAL_TEXT, 0);
+      Mouse_HLInfo *hlinfo = MOUSE_HL_INFO (f);
+      if (row->mouse_face_p && !hlinfo->mouse_face_hidden
+	  && WINDOWP (hlinfo->mouse_face_window)
+	  && XWINDOW (hlinfo->mouse_face_window) == w
+	  && hlinfo->mouse_face_beg_row >= 0
+	  && hlinfo->mouse_face_end_row >= 0
+	  && vpos >= hlinfo->mouse_face_beg_row
+	  && vpos <= hlinfo->mouse_face_end_row)
+	{
+	  int mouse_start = vpos == hlinfo->mouse_face_beg_row
+	    ? hlinfo->mouse_face_beg_col : 0;
+	  int mouse_end = vpos == hlinfo->mouse_face_end_row
+	    ? hlinfo->mouse_face_end_col : row->used[TEXT_AREA];
+	  mouse_start = max (span->start, mouse_start);
+	  mouse_end = min (span->end, mouse_end);
+	  if (mouse_start < mouse_end)
+	    {
+	      int mouse_x = span->start_x;
+	      for (int hpos = span->start; hpos < mouse_start; ++hpos)
+		mouse_x += row->glyphs[TEXT_AREA][hpos].pixel_width;
+	      draw_glyphs (w, mouse_x, row, TEXT_AREA,
+			   mouse_start, mouse_end, DRAW_MOUSE_FACE, 0);
+	    }
+	}
+      if (row->overlapped_p)
+	{
+	  if (row > w->current_matrix->rows
+	      && MATRIX_ROW_OVERLAPS_SUCC_P (row - 1))
+	    gui_fix_overlapping_area (w, row - 1, TEXT_AREA,
+				OVERLAPS_ERASED_CURSOR);
+	  if (MATRIX_ROW_BOTTOM_Y (row) < window_text_bottom_y (w)
+	      && MATRIX_ROW_OVERLAPS_PRED_P (row + 1))
+	    gui_fix_overlapping_area (w, row + 1, TEXT_AREA,
+				OVERLAPS_ERASED_CURSOR);
+	}
+    }
+  free (spans);
+
+  for (ptrdiff_t i = 0; i < count; ++i)
+    {
+      const struct cursor_decoration *d = &decorations[i];
+      struct glyph_row *row = d->row;
+      if (!d->on || row == NULL || !row->enabled_p || row->mode_line_p
+	  || d->height <= 0 || d->hpos < 0
+	  || d->hpos >= row->used[TEXT_AREA])
+	continue;
+
+      struct glyph *glyph = row->glyphs[TEXT_AREA] + d->hpos;
+      int thickness = d->kind == DEFAULT_CURSOR ? FRAME_CURSOR_WIDTH (f)
+	: d->width;
+      enum text_cursor_kinds kind
+	= mac_resolve_cursor_decoration (w, glyph, d->kind, &thickness);
+      if (kind == NO_CURSOR)
+	continue;
+      int box_x, box_y, box_width, box_height;
+      window_box (w, TEXT_AREA, &box_x, &box_y, &box_width, &box_height);
+      CGRect clip = CGRectIntersection
+	(CGRectMake (box_x, box_y, box_width, box_height),
+	 CGRectMake (box_x, WINDOW_TO_FRAME_PIXEL_Y (w, max (0, row->y)),
+		     box_width, row->visible_height));
+      int x = WINDOW_TEXT_TO_FRAME_PIXEL_X (w, d->x);
+      int y = WINDOW_TO_FRAME_PIXEL_Y (w, d->y);
+      int cell_width = max (1, min (d->width, glyph->pixel_width));
+      int height = max (1, min (d->height, row->visible_height));
+      unsigned long color = d->color_pixel != 0
+	? d->color_pixel : f->output_data.mac->cursor_pixel;
+
+      if ((kind == BAR_CURSOR || kind == HBAR_CURSOR)
+	  && d->color_pixel == 0)
+	{
+	  struct face *face = FACE_FROM_ID (f, glyph->face_id);
+	  if (face != NULL && face->background == color)
+	    color = face->foreground;
+	}
+      thickness = max (1, thickness);
+
+      CGRect rect;
+      bool outline_p = kind == HOLLOW_BOX_CURSOR;
+      if (kind == FILLED_BOX_CURSOR || kind == HOLLOW_BOX_CURSOR)
+	{
+	  if ((glyph->resolved_level & 1) != 0
+	      && glyph->pixel_width > cell_width)
+	    x += glyph->pixel_width - cell_width;
+	  rect = CGRectMake (x, y, cell_width, height);
+	}
+      else if (kind == BAR_CURSOR)
+	{
+	  thickness = min (cell_width, thickness);
+	  if ((glyph->resolved_level & 1) != 0)
+	    x += glyph->pixel_width - thickness;
+	  rect = CGRectMake (x, y, thickness, height);
+	}
+      else
+	{
+	  thickness = min (height, thickness);
+	  rect = CGRectMake (x, y + height - thickness, cell_width, thickness);
+	}
+      CGRect visible_rect = CGRectIntersection (rect, clip);
+      if (CGRectIsNull (visible_rect) || CGRectIsEmpty (visible_rect))
+	continue;
+      commands[ncommands++] = (struct mac_cursor_decoration_command)
+	{ .rect = outline_p ? rect : visible_rect, .clip = clip,
+	  .color = color, .outline_p = outline_p };
+      invalid = CGRectIsNull (invalid) ? visible_rect
+	: CGRectUnion (invalid, visible_rect);
+    }
+
+  if (ncommands == 0)
+    {
+      free (commands);
+      return;
+    }
+
+  GC gc = FRAME_DISPLAY_INFO (f)->scratch_cursor_gc;
+  if (gc == NULL)
+    {
+      XGCValues values = { .foreground = f->output_data.mac->cursor_pixel };
+      gc = mac_create_gc (GCForeground, &values);
+      FRAME_DISPLAY_INFO (f)->scratch_cursor_gc = gc;
+    }
+  mac_reset_clip_rectangles (f, gc);
+#ifdef USE_METAL_RENDERING
+  for (ptrdiff_t i = 0; i < ncommands; ++i)
+    {
+      struct mac_cursor_decoration_command *command = commands + i;
+      emacs_metal_set_clip_rect (FRAME_METAL_CTX (f),
+				 floor (CGRectGetMinX (command->clip)),
+				 floor (CGRectGetMinY (command->clip)),
+				 ceil (CGRectGetWidth (command->clip)),
+				 ceil (CGRectGetHeight (command->clip)));
+      if (command->outline_p)
+	emacs_metal_draw_rect (FRAME_METAL_CTX (f),
+			       CGRectGetMinX (command->rect),
+			       CGRectGetMinY (command->rect),
+			       CGRectGetWidth (command->rect),
+			       CGRectGetHeight (command->rect), command->color);
+      else
+	emacs_metal_fill_rect (FRAME_METAL_CTX (f),
+			       CGRectGetMinX (command->rect),
+			       CGRectGetMinY (command->rect),
+			       CGRectGetWidth (command->rect),
+			       CGRectGetHeight (command->rect), command->color);
+    }
+  emacs_metal_reset_clip (FRAME_METAL_CTX (f));
+  free (commands);
+#else
+  MAC_BEGIN_DRAW_TO_FRAME (f, gc, invalid, context);
+  for (ptrdiff_t i = 0; i < ncommands; ++i)
+    {
+      struct mac_cursor_decoration_command *command = commands + i;
+      CGColorRef color = mac_cg_color_create (command->color, 0);
+      CGContextSaveGState (context);
+      CGContextClipToRect (context, command->clip);
+      if (command->outline_p)
+	{
+	  CGContextSetStrokeColorWithColor (context, color);
+	  CGContextStrokeRect (context, CGRectInset (command->rect, .5f, .5f));
+	}
+      else
+	{
+	  CGContextSetFillColorWithColor (context, color);
+	  CGContextFillRect (context, command->rect);
+	}
+      CGContextRestoreGState (context);
+      CGColorRelease (color);
+    }
+  free (commands);
+  MAC_END_DRAW_TO_FRAME (f);
+#endif
+}
+
 
 /* Changing the font of the frame.  */
 
@@ -6446,7 +6773,9 @@ static struct redisplay_interface mac_redisplay_interface =
     mac_draw_window_divider,
     mac_shift_glyphs_for_insert, /* Never called; see comment in function.  */
     mac_show_hourglass,
-    mac_hide_hourglass
+    mac_hide_hourglass,
+    NULL,
+    mac_draw_window_cursor_decorations
   };
 
 

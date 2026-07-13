@@ -238,6 +238,7 @@ enum text_cursor_kinds
 struct cursor_decoration
 {
   struct glyph_row *row;
+  int hpos;
   int x, y, height;
   int width;
   unsigned long color_pixel;
@@ -251,7 +252,7 @@ struct cursor_decoration_cache
 {
   ptrdiff_t charpos;
   ptrdiff_t row_start_charpos, row_end_charpos;
-  int vpos;
+  int hpos, vpos;
   int x, y, height;
   int width;
   unsigned long color_pixel;
@@ -3732,6 +3733,9 @@ extern void handle_tool_bar_click_with_device (struct frame *, int, int, bool,
 
 extern void expose_frame (struct frame *, int, int, int, int);
 extern void draw_window_cursor_decorations (struct window *);
+extern int draw_glyphs (struct window *, int, struct glyph_row *,
+			enum glyph_row_area, ptrdiff_t, ptrdiff_t,
+			enum draw_glyphs_face, int);
 extern void resolve_window_cursor_decorations (struct window *,
 					       struct glyph_matrix *);
 extern bool gui_intersect_rectangles (const Emacs_Rectangle *,

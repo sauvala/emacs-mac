@@ -4321,13 +4321,15 @@ paint_window_cursor_decorations (struct window *w, bool on_p)
 	continue;
       struct glyph_row *row = MATRIX_ROW (w->current_matrix, cached->vpos);
       if (!row->enabled_p || row->mode_line_p
+	  || cached->hpos < 0 || cached->hpos >= row->used[TEXT_AREA]
 	  || cached->row_start_charpos != MATRIX_ROW_START_CHARPOS (row)
 	  || cached->row_end_charpos != MATRIX_ROW_END_CHARPOS (row)
 	  || cached->y != row->y || cached->height <= 0
 	  || cached->height > row->visible_height)
 	continue;
       decorations[count++] = (struct cursor_decoration) {
-	.row = row, .x = cached->x, .y = cached->y,
+	.row = row, .hpos = cached->hpos,
+	.x = cached->x, .y = cached->y,
 	.height = cached->height, .width = cached->width,
 	.color_pixel = cached->color_pixel, .kind = cached->kind,
 	.on = on_p && cached->on,
