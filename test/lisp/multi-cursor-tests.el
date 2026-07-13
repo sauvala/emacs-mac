@@ -23,6 +23,11 @@
 (require 'cl-lib)
 (require 'multi-cursor)
 
+(defun multi-cursor-tests--cursor (id)
+  "Return the internal test cursor whose stable identifier is ID."
+  (cl-find id multi-cursor--cursors
+           :key #'multi-cursor--cursor-id))
+
 (ert-deftest multi-cursor-lifecycle-enable-creates-local-session ()
   (with-temp-buffer
     (multi-cursor-mode 1)
@@ -198,6 +203,197 @@
     (multi-cursor-mode 1)
     (should multi-cursor-mode)
     (should (memq #'multi-cursor--end-session kill-buffer-hook))))
+
+(ert-deftest multi-cursor-api-add-selection-preserves-orientation-and-state ()
+  (with-temp-buffer
+    (insert "alpha beta gamma")
+    (goto-char 1)
+    (let* ((forward-id (multi-cursor-add-selection 8 3 t))
+           (backward-id (multi-cursor-add-selection 2 6 nil))
+           (forward (multi-cursor-tests--cursor forward-id))
+           (backward (multi-cursor-tests--cursor backward-id)))
+      (should multi-cursor-mode)
+      (should (eq (multi-cursor--cursor-direction forward) 'forward))
+      (should (multi-cursor--cursor-mark-active forward))
+      (should (eq (multi-cursor--cursor-direction backward) 'backward))
+      (should-not (multi-cursor--cursor-mark-active backward))
+      (should (= (marker-position (multi-cursor--cursor-point forward)) 8))
+      (should (= (marker-position (multi-cursor--cursor-mark forward)) 3)))))
+
+(ert-deftest multi-cursor-api-add-selection-returns-stable-id ()
+  (with-temp-buffer
+    (insert "alpha beta")
+    (goto-char 1)
+    (let ((id (multi-cursor-add-selection 7 2 t)))
+      (should (integerp id))
+      (should (= id (multi-cursor-add-selection 7 2 t)))
+      (should (= multi-cursor--next-id 1)))))
+
+(ert-deftest multi-cursor-api-point-local-add-and-remove ()
+  (with-temp-buffer
+    (insert "alpha beta gamma")
+    (goto-char 1)
+    (let* ((first (multi-cursor-tests--cursor
+                   (multi-cursor-add-at-point 7)))
+           (second (multi-cursor-tests--cursor
+                    (multi-cursor-add-selection 7 3 t)))
+           (first-marker (multi-cursor--cursor-point first))
+           (second-marker (multi-cursor--cursor-point second)))
+      (should-error (multi-cursor-add-at-point) :type 'user-error)
+      (should (= (multi-cursor-remove-at-point 7) 2))
+      (should-not multi-cursor-mode)
+      (should-not (marker-buffer first-marker))
+      (should-not (marker-buffer second-marker))
+      (should (= (multi-cursor-remove-at-point 7) 0)))))
+
+(ert-deftest multi-cursor-api-remove-all-releases-session ()
+  (with-temp-buffer
+    (insert "alpha beta gamma")
+    (goto-char 1)
+    (let* ((cursor (multi-cursor-tests--cursor
+                    (multi-cursor-add-selection 8 3 t)))
+           (point-marker (multi-cursor--cursor-point cursor))
+           (mark-marker (multi-cursor--cursor-mark cursor)))
+      (should (= (multi-cursor-remove-all) 1))
+      (should-not multi-cursor-mode)
+      (should-not multi-cursor--cursors)
+      (should-not (marker-buffer point-marker))
+      (should-not (marker-buffer mark-marker)))))
+
+(ert-deftest multi-cursor-api-selections-are-detached-integer-snapshots ()
+  (with-temp-buffer
+    (insert "alpha beta gamma")
+    (goto-char 1)
+    (multi-cursor-add-selection 8 3 t)
+    (let* ((snapshot (car (multi-cursor-selections)))
+           (id (plist-get snapshot :id)))
+      (should (equal snapshot
+                     `(:id ,id :point 8 :mark 3
+                       :mark-active t :direction forward)))
+      (should-not (cl-find-if #'markerp snapshot))
+      (setf (plist-get snapshot :point) 15)
+      (should (= (plist-get (car (multi-cursor-selections)) :point) 8)))))
+
+(ert-deftest multi-cursor-api-selections-query-does-not-normalize-state ()
+  (with-temp-buffer
+    (insert "alpha beta gamma")
+    (goto-char 1)
+    (let* ((first (multi-cursor-tests--cursor
+                   (multi-cursor-add-at-point 7)))
+           (second (multi-cursor-tests--cursor
+                    (multi-cursor-add-at-point 8)))
+           (second-marker (multi-cursor--cursor-point second)))
+      (set-marker second-marker 7)
+      (should (= (length (multi-cursor-selections)) 2))
+      (should (= (multi-cursor-count) 3))
+      (should (marker-buffer (multi-cursor--cursor-point first)))
+      (should (marker-buffer second-marker)))))
+
+(ert-deftest multi-cursor-api-count-includes-primary ()
+  (with-temp-buffer
+    (insert "alpha beta gamma")
+    (goto-char 1)
+    (should (= (multi-cursor-count) 1))
+    (multi-cursor-add-at-point 4)
+    (multi-cursor-add-at-point 8)
+    (should (= (multi-cursor-count) 3))))
+
+(ert-deftest multi-cursor-api-default-ceiling-is-bounded ()
+  (should (= multi-cursor-max-cursors 1000)))
+
+(ert-deftest multi-cursor-api-invalid-input-does-not-mutate-session ()
+  (let ((other (generate-new-buffer " *multi-cursor-validation*")))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "alpha beta")
+          (goto-char 1)
+          (let ((foreign (with-current-buffer other
+                           (insert "other")
+                           (copy-marker 2)))
+                (detached (make-marker)))
+            (dolist (arguments `((0 nil nil)
+                                 (,(1+ (point-max)) nil nil)
+                                 (1.5 nil nil)
+                                 (,foreign nil nil)
+                                 (7 ,foreign t)
+                                 (,detached nil nil)))
+              (should-error (apply #'multi-cursor-add-selection arguments)
+                            :type 'user-error)
+              (should-not multi-cursor-mode)
+              (should-not multi-cursor--cursors)
+              (should (= multi-cursor--next-id 0)))
+            (should-error (multi-cursor-add-at-point 0) :type 'user-error)
+            (should-error (multi-cursor-remove-at-point 0) :type 'user-error)))
+      (kill-buffer other))))
+
+(ert-deftest multi-cursor-api-active-selection-requires-mark ()
+  (with-temp-buffer
+    (insert "alpha beta")
+    (goto-char 1)
+    (should-error (multi-cursor-add-selection 7 nil t) :type 'user-error)
+    (should-not multi-cursor-mode)
+    (should-not multi-cursor--cursors)))
+
+(ert-deftest multi-cursor-api-invalid-ceiling-does-not-mutate-session ()
+  (with-temp-buffer
+    (insert "alpha beta")
+    (goto-char 1)
+    (dolist (limit '(0 -1 invalid))
+      (let ((multi-cursor-max-cursors limit))
+        (should-error (multi-cursor-add-at-point 7) :type 'user-error)
+        (should-not multi-cursor-mode)
+        (should-not multi-cursor--cursors)))))
+
+(ert-deftest multi-cursor-api-ceiling-is-validated-before-mutation ()
+  (with-temp-buffer
+    (insert "alpha beta gamma")
+    (goto-char 1)
+    (let ((multi-cursor-max-cursors 2))
+      (let ((id (multi-cursor-add-selection 8 3 t)))
+        (should (= (multi-cursor-add-selection 8 3 t) id))
+        (should-error (multi-cursor-add-at-point 12) :type 'user-error)
+        (should (= (multi-cursor-count) 2))
+        (should (= multi-cursor--next-id 1))))))
+
+(ert-deftest multi-cursor-api-primary-cursor-is-never-stored ()
+  (with-temp-buffer
+    (insert "alpha beta")
+    (goto-char 7)
+    (should-error (multi-cursor-add-selection 7 2 t) :type 'user-error)
+    (should-error (multi-cursor-add-at-point) :type 'user-error)
+    (should-not multi-cursor-mode)
+    (should-not multi-cursor--cursors)
+    (should (= multi-cursor--next-id 0))))
+
+(ert-deftest multi-cursor-api-normalization-removes-primary-collision ()
+  (with-temp-buffer
+    (insert "alpha beta")
+    (goto-char 1)
+    (let* ((cursor (multi-cursor-tests--cursor
+                    (multi-cursor-add-selection 7 2 t)))
+           (point-marker (multi-cursor--cursor-point cursor))
+           (mark-marker (multi-cursor--cursor-mark cursor)))
+      (goto-char 7)
+      (should-not (multi-cursor--normalized-cursors))
+      (should-not (marker-buffer point-marker))
+      (should-not (marker-buffer mark-marker)))))
+
+(ert-deftest multi-cursor-api-normalization-sorts-and-retains-overlaps ()
+  (with-temp-buffer
+    (insert "abcdefghijklmnop")
+    (goto-char 1)
+    (let* ((later-id (multi-cursor-add-selection 10 5 t))
+           (overlap-id (multi-cursor-add-selection 8 3 t))
+           (earlier-id (multi-cursor-add-selection 4 2 t)))
+      (should (equal (mapcar (lambda (cursor)
+                               (marker-position
+                                (multi-cursor--cursor-point cursor)))
+                             (multi-cursor--normalized-cursors))
+                     '(4 8 10)))
+      (should (multi-cursor-tests--cursor later-id))
+      (should (multi-cursor-tests--cursor overlap-id))
+      (should (multi-cursor-tests--cursor earlier-id))
+      (should (= (length multi-cursor--cursors) 3)))))
 
 (provide 'multi-cursor-tests)
 
