@@ -982,7 +982,9 @@ command has no global binding by default."
        :active (and (multi-cursor--cursor-mark-active cursor) t)
        :direction (multi-cursor--cursor-direction cursor)
        :goal-column (multi-cursor--cursor-goal-column cursor)
-       :last-yank (multi-cursor--cursor-last-yank cursor)))
+       :last-yank
+       (multi-cursor--copy-session-value
+        (multi-cursor--cursor-last-yank cursor))))
     (multi-cursor--normalized-cursors))))
 
 (defun multi-cursor--restore-edit-states (states cursors next-id)
@@ -1091,10 +1093,7 @@ ORIGIN and TARGET retain the direction of the edit for field checks."
             (progn
               (setf (multi-cursor--edit-end previous)
                     (max (multi-cursor--edit-end previous)
-                         (multi-cursor--edit-end edit))
-                    (multi-cursor--edit-members previous)
-                    (nconc (multi-cursor--edit-members previous)
-                           (multi-cursor--edit-members edit)))
+                         (multi-cursor--edit-end edit)))
               (when (multi-cursor--edit-survivor-less-p
                      (multi-cursor--edit-survivor edit)
                      (multi-cursor--edit-survivor previous))
@@ -1115,10 +1114,10 @@ INSERTION is the string used by `self-insert-command'."
     (if active
         (setq beg (min point mark)
               end (max point mark)
-              replacement (if (eq command 'self-insert-command)
+              replacement (if (memq command '(self-insert-command yank))
                               insertion ""))
       (pcase command
-        ('self-insert-command
+        ((or 'self-insert-command 'yank)
          (setq beg point end point replacement insertion))
         ('delete-char
          (let ((target (multi-cursor--step-delete-chars point argument)))
@@ -1201,6 +1200,411 @@ parallel vector of their final ends."
     (setq multi-cursor--cursors (nreverse survivors))
     (multi-cursor--normalize)))
 
+(defun multi-cursor--apply-edit-transaction
+    (states groups &optional installer)
+  "Apply disjoint edit GROUPS atomically for cursor STATES.
+
+INSTALLER receives GROUPS, final positions, and STATES after the buffer edits.
+It defaults to `multi-cursor--install-edit-results'.  Return the final position
+vector."
+  (let* ((original-cursors (copy-sequence multi-cursor--cursors))
+         (original-next-id multi-cursor--next-id)
+         (buffer (current-buffer))
+         (restriction (cons (point-min) (point-max)))
+         (vector
+          (vconcat
+           (mapcar (lambda (edit)
+                     (vector (multi-cursor--edit-beg edit)
+                             (multi-cursor--edit-end edit)
+                             (multi-cursor--edit-string edit)))
+                   groups)))
+         positions completed)
+    (multi-cursor--detach-edit-markers states)
+    (save-current-buffer
+      (unwind-protect
+          (progn
+            (atomic-change-group
+              (setq positions (multi-cursor--apply-edits vector))
+              (unless (eq (current-buffer) buffer)
+                (error "Modification hook changed the current buffer"))
+              (unless
+                  (equal
+                   (cons
+                    (car restriction)
+                    (+ (cdr restriction)
+                       (cl-loop
+                        for group in groups
+                        sum (- (length (multi-cursor--edit-string group))
+                               (- (multi-cursor--edit-end group)
+                                  (multi-cursor--edit-beg group))))))
+                   (cons (point-min) (point-max)))
+                (error "Modification hook changed the buffer restriction"))
+              (unless (and (equal multi-cursor--cursors original-cursors)
+                           (= multi-cursor--next-id original-next-id))
+                (error "Modification hook changed the cursor session"))
+              (funcall (or installer #'multi-cursor--install-edit-results)
+                       groups positions states))
+            (setq completed t))
+        (unless completed
+          (set-buffer buffer)
+          (multi-cursor--restore-edit-states
+           states original-cursors original-next-id))))
+    positions))
+
+(defun multi-cursor--kill-ring-state ()
+  "Return a restorable snapshot of the ordinary `kill-ring' variables."
+  (list kill-ring
+        kill-ring-yank-pointer
+        (mapcar (lambda (tail)
+                  (list tail (car tail) (cdr tail)))
+                (let (tails)
+                  (cl-loop for tail on kill-ring do (push tail tails))
+                  (nreverse tails)))))
+
+(defun multi-cursor--restore-kill-ring-state (state)
+  "Restore the ordinary `kill-ring' variables from STATE."
+  (dolist (cell-state (nth 2 state))
+    (setcar (nth 0 cell-state) (nth 1 cell-state))
+    (setcdr (nth 0 cell-state) (nth 2 cell-state)))
+  (setq kill-ring (nth 0 state)
+        kill-ring-yank-pointer (nth 1 state)))
+
+(defun multi-cursor--selection-edit (state delete-p)
+  "Return a selection edit for STATE, preflighting deletion if DELETE-P."
+  (let ((point (multi-cursor--edit-state-point state))
+        (mark (multi-cursor--edit-state-mark state)))
+    (unless (and mark
+                 (multi-cursor--edit-state-active state)
+                 (/= point mark))
+      (user-error "Every cursor needs a nonempty active selection"))
+    (let ((beg (min point mark))
+          (end (max point mark)))
+      (if delete-p
+          (multi-cursor--preflight-edit-range beg end point mark)
+        (unless (<= (point-min) beg end (point-max))
+          (user-error "Multiple-cursor selection is outside the buffer")))
+      (multi-cursor--edit-create
+       :beg beg :end end :string "" :survivor state :members (list state)))))
+
+(defun multi-cursor--selection-groups-and-text (states delete-p)
+  "Return merged selection edit groups and their text for STATES.
+
+The plain clipboard representation concatenates every original selection in
+buffer order, including overlapping text.  DELETE-P requests deletion
+preflight; the returned edit groups merge overlaps for a single deletion."
+  (let* ((edits
+          (mapcar (lambda (state)
+                    (multi-cursor--selection-edit state delete-p))
+                  states))
+         (text
+          (mapconcat
+           (lambda (group)
+             (filter-buffer-substring
+              (multi-cursor--edit-beg group)
+              (multi-cursor--edit-end group)))
+           (sort
+            (copy-sequence edits)
+            (lambda (left right)
+              (let ((left-beg (multi-cursor--edit-beg left))
+                    (right-beg (multi-cursor--edit-beg right))
+                    (left-end (multi-cursor--edit-end left))
+                    (right-end (multi-cursor--edit-end right))
+                    (left-id
+                     (multi-cursor--edit-state-id
+                      (multi-cursor--edit-survivor left)))
+                    (right-id
+                     (multi-cursor--edit-state-id
+                      (multi-cursor--edit-survivor right))))
+                (or (< left-beg right-beg)
+                    (and (= left-beg right-beg)
+                         (or (< left-id right-id)
+                             (and (= left-id right-id)
+                                  (< left-end right-end))))))))
+           ""))
+         (groups (multi-cursor--merge-edits edits)))
+    (cons groups text)))
+
+(defun multi-cursor--store-kill (string before-p)
+  "Store STRING once, appending before the last kill when BEFORE-P.
+
+Return the external clipboard function and the value it should receive, or
+nil when the kill transformation discarded STRING."
+  (let ((external interprogram-cut-function)
+        exported export-p)
+    (let ((interprogram-cut-function
+           (lambda (value)
+             (setq exported value export-p t)))
+          (kill-append-merge-undo nil))
+      (if (eq last-command 'kill-region)
+          (kill-append string before-p)
+        (kill-new string)))
+    (and export-p (list external exported))))
+
+(defun multi-cursor--copy-session-value (value)
+  "Return a detached structural copy of cursor metadata VALUE."
+  (cond
+   ((stringp value) (copy-sequence value))
+   ((consp value)
+    (cons (multi-cursor--copy-session-value (car value))
+          (multi-cursor--copy-session-value (cdr value))))
+   ((vectorp value)
+    (vconcat (mapcar #'multi-cursor--copy-session-value value)))
+   (t value)))
+
+(defun multi-cursor--session-fingerprint ()
+  "Return an immutable fingerprint of the complete current cursor session."
+  (list
+   (point) (mark t) (and mark-active t) temporary-goal-column
+   multi-cursor--next-id
+   (mapcar
+    (lambda (cursor)
+      (list (multi-cursor--cursor-id cursor)
+            (marker-position (multi-cursor--cursor-point cursor))
+            (and (multi-cursor--cursor-mark cursor)
+                 (marker-position (multi-cursor--cursor-mark cursor)))
+            (and (multi-cursor--cursor-mark-active cursor) t)
+            (multi-cursor--cursor-direction cursor)
+            (multi-cursor--cursor-goal-column cursor)
+            (multi-cursor--copy-session-value
+             (multi-cursor--cursor-last-yank cursor))))
+    multi-cursor--cursors)))
+
+(defun multi-cursor--callback-context ()
+  "Return the buffer and immutable state protected across a callback."
+  (list (current-buffer)
+        (cons (point-min) (point-max))
+        (buffer-chars-modified-tick)
+        (multi-cursor--session-fingerprint)))
+
+(defun multi-cursor--validate-callback-state (context)
+  "Validate session invariants after a callback against CONTEXT."
+  (unless (eq (current-buffer) (nth 0 context))
+    (error "Multiple-cursor callback changed the current buffer"))
+  (unless (equal (nth 1 context) (cons (point-min) (point-max)))
+    (error "Multiple-cursor callback changed the buffer restriction"))
+  (unless (= (nth 2 context) (buffer-chars-modified-tick))
+    (error "Multiple-cursor callback changed buffer text"))
+  (unless (equal (nth 3 context) (multi-cursor--session-fingerprint))
+    (error "Multiple-cursor callback changed the cursor session")))
+
+(defun multi-cursor--validate-plain-region (primary states cursors next-id)
+  "Reject nonlinear region extraction for PRIMARY and protect cursor STATES.
+
+CURSORS and NEXT-ID are restored if the extractor mutates state or signals."
+  (let* ((point (multi-cursor--edit-state-point primary))
+         (mark (multi-cursor--edit-state-mark primary))
+         (expected (and mark (list (cons (min point mark)
+                                         (max point mark)))))
+         bounds completed)
+    (unwind-protect
+        (save-current-buffer
+          (atomic-change-group
+            (let ((context (multi-cursor--callback-context)))
+              (setq bounds (funcall region-extract-function 'bounds))
+              (multi-cursor--validate-callback-state context)
+              (setq completed t))))
+      (unless completed
+        (multi-cursor--restore-edit-states states cursors next-id)))
+    (unless (and expected (equal bounds expected))
+      (user-error "Nonlinear regions are not multiple-cursor safe yet"))))
+
+(defun multi-cursor--kill-or-copy
+    (command _prefix _keys record-flag _special)
+  "Apply multi-selection kill or copy COMMAND as one logical operation.
+
+RECORD-FLAG non-nil records that single command invocation."
+  (unless (memq command '(kill-region copy-region-as-kill kill-ring-save))
+    (error "Invalid multiple-cursor kill command: %S" command))
+  (let* ((states (multi-cursor--snapshot-edit-states))
+         (original-cursors (copy-sequence multi-cursor--cursors))
+         (original-next-id multi-cursor--next-id)
+         (_ (multi-cursor--validate-plain-region
+             (car states) states original-cursors original-next-id))
+         (groups-and-text
+          (multi-cursor--selection-groups-and-text
+           states (eq command 'kill-region)))
+         (groups (car groups-and-text))
+         (text (cdr groups-and-text))
+         (primary (car states))
+         (before-p (< (multi-cursor--edit-state-point primary)
+                      (multi-cursor--edit-state-mark primary)))
+         (ring-state (multi-cursor--kill-ring-state))
+         export completed)
+    (unwind-protect
+        (progn
+          (if (eq command 'kill-region)
+              (multi-cursor--apply-edit-transaction
+               states groups
+               (lambda (edits positions edit-states)
+                 (let ((context (multi-cursor--callback-context)))
+                   (setq export (multi-cursor--store-kill text before-p))
+                   (multi-cursor--validate-callback-state context)
+                   (multi-cursor--install-edit-results
+                    edits positions edit-states))))
+            (let ((context (multi-cursor--callback-context)))
+              (save-current-buffer
+                (atomic-change-group
+                  (setq export (multi-cursor--store-kill text before-p))
+                  (multi-cursor--validate-callback-state context)))
+              (dolist (cursor multi-cursor--cursors)
+                (setf (multi-cursor--cursor-mark-active cursor) nil))
+              (deactivate-mark t)
+              (setq multi-cursor--redisplay-snapshot-dirty-p t)))
+          (setq completed t))
+      (unless completed
+        (multi-cursor--restore-kill-ring-state ring-state)
+        (when (not (eq command 'kill-region))
+          (multi-cursor--restore-edit-states
+           states original-cursors original-next-id))))
+    (when (eq command 'kill-region)
+      (setq this-command 'kill-region))
+    (setq deactivate-mark t)
+    (when record-flag
+      (add-to-history
+       'command-history
+       (list command
+             (multi-cursor--edit-state-mark primary)
+             (multi-cursor--edit-state-point primary)
+             '(quote region))
+       nil t))
+    ;; Clipboard callbacks run last.  Their external effects cannot be
+    ;; compensated if they signal after changing another application.
+    (when (car export)
+      (funcall (car export) (cadr export)))
+    nil))
+
+(defun multi-cursor--prepare-yank-string (string)
+  "Return plain broadcast-yank STRING prepared for insertion.
+
+Arbitrary yank handlers are deferred because they can insert different text,
+move point, or install command-specific undo functions at each cursor."
+  (unless (stringp string)
+    (error "Kill-ring entry is not a string"))
+  (dolist (function yank-transform-functions)
+    (let ((context (multi-cursor--callback-context)))
+      (setq string (funcall function string))
+      (multi-cursor--validate-callback-state context)))
+  (unless (stringp string)
+    (error "Yank transform did not return a string"))
+  (when (text-property-not-all 0 (length string) 'yank-handler nil string)
+    (user-error "Yank handlers are not multiple-cursor safe yet"))
+  (copy-sequence string))
+
+(defun multi-cursor--process-yank-spans (groups positions)
+  "Apply ordinary yank property handling to GROUPS at final POSITIONS."
+  (cl-mapc
+   (lambda (group final-end)
+     (let ((final-beg (- final-end
+                         (length (multi-cursor--edit-string group)))))
+       (when (< final-beg final-end)
+         ;; Run arbitrary handlers outside `with-silent-modifications' so
+         ;; character changes they attempt remain part of the change group
+         ;; and can be rolled back.
+         (dolist (handler yank-handled-properties)
+           (let ((property (car handler))
+                 (function (cdr handler))
+                 (run-start final-beg))
+             (while (< run-start final-end)
+               (let ((value (get-text-property run-start property))
+                     (run-end (next-single-property-change
+                               run-start property nil final-end)))
+                 (let ((context (multi-cursor--callback-context)))
+                   (funcall function value run-start run-end)
+                   (multi-cursor--validate-callback-state context))
+                 (setq run-start run-end)))))
+         (with-silent-modifications
+           (if (eq yank-excluded-properties t)
+               (set-text-properties final-beg final-end nil)
+             (remove-list-of-text-properties
+              final-beg final-end yank-excluded-properties))
+           (when (text-properties-at (1- final-end))
+             (put-text-property
+              (1- final-end) final-end 'rear-nonsticky t))))))
+   groups (append positions nil)))
+
+(defun multi-cursor--install-yank-results
+    (groups positions states before-p)
+  "Install yank GROUPS at POSITIONS for STATES, honoring BEFORE-P."
+  (multi-cursor--install-edit-results groups positions states)
+  (cl-mapc
+   (lambda (group final-end)
+     (let* ((state (multi-cursor--edit-survivor group))
+            (final-beg (- final-end
+                          (length (multi-cursor--edit-string group))))
+            (point (if before-p final-beg final-end))
+            (mark (if before-p final-end final-beg)))
+       (if (multi-cursor--edit-state-primary state)
+           (progn
+             (goto-char point)
+             (set-marker (mark-marker) mark (current-buffer))
+             (setq mark-active nil temporary-goal-column nil))
+         (let ((cursor (multi-cursor--edit-state-cursor state)))
+           (multi-cursor--set-record-state cursor point mark nil nil)))))
+   groups (append positions nil)))
+
+(defun multi-cursor--yank
+    (command prefix _keys record-flag _special)
+  "Broadcast one snapshotted `kill-ring' string for yank COMMAND.
+
+PREFIX selects the ordinary kill entry and yank orientation.  RECORD-FLAG
+non-nil records that single command invocation."
+  (unless (eq command 'yank)
+    (error "Invalid multiple-cursor yank command: %S" command))
+  (let* ((ring-state (multi-cursor--kill-ring-state))
+         (initial-states (multi-cursor--snapshot-edit-states))
+         (initial-cursors (copy-sequence multi-cursor--cursors))
+         (initial-next-id multi-cursor--next-id)
+         (callback-context (multi-cursor--callback-context))
+         (before-p (consp prefix))
+         (index (cond
+                 (before-p 0)
+                 ((eq prefix '-) -2)
+                 (t (1- (prefix-numeric-value prefix)))))
+         states insertion groups completed)
+    ;; Mark an incomplete yank exactly as the ordinary command does.
+    (setq yank-window-start (window-start)
+          this-command t)
+    (unwind-protect
+        (progn
+          ;; `current-kill' is deliberately called once, including any
+          ;; interprogram-paste mutation of the kill ring.
+          (save-current-buffer
+            (atomic-change-group
+              (setq insertion
+                    (multi-cursor--prepare-yank-string (current-kill index)))
+              (multi-cursor--validate-callback-state callback-context)))
+          (setq states initial-states
+                groups
+                (multi-cursor--merge-edits
+                 (mapcar (lambda (state)
+                           (multi-cursor--state-edit
+                            state 'yank 1 insertion))
+                         states)))
+          (multi-cursor--apply-edit-transaction
+           states groups
+           (lambda (edits positions edit-states)
+             (let ((context (multi-cursor--callback-context)))
+               (multi-cursor--process-yank-spans edits positions)
+               (multi-cursor--validate-callback-state context)
+               (multi-cursor--install-yank-results
+                edits positions edit-states before-p))))
+          (setq completed t))
+      (unless completed
+        (multi-cursor--restore-kill-ring-state ring-state)
+        (multi-cursor--restore-edit-states
+         initial-states initial-cursors initial-next-id)))
+    (setq this-command 'yank
+          yank-undo-function nil)
+    (when record-flag
+      (add-to-history
+       'command-history
+       (list command
+             (if (or (consp prefix) (and (symbolp prefix) prefix))
+                 (list 'quote prefix)
+               prefix))
+       nil t))
+    nil))
+
 (defun multi-cursor--batch-edit
     (command prefix _keys record-flag _special)
   "Apply supported editing COMMAND with PREFIX once at every native cursor.
@@ -1235,52 +1639,12 @@ history."
                                    (multi-cursor--cursor-mark cursor)))))
                        multi-cursor--cursors)))
       (let* ((states (multi-cursor--snapshot-edit-states))
-             (original-cursors (copy-sequence multi-cursor--cursors))
-             (original-next-id multi-cursor--next-id)
-             (buffer (current-buffer))
-             (restriction (cons (point-min) (point-max)))
              (edits (mapcar (lambda (state)
                               (multi-cursor--state-edit
                                state command argument insertion))
                             states))
-             (groups (multi-cursor--merge-edits edits))
-             (vector
-              (vconcat
-               (mapcar (lambda (edit)
-                         (vector (multi-cursor--edit-beg edit)
-                                 (multi-cursor--edit-end edit)
-                                 (multi-cursor--edit-string edit)))
-                       groups)))
-             positions completed)
-        (multi-cursor--detach-edit-markers states)
-        (save-current-buffer
-          (unwind-protect
-              (progn
-                (atomic-change-group
-                  (setq positions (multi-cursor--apply-edits vector))
-                  (unless (eq (current-buffer) buffer)
-                    (error "Modification hook changed the current buffer"))
-                  (unless
-                      (equal
-                       (cons
-                        (car restriction)
-                        (+ (cdr restriction)
-                           (cl-loop
-                            for group in groups
-                            sum (- (length (multi-cursor--edit-string group))
-                                   (- (multi-cursor--edit-end group)
-                                      (multi-cursor--edit-beg group))))))
-                       (cons (point-min) (point-max)))
-                    (error "Modification hook changed the buffer restriction"))
-                  (unless (and (equal multi-cursor--cursors original-cursors)
-                               (= multi-cursor--next-id original-next-id))
-                    (error "Modification hook changed the cursor session"))
-                  (multi-cursor--install-edit-results groups positions states))
-                (setq completed t))
-            (unless completed
-              (set-buffer buffer)
-              (multi-cursor--restore-edit-states
-               states original-cursors original-next-id))))))
+             (groups (multi-cursor--merge-edits edits)))
+        (multi-cursor--apply-edit-transaction states groups)))
     (when record-flag
       (add-to-history
        'command-history
@@ -1570,13 +1934,20 @@ session."
 (dolist (command '(self-insert-command delete-char delete-backward-char))
   (multi-cursor-register-command command 'batch-edit #'multi-cursor--batch-edit))
 
+(dolist (command '(kill-region copy-region-as-kill kill-ring-save))
+  (multi-cursor-register-command
+   command 'custom-handler #'multi-cursor--kill-or-copy))
+
+(multi-cursor-register-command 'yank 'batch-edit #'multi-cursor--yank)
+
 (dolist (command '(undo undo-only undo-redo
                    execute-extended-command execute-kbd-macro
                    isearch-forward isearch-backward
                    query-replace query-replace-regexp
                    right-char left-char right-word left-word
                    next-line previous-line
-                   beginning-of-visual-line end-of-visual-line))
+                   beginning-of-visual-line end-of-visual-line
+                   yank-pop))
   (when (commandp command)
     (multi-cursor-register-command command 'unsupported)))
 
