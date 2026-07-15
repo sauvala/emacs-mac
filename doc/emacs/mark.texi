@@ -398,9 +398,11 @@ primary cursor.  The option @code{multi-cursor-max-cursors} limits that
 total; its default is 1000.
 
   Ordinary character insertion and the exact commands
-@code{delete-char} and @code{delete-backward-char}, without prefix
-arguments, run as one preflighted transaction at all cursors and form one
-undo unit.  The commands @code{forward-char}, @code{backward-char},
+@code{delete-char}, @code{delete-backward-char}, and the grapheme-aware
+@code{delete-forward-char}, without prefix arguments, run as one
+preflighted transaction at all cursors and form one undo unit.
+Overwrite-mode backward deletion and @code{backward-delete-char-untabify}
+remain unsupported.  The commands @code{forward-char}, @code{backward-char},
 @code{left-char}, @code{right-char}, @code{forward-word},
 @code{backward-word}, @code{left-word}, @code{right-word},
 @code{move-beginning-of-line}, @code{move-end-of-line},

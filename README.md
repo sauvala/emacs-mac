@@ -212,10 +212,12 @@ for example:
 (global-set-key (kbd "C-c m q") #'multi-cursor-remove-all)
 ```
 
-Creation commands enable `multi-cursor-mode` automatically. Typing, the exact
-commands `delete-char` and `delete-backward-char` without prefix arguments,
-the vetted logical movement commands, ordinary arrow and directional word
-movement, kill/copy, and yank are supported. Arrow commands preserve
+Creation commands enable `multi-cursor-mode` automatically. Typing, raw
+`delete-char`, ordinary Backspace, grapheme-aware forward Delete without
+prefix arguments, the vetted logical movement commands, ordinary arrow and
+directional word movement, kill/copy, and yank are supported. Overwrite-mode
+Backspace and `backward-delete-char-untabify` remain unsupported. Arrow
+commands preserve
 per-cursor bidi and goal-column behavior, but visual-order horizontal arrows
 and display-line vertical arrows remain unsupported because they require live
 glyph geometry for every cursor.

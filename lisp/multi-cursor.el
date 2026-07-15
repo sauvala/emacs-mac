@@ -1025,10 +1025,7 @@ command has no global binding by default."
   "Return the position COUNT characters from POSITION for raw deletion.
 
 Deleting outwards at an exact accessible boundary is a per-cursor no-op.
-Otherwise an overshooting count rejects the entire batch.  These Task 7
-handlers intentionally match the raw-character contracts of `delete-char'
-and `delete-backward-char'; grapheme-aware `delete-forward-char' remains a
-separate command and is not registered yet."
+Otherwise an overshooting count rejects the entire batch."
   (let ((target (+ position count)))
     (cond
      ((and (> count 0) (= position (point-max))) position)
@@ -1036,6 +1033,37 @@ separate command and is not registered yet."
      ((> target (point-max)) (signal 'end-of-buffer nil))
      ((< target (point-min)) (signal 'beginning-of-buffer nil))
      (t target))))
+
+(defun multi-cursor--step-delete-forward-graphemes (position count)
+  "Return the position COUNT grapheme clusters after POSITION.
+
+An exact accessible end is a per-cursor no-op.  Overshooting the accessible
+end rejects the entire batch.  This follows `delete-forward-char' without
+executing that editing command separately for every cursor."
+  (if (= position (point-max))
+      position
+    (let ((pos position))
+      (while (> count 0)
+        (when (>= pos (point-max))
+          (signal 'end-of-buffer nil))
+        (let ((composition (find-composition pos)))
+          (setq pos
+                (if composition
+                    (let ((from (car composition))
+                          (to (cadr composition)))
+                      (cond
+                       ((and (= (length composition) 3)
+                             (booleanp (nth 2 composition)))
+                        to)
+                       ((<= to pos) (1+ pos))
+                       (t
+                        (lgstring-glyph-boundary
+                         (nth 2 composition) from (1+ pos)))))
+                  (1+ pos))))
+        (setq count (1- count)))
+      (when (> pos (point-max))
+        (signal 'end-of-buffer nil))
+      pos)))
 
 (defun multi-cursor--read-only-value-blocks-p (value)
   "Return non-nil when read-only VALUE is not inhibited."
@@ -1103,7 +1131,8 @@ ORIGIN and TARGET retain the direction of the edit for field checks."
           (push edit result))))
     (nreverse result)))
 
-(defun multi-cursor--state-edit (state command argument insertion)
+(defun multi-cursor--state-edit
+    (state command argument insertion &optional delete-policy)
   "Return the raw edit for STATE under COMMAND and ARGUMENT.
 
 INSERTION is the string used by `self-insert-command'."
@@ -1111,8 +1140,14 @@ INSERTION is the string used by `self-insert-command'."
          (mark (multi-cursor--edit-state-mark state))
          (active (and (multi-cursor--edit-state-active state)
                       mark (/= point mark)))
+         (replace-selection
+          (and active
+               (or (memq command '(self-insert-command yank delete-char))
+                   (and delete-policy
+                        (memq command '(delete-backward-char
+                                        delete-forward-char))))))
          beg end replacement)
-    (if active
+    (if replace-selection
         (setq beg (min point mark)
               end (max point mark)
               replacement (if (memq command '(self-insert-command yank))
@@ -1126,6 +1161,14 @@ INSERTION is the string used by `self-insert-command'."
                  replacement "")))
         ('delete-backward-char
          (let ((target (multi-cursor--step-delete-chars point (- argument))))
+           (setq beg (min point target) end (max point target)
+                 replacement "")))
+        ('delete-forward-char
+         (let ((target
+                (if (> argument 0)
+                    (multi-cursor--step-delete-forward-graphemes
+                     point argument)
+                  (multi-cursor--step-delete-chars point argument))))
            (setq beg (min point target) end (max point target)
                  replacement "")))))
     (multi-cursor--preflight-edit-range beg end point
@@ -1654,6 +1697,68 @@ history."
          (list command argument))
        nil t))))
 
+(defun multi-cursor--character-delete
+    (command prefix _keys record-flag _special)
+  "Safely apply an ordinary no-prefix character deletion COMMAND.
+
+PREFIX is rejected because ordinary interactive prefixes also request kill
+semantics.  RECORD-FLAG controls command-history recording."
+  (unless (memq command '(delete-backward-char delete-forward-char))
+    (error "Invalid multiple-cursor character deletion: %S" command))
+  (when prefix
+    (user-error "Prefix deletion is not multiple-cursor safe yet"))
+  (when (and (eq command 'delete-backward-char) overwrite-mode)
+    (user-error
+     "Overwrite-mode backward deletion is not multiple-cursor safe"))
+  (let ((delete-policy delete-active-region))
+    (when (and (eq delete-policy 'kill)
+               (or (and mark-active (mark t) (/= (point) (mark t)))
+                   (cl-some
+                    (lambda (cursor)
+                      (and (multi-cursor--cursor-mark-active cursor)
+                           (multi-cursor--cursor-mark cursor)
+                           (/= (marker-position
+                                (multi-cursor--cursor-point cursor))
+                               (marker-position
+                                (multi-cursor--cursor-mark cursor)))))
+                    multi-cursor--cursors)))
+      (user-error
+       "Killing active selections is not multiple-cursor safe here"))
+    (let* ((states (multi-cursor--snapshot-edit-states))
+           (original-cursors (copy-sequence multi-cursor--cursors))
+           (original-next-id multi-cursor--next-id)
+           edits groups planned)
+      ;; Composition discovery can shape text through Lisp callbacks.  Plan
+      ;; under an atomic guard and reject any change to text, restriction,
+      ;; selection policy, buffer identity, or the cursor session.
+      (unwind-protect
+          (save-current-buffer
+            (save-restriction
+              (let ((delete-active-region delete-policy))
+                (atomic-change-group
+                  (let ((context (multi-cursor--callback-context)))
+                    (setq edits
+                          (mapcar
+                           (lambda (state)
+                             (multi-cursor--state-edit
+                              state command 1 nil delete-policy))
+                           states))
+                    (multi-cursor--validate-callback-state context)
+                    (unless (eq delete-active-region delete-policy)
+                      (error
+                       "Deletion planning changed its selection policy"))
+                    (setq groups (multi-cursor--merge-edits edits)
+                          planned t))))))
+        (unless planned
+          (multi-cursor--restore-edit-states
+           states original-cursors original-next-id)
+          (unless multi-cursor-mode
+            (setq multi-cursor-mode t)
+            (multi-cursor--start))))
+      (multi-cursor--apply-edit-transaction states groups))
+    (when record-flag
+      (add-to-history 'command-history (list command 1) nil t))))
+
 (defun multi-cursor--invoke-movement (command argument canonical-last-command)
   "Invoke vetted movement COMMAND once, accepting boundary clamping.
 
@@ -1968,8 +2073,12 @@ created.  This mode refuses to start while the external
   (multi-cursor-register-command
    command 'broadcast-movement #'multi-cursor--movement-handler))
 
-(dolist (command '(self-insert-command delete-char delete-backward-char))
+(dolist (command '(self-insert-command delete-char))
   (multi-cursor-register-command command 'batch-edit #'multi-cursor--batch-edit))
+
+(dolist (command '(delete-backward-char delete-forward-char))
+  (multi-cursor-register-command
+   command 'batch-edit #'multi-cursor--character-delete))
 
 (dolist (command '(kill-region copy-region-as-kill kill-ring-save))
   (multi-cursor-register-command
@@ -1982,6 +2091,7 @@ created.  This mode refuses to start while the external
                    isearch-forward isearch-backward
                    query-replace query-replace-regexp
                    beginning-of-visual-line end-of-visual-line
+                   backward-delete-char-untabify
                    yank-pop))
   (when (commandp command)
     (multi-cursor-register-command command 'unsupported)))
