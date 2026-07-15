@@ -98,6 +98,19 @@
              (remhash ,cmd multi-cursor--command-policies)
            (puthash ,cmd ,saved multi-cursor--command-policies))))))
 
+(defmacro multi-cursor-tests--with-plain-newline (&rest body)
+  "Run BODY with every side-effectful ordinary newline feature disabled."
+  (declare (indent 0) (debug t))
+  `(let ((abbrev-mode nil)
+         (auto-fill-function nil)
+         (electric-indent-mode nil)
+         (left-margin 0)
+         (overwrite-mode nil)
+         (post-self-insert-hook nil)
+         (translation-table-for-input nil)
+         (use-hard-newlines nil))
+     ,@body))
+
 (ert-deftest multi-cursor-lifecycle-enable-creates-local-session ()
   (with-temp-buffer
     (multi-cursor-mode 1)
@@ -2126,6 +2139,291 @@
         (should (= (marker-position
                     (multi-cursor--cursor-point cursor))
                    7))))))
+
+(ert-deftest multi-cursor-edit-newline-policy-and-real-return ()
+  (let ((entry (gethash 'newline multi-cursor--command-policies)))
+    (should (eq (car entry) 'batch-edit))
+    (should (functionp (cdr entry))))
+  (ert-with-test-buffer (:selected t)
+    (should (eq (key-binding (kbd "RET")) 'newline))
+    (should (eq (key-binding (kbd "C-j"))
+                'electric-newline-and-maybe-indent))
+    (should (eq (key-binding (kbd "TAB")) 'indent-for-tab-command))
+    (should-not (gethash 'electric-newline-and-maybe-indent
+                         multi-cursor--command-policies))
+    (should-not (gethash 'indent-for-tab-command
+                         multi-cursor--command-policies))
+    (insert "ab\ncd")
+    (goto-char 2)
+    (let* ((id (multi-cursor-add-at-point 5))
+           (cursor (multi-cursor-tests--cursor id)))
+      (multi-cursor-tests--with-plain-newline
+        (ert-play-keys (kbd "RET")))
+      (should (equal (buffer-string) "a\nb\nc\nd"))
+      (should (= (point) 3))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point cursor))
+                 7)))))
+
+(ert-deftest multi-cursor-edit-newline-unknown-keys-reject-atomically ()
+  (dolist (command '(electric-newline-and-maybe-indent
+                     indent-for-tab-command))
+    (with-temp-buffer
+      (insert "abcd")
+      (goto-char 2)
+      (multi-cursor-add-at-point 4)
+      (let ((before (buffer-string)))
+        (should-not (gethash command multi-cursor--command-policies))
+        (should-error (command-execute command) :type 'user-error)
+        (should (equal (buffer-string) before))
+        (should (= (point) 2))))))
+
+(ert-deftest multi-cursor-edit-newline-same-position-coalesces ()
+  ;; The public API prevents a secondary cursor at the primary point.  Test
+  ;; the edit merger directly so stale/internal duplicate snapshots still
+  ;; cannot insert two newlines at one position.
+  (let* ((primary (multi-cursor--edit-state-create
+                   :id 0 :primary t :point 2))
+         (secondary (multi-cursor--edit-state-create
+                     :id 1 :point 2))
+         (groups
+          (multi-cursor--merge-edits
+           (list
+            (multi-cursor--edit-create
+             :beg 2 :end 2 :string "\n" :survivor primary
+             :members (list primary))
+            (multi-cursor--edit-create
+             :beg 2 :end 2 :string "\n" :survivor secondary
+             :members (list secondary))))))
+    (should (= (length groups) 1))
+    (should (equal (multi-cursor--edit-string (car groups)) "\n"))
+    (should (multi-cursor--edit-state-primary
+             (multi-cursor--edit-survivor (car groups))))))
+
+(ert-deftest multi-cursor-edit-newline-bounds-and-narrowing ()
+  (with-temp-buffer
+    (insert "outside abcd tail")
+    (narrow-to-region 9 13)
+    (goto-char (point-min))
+    (let* ((id (multi-cursor-add-at-point (point-max)))
+           (cursor (multi-cursor-tests--cursor id)))
+      (multi-cursor-tests--with-plain-newline
+        (command-execute 'newline))
+      (should (equal (buffer-string) "\nabcd\n"))
+      (should (= (point-min) 9))
+      (should (= (point-max) 15))
+      (should (= (point) 10))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point cursor))
+                 15)))))
+
+(ert-deftest multi-cursor-edit-newline-prefix-and-selection-reject ()
+  (dolist (prefix '(0 2 -1 (4)))
+    (with-temp-buffer
+      (insert "abcd")
+      (goto-char 2)
+      (let* ((id (multi-cursor-add-at-point 4))
+             (cursor (multi-cursor-tests--cursor id))
+             (prefix-arg prefix)
+             (before (buffer-string)))
+        (multi-cursor-tests--with-plain-newline
+          (should-error (command-execute 'newline) :type 'user-error))
+        (should (equal (buffer-string) before))
+        (should (= (point) 2))
+        (should (= (marker-position
+                    (multi-cursor--cursor-point cursor))
+                   4)))))
+  (dolist (active-at '(primary secondary))
+    (with-temp-buffer
+      (insert "abcdef")
+      (goto-char 3)
+      (if (eq active-at 'primary)
+          (progn
+            (set-mark 1)
+            (activate-mark)
+            (multi-cursor-add-at-point 6))
+        (multi-cursor-add-selection 6 4 t))
+      (let ((before (buffer-string)))
+        (multi-cursor-tests--with-plain-newline
+          (should-error (command-execute 'newline) :type 'user-error))
+        (should (equal (buffer-string) before))
+        (should (= (multi-cursor-count) 2))))))
+
+(ert-deftest multi-cursor-edit-newline-effect-gates-reject-atomically ()
+  (dolist (gate '(minibuffer overwrite abbrev auto-fill hard-newline
+                             translation-table
+                             left-margin electric-indent post-hook))
+    (with-temp-buffer
+      (insert "abcd")
+      (goto-char 2)
+      (let* ((id (multi-cursor-add-at-point 4))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string)))
+        (multi-cursor-tests--with-plain-newline
+          (pcase gate
+            ('overwrite (setq overwrite-mode 'overwrite-mode-textual))
+            ('abbrev (setq abbrev-mode t))
+            ('auto-fill (setq auto-fill-function #'ignore))
+            ('hard-newline (setq use-hard-newlines t))
+            ('translation-table
+             (setq translation-table-for-input
+                   (make-char-table 'translation-table)))
+            ('left-margin (setq left-margin 2))
+            ('electric-indent (setq electric-indent-mode t))
+            ('post-hook (setq post-self-insert-hook (list #'ignore))))
+          (if (eq gate 'minibuffer)
+              (cl-letf (((symbol-function 'minibufferp)
+                         (lambda (&optional _buffer) t)))
+                (should-error (command-execute 'newline)
+                              :type 'user-error))
+            (should-error (command-execute 'newline) :type 'user-error)))
+        (should (equal (buffer-string) before))
+        (should (= (point) 2))
+        (should (= (marker-position
+                    (multi-cursor--cursor-point cursor))
+                   4))))))
+
+(ert-deftest multi-cursor-edit-newline-adjacent-properties-reject-atomically ()
+  (dolist (placement '(primary-before primary-after primary-both
+                                      secondary-before secondary-after
+                                      secondary-both))
+    (with-temp-buffer
+      (insert "abcdef")
+      (goto-char 3)
+      (let* ((id (multi-cursor-add-at-point 6))
+             (cursor (multi-cursor-tests--cursor id)))
+        (when (memq placement '(primary-before primary-both))
+          (put-text-property 2 3 'multi-cursor-test-property placement))
+        (when (memq placement '(primary-after primary-both))
+          (put-text-property 3 4 'multi-cursor-test-property placement))
+        (when (memq placement '(secondary-before secondary-both))
+          (put-text-property 5 6 'multi-cursor-test-property placement))
+        (when (memq placement '(secondary-after secondary-both))
+          (put-text-property 6 7 'multi-cursor-test-property placement))
+        (let ((before (buffer-substring (point-min) (point-max))))
+          (multi-cursor-tests--with-plain-newline
+            (should-error (command-execute 'newline) :type 'user-error))
+          (should (equal-including-properties
+                   (buffer-substring (point-min) (point-max)) before))
+          (should (= (point) 3))
+          (should multi-cursor-mode)
+          (should (= (multi-cursor-count) 2))
+          (should (= (multi-cursor--cursor-id cursor) id))
+          (should (= (marker-position
+                      (multi-cursor--cursor-point cursor))
+                     6)))))))
+
+(ert-deftest multi-cursor-edit-newline-inaccessible-preceding-property-rejects ()
+  (with-temp-buffer
+    (insert "xabc")
+    (put-text-property 1 2 'multi-cursor-test-property 'outside)
+    (narrow-to-region 2 5)
+    (goto-char (point-min))
+    (let* ((id (multi-cursor-add-at-point (point-max)))
+           (cursor (multi-cursor-tests--cursor id))
+           (before (save-restriction
+                     (widen)
+                     (buffer-substring (point-min) (point-max)))))
+      (multi-cursor-tests--with-plain-newline
+        (should-error (command-execute 'newline) :type 'user-error))
+      (should (equal-including-properties
+               (save-restriction
+                 (widen)
+                 (buffer-substring (point-min) (point-max)))
+               before))
+      (should (= (point-min) 2))
+      (should (= (point-max) 5))
+      (should (= (point) 2))
+      (should multi-cursor-mode)
+      (should (= (multi-cursor-count) 2))
+      (should (= (multi-cursor--cursor-id cursor) id))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point cursor))
+                 5)))))
+
+(ert-deftest multi-cursor-edit-newline-preflight-rolls-back ()
+  (dolist (failure '(read-only field hook))
+    (with-temp-buffer
+      (insert "abcdef")
+      (goto-char 2)
+      (let* ((id (multi-cursor-add-at-point 5))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string))
+             (before-change-functions
+              (when (eq failure 'hook)
+                (list (lambda (beg _end)
+                        (when (= beg 2)
+                          (error "Newline hook failed")))))))
+        (when (eq failure 'read-only)
+          (setq buffer-read-only t))
+        (multi-cursor-tests--with-plain-newline
+          (if (eq failure 'field)
+              (cl-letf (((symbol-function 'constrain-to-field)
+                         (lambda (new old &rest _)
+                           (if (= old 5) (1+ new) new))))
+                (should-error (command-execute 'newline)
+                              :type 'user-error))
+            (should-error (command-execute 'newline))))
+        (should (equal (buffer-substring-no-properties
+                        (point-min) (point-max))
+                       before))
+        (should (= (point) 2))
+        (should (= (marker-position
+                    (multi-cursor--cursor-point cursor))
+                   5))))))
+
+(ert-deftest multi-cursor-edit-newline-policy-mutation-rolls-back ()
+  (dolist (policy '(electric-indent post-hook translation-table))
+    (with-temp-buffer
+      (insert "abcdef")
+      (goto-char 2)
+      (let* ((id (multi-cursor-add-at-point 5))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string))
+             (original-left-margin
+              (symbol-function 'current-left-margin)))
+        (multi-cursor-tests--with-plain-newline
+          (cl-letf (((symbol-function 'current-left-margin)
+                     (lambda ()
+                       (pcase policy
+                         ('electric-indent
+                          (setq electric-indent-mode t))
+                         ('post-hook
+                          (setq post-self-insert-hook (list #'ignore)))
+                         ('translation-table
+                          (setq translation-table-for-input
+                                (make-char-table 'translation-table))))
+                       (funcall original-left-margin))))
+            (should-error (command-execute 'newline) :type 'error)))
+        (should (equal (buffer-string) before))
+        (should (= (point) 2))
+        (should (= (marker-position
+                    (multi-cursor--cursor-point cursor))
+                   5))))))
+
+(ert-deftest multi-cursor-edit-newline-one-apply-undo-and-history ()
+  (with-temp-buffer
+    (buffer-enable-undo)
+    (insert "abcd")
+    (undo-boundary)
+    (goto-char 2)
+    (multi-cursor-add-at-point 4)
+    (let ((command-history nil)
+          (apply-count 0)
+          (original-apply (symbol-function 'multi-cursor--apply-edits)))
+      (multi-cursor-tests--with-plain-newline
+        (cl-letf (((symbol-function 'multi-cursor--apply-edits)
+                   (lambda (edits)
+                     (cl-incf apply-count)
+                     (funcall original-apply edits))))
+          (command-execute 'newline t)))
+      (should (= apply-count 1))
+      (should (equal command-history '((newline nil 1))))
+      (should (equal (buffer-string) "a\nbc\nd")))
+    (multi-cursor-mode -1)
+    (undo-boundary)
+    (undo 1)
+    (should (equal (buffer-string) "abcd"))))
 
 (ert-deftest multi-cursor-edit-insertion-at-exact-narrowed-end-grows-zv ()
   (with-temp-buffer

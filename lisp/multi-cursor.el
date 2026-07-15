@@ -1825,6 +1825,126 @@ history."
          (list command argument))
        nil t))))
 
+(defun multi-cursor--newline-post-hook-safe-p (hook)
+  "Return non-nil when HOOK contains only stock newline-inert entries."
+  (and (proper-list-p hook)
+       (cl-every
+        (lambda (function)
+          (memq function
+                '(electric-indent-post-self-insert-function
+                  blink-paren-post-self-insert-function)))
+        hook)))
+
+(defun multi-cursor--newline
+    (command prefix _keys record-flag _special)
+  "Insert one guarded plain newline for COMMAND at every native cursor.
+
+PREFIX is rejected.  RECORD-FLAG controls recording in the variable
+`command-history'."
+  (unless (eq command 'newline)
+    (error "Invalid multiple-cursor newline command: %S" command))
+  (when prefix
+    (user-error "Prefix newline is not multiple-cursor safe yet"))
+  (when (minibufferp)
+    (user-error "Newline is not multiple-cursor safe in a minibuffer"))
+  (when (or mark-active
+            (cl-some #'multi-cursor--cursor-mark-active
+                     multi-cursor--cursors))
+    (user-error "Newline with active selections is not supported yet"))
+  (when overwrite-mode
+    (user-error "Overwrite-mode newline is not multiple-cursor safe"))
+  (when abbrev-mode
+    (user-error "Abbrev-mode newline is not multiple-cursor safe"))
+  (when auto-fill-function
+    (user-error "Auto-fill newline is not multiple-cursor safe"))
+  (when use-hard-newlines
+    (user-error "Hard newline insertion is not multiple-cursor safe"))
+  (when translation-table-for-input
+    (user-error "Translated newline input is not multiple-cursor safe"))
+  (when (bound-and-true-p electric-indent-mode)
+    (user-error "Electric-indent newline is not multiple-cursor safe"))
+  (unless (multi-cursor--newline-post-hook-safe-p post-self-insert-hook)
+    (user-error "Custom newline insertion hooks are not multiple-cursor safe"))
+  (let ((newline-overwrite-mode overwrite-mode)
+        (newline-abbrev-mode abbrev-mode)
+        (newline-auto-fill-function auto-fill-function)
+        (newline-use-hard-newlines use-hard-newlines)
+        (newline-electric-indent-mode
+         (bound-and-true-p electric-indent-mode))
+        (newline-translation-table translation-table-for-input)
+        (newline-delete-active-region delete-active-region)
+        (newline-left-margin left-margin)
+        (newline-post-hook (copy-tree post-self-insert-hook)))
+    (let* ((states (multi-cursor--snapshot-edit-states))
+           (original-cursors (copy-sequence multi-cursor--cursors))
+           (original-next-id multi-cursor--next-id)
+           edits groups planned)
+      (unwind-protect
+          (save-current-buffer
+            (save-restriction
+              (let ((overwrite-mode newline-overwrite-mode)
+                    (abbrev-mode newline-abbrev-mode)
+                    (auto-fill-function newline-auto-fill-function)
+                    (use-hard-newlines newline-use-hard-newlines)
+                    (electric-indent-mode newline-electric-indent-mode)
+                    (translation-table-for-input newline-translation-table)
+                    (delete-active-region newline-delete-active-region)
+                    (left-margin newline-left-margin)
+                    (post-self-insert-hook (copy-tree newline-post-hook)))
+                (atomic-change-group
+                  (let ((context (multi-cursor--callback-context)))
+                    (dolist (state states)
+                      (save-excursion
+                        (let ((position
+                               (multi-cursor--edit-state-point state)))
+                          (goto-char position)
+                          (save-restriction
+                            (widen)
+                            (when
+                                (or (and (> position (point-min))
+                                         (text-properties-at (1- position)))
+                                    (and (< position (point-max))
+                                         (text-properties-at position)))
+                              (user-error
+                               "Newline next to text properties is not multiple-cursor safe"))))
+                        (unless (zerop (current-left-margin))
+                          (user-error
+                           "Newline with a left margin is not multiple-cursor safe"))))
+                    (setq edits
+                          (mapcar
+                           (lambda (state)
+                             (multi-cursor--state-edit
+                              state 'self-insert-command 1 "\n"))
+                           states))
+                    (multi-cursor--validate-callback-state context)
+                    (unless
+                        (and (eq overwrite-mode newline-overwrite-mode)
+                             (eq abbrev-mode newline-abbrev-mode)
+                             (eq auto-fill-function
+                                 newline-auto-fill-function)
+                             (eq use-hard-newlines
+                                 newline-use-hard-newlines)
+                             (eq electric-indent-mode
+                                 newline-electric-indent-mode)
+                             (eq translation-table-for-input
+                                 newline-translation-table)
+                             (eq delete-active-region
+                                 newline-delete-active-region)
+                             (equal left-margin newline-left-margin)
+                             (equal post-self-insert-hook newline-post-hook))
+                      (error "Newline planning changed guarded options"))
+                    (setq groups (multi-cursor--merge-edits edits)
+                          planned t))))))
+        (unless planned
+          (multi-cursor--restore-edit-states
+           states original-cursors original-next-id)
+          (unless multi-cursor-mode
+            (setq multi-cursor-mode t)
+            (multi-cursor--start))))
+      (multi-cursor--apply-edit-transaction states groups))
+    (when record-flag
+      (add-to-history 'command-history '(newline nil 1) nil t))))
+
 (defun multi-cursor--character-delete
     (command prefix _keys record-flag _special)
   "Safely apply an ordinary no-prefix character deletion COMMAND.
@@ -2283,6 +2403,8 @@ created.  This mode refuses to start while the external
 
 (dolist (command '(self-insert-command delete-char))
   (multi-cursor-register-command command 'batch-edit #'multi-cursor--batch-edit))
+
+(multi-cursor-register-command 'newline 'batch-edit #'multi-cursor--newline)
 
 (dolist (command '(delete-backward-char delete-forward-char))
   (multi-cursor-register-command

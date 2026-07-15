@@ -218,7 +218,11 @@ prefix arguments, the vetted logical movement commands, ordinary arrow and
 directional word movement, kill/copy, and yank are supported. Backspace also
 supports the ordinary `backward-delete-char-untabify` modes (`nil`,
 `untabify`, `hungry`, and `all`). Prefix and overwrite-mode Backspace remain
-unsupported. Arrow commands preserve
+unsupported. Plain `RET` is supported when newline side effects such as
+electric indentation, auto-fill, abbrevs, hard newlines, left margins, custom
+insertion hooks, input translation, adjacent text properties, overwrite mode,
+prefixes, and active selections are absent.
+Arrow commands preserve
 per-cursor bidi and goal-column behavior, but visual-order horizontal arrows
 and display-line vertical arrows remain unsupported because they require live
 glyph geometry for every cursor.

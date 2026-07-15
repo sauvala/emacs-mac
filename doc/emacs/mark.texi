@@ -414,6 +414,14 @@ cursor states before committing them.  Left and Right require logical-order
 cursor movement; Up and Down require logical-line movement.  Visual-order
 and display-line arrow movement are rejected because they depend on live
 window glyph geometry for every cursor.
+The command @code{newline}, normally bound to @key{RET}, has a guarded
+transactional fast path when electric indentation, auto-fill, abbrev
+expansion, hard newlines, left margins, custom post-insertion hooks,
+input translation, adjacent text properties, overwrite mode, prefix
+arguments, and active selections are absent.
+Higher-level newline commands such as
+@code{electric-newline-and-maybe-indent}, as well as mode-dependent
+@key{TAB} indentation and completion commands, remain unsupported.
 Kill and yank are transactional, while copy publishes its combined text
 once.  Kill and copy require a nonempty ordinary active region at every
 cursor.  Yank inserts one snapshot of the selected kill-ring entry
