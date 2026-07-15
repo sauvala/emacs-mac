@@ -72,6 +72,7 @@ non-@code{nil}, each window highlights its own region.
 * Setting Mark::            Commands to set the mark.
 * Marking Objects::         Commands to put region around textual units.
 * Using Region::            Summary of ways to operate on contents of the region.
+* Multiple Cursors::        Editing at several buffer positions together.
 * Mark Ring::               Previous mark positions saved so you can go back there.
 * Global Mark Ring::        Previous mark positions in various buffers.
 * Shift Selection::         Using shifted cursor motion keys.
@@ -327,6 +328,112 @@ the ones activated by dragging the mouse or shift-selection.  To
 toggle Delete Selection mode on or off, type @kbd{M-x
 delete-selection-mode}.  To toggle Delete Selection mode on or off
 in the current buffer only, type @kbd{M-x delete-selection-local-mode}.
+
+@node Multiple Cursors
+@section Editing with Multiple Cursors
+
+@cindex multiple cursors
+@cindex secondary cursors
+@cindex multiple selections
+@findex multi-cursor-mode
+  Multiple Cursor mode is a buffer-local minor mode for editing at an
+ordinary primary cursor and one or more secondary cursors.  Adding the
+first secondary cursor enables @code{multi-cursor-mode} automatically;
+removing the last one disables it.  The mode installs no default key
+bindings, so you can invoke its commands with @kbd{M-x} or bind the ones
+you use.  Since @kbd{M-x} is itself unavailable after a session starts,
+bind any creation and management commands you need during a session.  The
+mode refuses to start while the external @code{multiple-cursors}
+package's @code{multiple-cursors-mode} is active; do not enable both modes
+in the same buffer.
+
+  The following commands create and manage secondary cursors:
+
+@table @code
+@findex multi-cursor-add-above
+@findex multi-cursor-add-below
+@item multi-cursor-add-above
+@itemx multi-cursor-add-below
+Add a cursor on the preceding or following logical line, preserving the
+logical column when possible.
+
+@findex multi-cursor-edit-lines
+@vindex multi-cursor-edit-lines-short-lines
+@item multi-cursor-edit-lines
+Add a cursor to every other logical line covered by the active region.
+The option @code{multi-cursor-edit-lines-short-lines} controls what
+happens on lines shorter than the primary cursor's column.
+
+@findex multi-cursor-select-next-occurrence
+@findex multi-cursor-select-previous-occurrence
+@findex multi-cursor-select-all-occurrences
+@item multi-cursor-select-next-occurrence
+@itemx multi-cursor-select-previous-occurrence
+@itemx multi-cursor-select-all-occurrences
+Select literal occurrences of the active region, or of the symbol at
+point when there is no active region.  The next and previous commands do
+not wrap; the all command searches the accessible part of the buffer.
+
+@findex multi-cursor-add-at-mouse
+@item multi-cursor-add-at-mouse
+Add a cursor at a mouse event in the current buffer's text area.  This
+command is deliberately unbound.
+
+@findex multi-cursor-cycle-forward
+@findex multi-cursor-cycle-backward
+@item multi-cursor-cycle-forward
+@itemx multi-cursor-cycle-backward
+Exchange the primary cursor with the next or previous secondary cursor.
+
+@findex multi-cursor-remove-at-point
+@findex multi-cursor-remove-all
+@item multi-cursor-remove-at-point
+@itemx multi-cursor-remove-all
+Remove secondary cursors at point, or end the entire session.
+@end table
+
+@vindex multi-cursor-max-cursors
+  The mode line displays @samp{MC:@var{n}}, where @var{n} includes the
+primary cursor.  The option @code{multi-cursor-max-cursors} limits that
+total; its default is 1000.
+
+  Ordinary character insertion and the exact commands
+@code{delete-char} and @code{delete-backward-char}, without prefix
+arguments, run as one preflighted transaction at all cursors and form one
+undo unit.  The commands @code{forward-char}, @code{backward-char},
+@code{forward-word}, @code{backward-word},
+@code{move-beginning-of-line}, @code{move-end-of-line},
+@code{next-logical-line}, and @code{previous-logical-line} move every
+cursor independently, staging all cursor states before committing them.
+Kill and yank are transactional, while copy publishes its combined text
+once.  Kill and copy require a nonempty ordinary active region at every
+cursor.  Yank inserts one snapshot of the selected kill-ring entry
+everywhere; @code{yank-pop} is not supported during a session.  @xref{Killing};
+see also @ref{Yanking}.
+
+  Multiple Cursor mode intentionally allows only commands with a known
+multi-cursor policy.  An unknown or unsupported command signals an error
+before changing the buffer.  Undo and redo, keyboard macros, incremental
+search, query replace, visual-line movement, and @kbd{M-x} itself are
+currently unsupported while the session is active.  Package authors can
+declare an explicit policy with @code{multi-cursor-register-command}; see
+@ref{Multiple-Cursor Command Dispatch,,, elisp, The Emacs Lisp Reference
+Manual}.
+
+@findex keyboard-quit @r{(Multiple Cursor mode)}
+  Typing @kbd{C-g} deactivates all active primary and secondary regions
+while retaining their marks, if any are active; otherwise it ends the
+session.  Killing or reverting the buffer, or changing its major mode,
+also ends the session.
+
+@vindex multi-cursor-region-face
+@vindex multi-cursor-caret-face
+  Supported Mac graphical frames paint secondary carets through the
+native redisplay backend.  Other displays use window-scoped overlays with
+the face @code{multi-cursor-caret-face}.  Active secondary regions use
+the face @code{multi-cursor-region-face} in either case.  Presentation is
+currently limited to the selected window; independent simultaneous
+presentation in every window showing the buffer is not yet supported.
 
 @node Mark Ring
 @section The Mark Ring

@@ -1341,6 +1341,18 @@ You can restore the previous behavior by removing
 
 * Editing Changes in Emacs 32.1
 
++++
+** New experimental native Multiple Cursor mode.
+The buffer-local mode 'multi-cursor-mode' manages marker-backed secondary
+selections.  Supported text edits use one transaction, supported movements
+stage all cursor states before committing them, and copy publishes combined
+selection text once.  Creation commands select occurrences or add cursors by
+line, region, API, or mouse event.  Commands use an explicit integration policy
+and unknown commands fail before editing.  Supported Mac GUI frames paint
+secondary caret bodies through native redisplay; other displays use face
+overlays.  The mode installs no default key bindings and refuses to start while
+the external 'multiple-cursors-mode' is active.
+
 
 * Changes in Specialized Modes and Packages in Emacs 32.1
 

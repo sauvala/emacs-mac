@@ -16,6 +16,7 @@ are done, and the subroutines that allow Lisp programs to do them.
 @menu
 * Command Overview::    How the command loop reads commands.
 * Defining Commands::   Specifying how a function should read arguments.
+* Multiple-Cursor Command Dispatch::  Declaring commands safe for multiple cursors.
 * Interactive Call::    Calling a command, so that it will read arguments.
 * Distinguish Interactive::     Making a command distinguish interactive calls.
 * Command Loop Info::   Variables set by the command loop for you to examine.
@@ -802,6 +803,100 @@ Here is an example of a simple generic dispatcher command named
 @end example
 
 @end defmac
+
+@node Multiple-Cursor Command Dispatch
+@section Multiple-Cursor Command Dispatch
+@cindex multiple-cursor commands
+@cindex command policy, multiple cursors
+
+  Native Multiple Cursor mode uses an explicit policy registry instead of
+replaying every command recursively at secondary cursor positions.  This
+lets a command declare whether it is transactional, movement-only, or
+intended to run once.  Commands without a policy fail before execution
+while a multiple-cursor session is active.
+
+@defvar multi-cursor-mode
+This buffer-local variable is non-@code{nil} while a native
+multiple-cursor session is active.  Adding the first secondary selection
+enables the mode.  Native Multiple Cursor mode refuses to start while the
+external @code{multiple-cursors-mode} is active.
+@end defvar
+
+@defopt multi-cursor-max-cursors
+The maximum number of cursors in one session, including the primary
+cursor.  The default is 1000; @code{nil} removes the explicit limit.
+@end defopt
+
+@defopt multi-cursor-edit-lines-short-lines
+This option controls how @code{multi-cursor-edit-lines} treats a line
+shorter than the primary cursor's logical column.  Its value is one of
+@code{eol}, @code{skip}, @code{pad}, or @code{error}.
+@end defopt
+
+@defvar multi-cursor-region-face
+The face for active secondary selections.
+@end defvar
+
+@defvar multi-cursor-caret-face
+The face for secondary carets when native backend painting is unavailable.
+@end defvar
+
+@defun multi-cursor-register-command command policy &optional handler
+Register @var{command} with a multiple-cursor @var{policy}.  @var{policy}
+is one of the following symbols:
+
+@table @code
+@item run-once
+Run the ordinary command once at the primary cursor.
+@item broadcast-movement
+Move every cursor without editing.  Without @var{handler}, this policy is
+restricted to the movement commands vetted by Multiple Cursor mode.
+@item batch-edit
+Use @var{handler} to plan and apply all edits as one transaction.
+@item custom-handler
+Delegate the complete multi-cursor behavior to @var{handler}.
+@item unsupported
+Reject the command while the session is active.
+@end table
+
+For @code{batch-edit} and @code{custom-handler}, @var{handler} is required.
+It is called with the command, raw prefix argument, key sequence,
+record flag, and special-event flag.  A handler that prompts should capture
+input only once and is responsible for command-history integration.
+@end defun
+
+@defun multi-cursor-add-selection point &optional mark mark-active
+Add a secondary selection in the current buffer and return its stable
+numeric identifier.  @var{point} and @var{mark} can be buffer positions or
+markers in the accessible portion of the current buffer.  @var{point}
+cannot be the primary point.  If @var{mark-active} is non-@code{nil},
+@var{mark} is required.  Adding the first selection enables
+@code{multi-cursor-mode}.
+@end defun
+
+@defun multi-cursor-add-at-point &optional position
+Add a secondary cursor at @var{position}, which defaults to point.
+The function signals a user error if @var{position} is the primary point.
+@end defun
+
+@defun multi-cursor-remove-at-point &optional position
+Remove secondary cursors at @var{position}, which defaults to point, and
+return the number removed.
+@end defun
+
+@defun multi-cursor-remove-all
+Remove every secondary cursor, end the current session, and return the
+number removed.
+@end defun
+
+@defun multi-cursor-count
+Return the total cursor count, including the ordinary primary cursor.
+@end defun
+
+@defun multi-cursor-selections
+Return detached property-list snapshots of all secondary selections.
+Changing these lists cannot mutate the session's cursor records.
+@end defun
 
 @node Interactive Call
 @section Interactive Call

@@ -196,6 +196,52 @@ The `nemesis` branch tracks GNU Emacs master and adds the following on top of th
 - **Rope data structure** (experimental, `--with-rope`): Alternative text storage backend using a B-tree sumtree rope with 128-byte leaf chunks. Provides O(log n) insert/delete/replace and O(log n) line counting via aggregated summaries at each tree node. Per-buffer opt-in via `(buffer-enable-rope)` or `(rope-enable-default)` for new buffers. Build with `./configure --with-rope` to enable.
 - **Wrap position cache**: Per-window cache of visual line start positions for O(1) movement within long wrapped continuation lines, replacing the O(buffer_size) scan from logical line start.
 - **WrapMap module**: Centralized visual line estimation for long wrapped lines, consolidating duplicated formulas across the display engine. For rope buffers, uses O(log n) tree operations for precise estimation.
+- **Native multiple cursors (experimental)**: Buffer-local multiple selections with transactional editing, explicit command integration policies, and native batched caret painting on supported Mac GUI frames.
+
+#### Native multiple cursors (experimental)
+
+The `multi-cursor` library provides multiple selections without replaying the
+entire Emacs command loop at fake cursors. It installs no default key bindings;
+for example:
+
+```elisp
+(global-set-key (kbd "C-c m n") #'multi-cursor-select-next-occurrence)
+(global-set-key (kbd "C-c m a") #'multi-cursor-select-all-occurrences)
+(global-set-key (kbd "C-c m j") #'multi-cursor-add-below)
+(global-set-key (kbd "C-c m k") #'multi-cursor-add-above)
+(global-set-key (kbd "C-c m q") #'multi-cursor-remove-all)
+```
+
+Creation commands enable `multi-cursor-mode` automatically. Typing, the exact
+commands `delete-char` and `delete-backward-char` without prefix arguments,
+the vetted logical movement commands, kill/copy, and yank are supported.
+Text edits use one atomic transaction, movements stage all cursor states
+before committing them, and copy publishes its combined text once. Commands
+are fail-closed: unsupported or unregistered commands signal before editing.
+Current limitations include
+undo/redo during a session, keyboard macros, isearch, query replace,
+visual-line movement, nonlinear regions, custom yank handlers, and `yank-pop`.
+The mode refuses to start while the external `multiple-cursors` package's
+`multiple-cursors-mode` is active; do not enable both modes in one buffer.
+`C-g` deactivates selections when any are active and otherwise ends the
+session.
+
+Secondary cursor records are marker-backed and published to redisplay as one
+immutable generation. Batched edits use one native application step and one
+undo unit. Supported Mac GUI frames resolve and paint caret bodies in a backend
+batch; other displays use window-scoped face overlays. This design uses one
+command dispatch, one native apply call, and one undo unit for a supported
+batched edit, and avoids caret overlays on native frames. Performance should
+still be evaluated for the intended workload rather than assumed.
+Presentation is currently limited to the selected window rather than every
+window showing the buffer simultaneously.
+
+The threshold-free benchmark harness is in
+[`test/benchmarks/multi-cursor-benchmarks.el`](test/benchmarks/multi-cursor-benchmarks.el).
+Its documented batch command measures editing and headless redisplay
+orchestration and adds comparison rows when `multiple-cursors.el` is available
+on `load-path`. Native Mac painter counters require invoking the same harness
+from a running graphical Mac frame.
 
 ## Debugging
 

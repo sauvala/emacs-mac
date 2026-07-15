@@ -316,6 +316,7 @@ The Mark and the Region
 * Setting Mark::        Commands to set the mark.
 * Marking Objects::     Commands to put region around textual units.
 * Using Region::        Summary of ways to operate on contents of the region.
+* Multiple Cursors::    Editing at several buffer positions together.
 * Mark Ring::           Previous mark positions saved so you can go back there.
 * Global Mark Ring::    Previous mark positions in various buffers.
 * Shift Selection::     Using shifted cursor motion keys.

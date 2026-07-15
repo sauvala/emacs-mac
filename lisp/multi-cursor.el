@@ -19,10 +19,11 @@
 
 ;;; Commentary:
 
-;; This library owns the buffer-local session state used by native
-;; multiple cursors.  Editing commands and redisplay support are added in
-;; later stages; this implementation defines cursor records, their lifecycle,
-;; and the public API for managing secondary selections.
+;; This library implements buffer-local native multiple-cursor sessions.
+;; It manages marker-backed selections, explicit command policies, atomic
+;; batched editing, kill and yank integration, and immutable redisplay
+;; snapshots.  See Info node `(emacs) Multiple Cursors' for user commands and
+;; `(elisp) Multiple-Cursor Command Dispatch' for package integration.
 
 ;;; Code:
 
@@ -1889,7 +1890,15 @@ session."
 
 ;;;###autoload
 (define-minor-mode multi-cursor-mode
-  "Edit the current buffer using multiple native cursors."
+  "Edit the current buffer using multiple native cursors.
+
+Adding the first secondary cursor enables this buffer-local mode
+automatically.  The mode provides no default key bindings.  Commands must
+have an explicit multiple-cursor policy; unknown commands fail before they
+change the buffer.  Since `execute-extended-command' is unsupported during
+a session, bind any management commands needed after the first cursor is
+created.  This mode refuses to start while the external
+`multiple-cursors-mode' is active; do not enable both modes in one buffer."
   :lighter (:eval (format " MC:%d" (multi-cursor-count)))
   :group 'multi-cursor
   (if multi-cursor-mode
