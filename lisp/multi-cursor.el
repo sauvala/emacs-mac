@@ -106,10 +106,10 @@ operation before changing the buffer or cursor session."
   "Window which most recently received a secondary-cursor snapshot.")
 
 (defconst multi-cursor--movement-commands
-  '(forward-char backward-char
-    forward-word backward-word
+  '(forward-char backward-char left-char right-char
+    forward-word backward-word left-word right-word
     move-beginning-of-line move-end-of-line
-    next-logical-line previous-logical-line)
+    next-line previous-line next-logical-line previous-logical-line)
   "Commands implemented by the native multiple-cursor movement broadcaster.")
 
 (defconst multi-cursor--valid-policies
@@ -1658,14 +1658,41 @@ history."
   "Invoke vetted movement COMMAND once, accepting boundary clamping.
 
 ARGUMENT is the prefix converted once for the whole broadcast.
-CANONICAL-LAST-COMMAND controls logical-line goal-column continuity."
+CANONICAL-LAST-COMMAND controls vertical goal-column continuity."
   (let ((last-command
-         (if (memq command '(next-logical-line previous-logical-line))
-             canonical-last-command
+         (if (memq command '(next-line previous-line
+                             next-logical-line previous-logical-line))
+             (and temporary-goal-column canonical-last-command)
            last-command)))
     (condition-case nil
         (funcall command argument)
       ((beginning-of-buffer end-of-buffer) nil))))
+
+(defun multi-cursor--movement-handler
+    (command prefix _keys record-flag _special)
+  "Broadcast ordinary movement COMMAND after rejecting unsafe variants.
+
+PREFIX is the raw command prefix and RECORD-FLAG controls command-history.
+Shift selection normally depends on interactive command-loop processing which
+cannot yet stage an independent mark for every secondary cursor.
+Visual-order horizontal movement and display-line vertical movement depend on
+live window glyph geometry, which cannot be staged independently for every
+secondary cursor.  A non-nil `goal-column' makes `next-line' and
+`previous-line' use logical lines and is therefore safe."
+  (when this-command-keys-shift-translated
+    (user-error
+     "Shift-selection movement is not multiple-cursor safe"))
+  (when (and (memq command '(left-char right-char))
+             visual-order-cursor-movement)
+    (user-error
+     "Visual-order arrow movement is not multiple-cursor safe"))
+  (when (and (memq command '(next-line previous-line))
+             line-move-visual
+             (null goal-column))
+    (user-error
+     "Visual-line arrow movement is not multiple-cursor safe"))
+  (let ((current-prefix-arg prefix))
+    (multi-cursor--broadcast-movement command record-flag)))
 
 (defun multi-cursor--broadcast-movement (command record-flag)
   "Run vetted pure movement COMMAND for the primary and every secondary.
@@ -1938,7 +1965,8 @@ created.  This mode refuses to start while the external
     (multi-cursor-register-command command 'run-once)))
 
 (dolist (command multi-cursor--movement-commands)
-  (multi-cursor-register-command command 'broadcast-movement))
+  (multi-cursor-register-command
+   command 'broadcast-movement #'multi-cursor--movement-handler))
 
 (dolist (command '(self-insert-command delete-char delete-backward-char))
   (multi-cursor-register-command command 'batch-edit #'multi-cursor--batch-edit))
@@ -1953,8 +1981,6 @@ created.  This mode refuses to start while the external
                    execute-extended-command execute-kbd-macro
                    isearch-forward isearch-backward
                    query-replace query-replace-regexp
-                   right-char left-char right-word left-word
-                   next-line previous-line
                    beginning-of-visual-line end-of-visual-line
                    yank-pop))
   (when (commandp command)

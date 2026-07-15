@@ -214,7 +214,11 @@ for example:
 
 Creation commands enable `multi-cursor-mode` automatically. Typing, the exact
 commands `delete-char` and `delete-backward-char` without prefix arguments,
-the vetted logical movement commands, kill/copy, and yank are supported.
+the vetted logical movement commands, ordinary arrow and directional word
+movement, kill/copy, and yank are supported. Arrow commands preserve
+per-cursor bidi and goal-column behavior, but visual-order horizontal arrows
+and display-line vertical arrows remain unsupported because they require live
+glyph geometry for every cursor.
 Text edits use one atomic transaction, movements stage all cursor states
 before committing them, and copy publishes its combined text once. Commands
 are fail-closed: unsupported or unregistered commands signal before editing.
