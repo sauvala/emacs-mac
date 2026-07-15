@@ -1102,8 +1102,13 @@ ORIGIN and TARGET retain the direction of the edit for field checks."
            (< (multi-cursor--edit-state-id left)
               (multi-cursor--edit-state-id right)))))
 
-(defun multi-cursor--merge-edits (edits)
-  "Merge touching or overlapping EDITS in deterministic buffer order."
+(defun multi-cursor--merge-edits (edits &optional replacement-safe-p)
+  "Merge compatible touching or overlapping EDITS in buffer order.
+
+By default, preserve the established batch-edit behavior of coalescing all
+touching ranges.  When REPLACEMENT-SAFE-P is non-nil, touching empty deletions
+merge, touching edits with replacements remain separate, and incompatible
+strict replacement overlaps are rejected before the transaction starts."
   (let (result)
     (dolist (edit (sort edits
                         (lambda (left right)
@@ -1116,26 +1121,52 @@ ORIGIN and TARGET retain the direction of the edit for field checks."
                                (multi-cursor--edit-state-id
                                 (multi-cursor--edit-survivor right)))))))
       (let ((previous (car result)))
-        (if (and previous
-                 (<= (multi-cursor--edit-beg edit)
-                     (multi-cursor--edit-end previous)))
-            (progn
-              (setf (multi-cursor--edit-end previous)
-                    (max (multi-cursor--edit-end previous)
-                         (multi-cursor--edit-end edit)))
-              (when (multi-cursor--edit-survivor-less-p
-                     (multi-cursor--edit-survivor edit)
-                     (multi-cursor--edit-survivor previous))
-                (setf (multi-cursor--edit-survivor previous)
-                      (multi-cursor--edit-survivor edit))))
-          (push edit result))))
+        (cond
+         ((null previous) (push edit result))
+         ((> (multi-cursor--edit-beg edit)
+             (multi-cursor--edit-end previous))
+          (push edit result))
+         ((not replacement-safe-p)
+          (setf (multi-cursor--edit-end previous)
+                (max (multi-cursor--edit-end previous)
+                     (multi-cursor--edit-end edit)))
+          (when (multi-cursor--edit-survivor-less-p
+                 (multi-cursor--edit-survivor edit)
+                 (multi-cursor--edit-survivor previous))
+            (setf (multi-cursor--edit-survivor previous)
+                  (multi-cursor--edit-survivor edit))))
+         ((and (= (multi-cursor--edit-beg edit)
+                  (multi-cursor--edit-end previous))
+               (or (> (length (multi-cursor--edit-string previous)) 0)
+                   (> (length (multi-cursor--edit-string edit)) 0)))
+          (push edit result))
+         ((or (and (zerop (length (multi-cursor--edit-string previous)))
+                   (zerop (length (multi-cursor--edit-string edit))))
+              (and (= (multi-cursor--edit-beg previous)
+                      (multi-cursor--edit-beg edit))
+                   (= (multi-cursor--edit-end previous)
+                      (multi-cursor--edit-end edit))
+                   (equal (multi-cursor--edit-string previous)
+                          (multi-cursor--edit-string edit))))
+          (setf (multi-cursor--edit-end previous)
+                (max (multi-cursor--edit-end previous)
+                     (multi-cursor--edit-end edit)))
+          (when (multi-cursor--edit-survivor-less-p
+                 (multi-cursor--edit-survivor edit)
+                 (multi-cursor--edit-survivor previous))
+            (setf (multi-cursor--edit-survivor previous)
+                  (multi-cursor--edit-survivor edit))))
+         (t
+          (user-error
+           "Overlapping multiple-cursor replacements are incompatible")))))
     (nreverse result)))
 
 (defun multi-cursor--state-edit
     (state command argument insertion &optional delete-policy)
   "Return the raw edit for STATE under COMMAND and ARGUMENT.
 
-INSERTION is the string used by `self-insert-command'."
+INSERTION is the string used by `self-insert-command'.  DELETE-POLICY is
+the captured value of the variable `delete-active-region'."
   (let* ((point (multi-cursor--edit-state-point state))
          (mark (multi-cursor--edit-state-mark state))
          (active (and (multi-cursor--edit-state-active state)
@@ -1177,6 +1208,80 @@ INSERTION is the string used by `self-insert-command'."
      :beg beg :end end :string replacement :survivor state
      :members (list state))))
 
+(defun multi-cursor--untabify-state-edit (state method delete-policy)
+  "Plan backward untabifying deletion for STATE using METHOD.
+
+DELETE-POLICY is the captured value of the variable
+`delete-active-region'."
+  (let* ((point (multi-cursor--edit-state-point state))
+         (mark (multi-cursor--edit-state-mark state))
+         (active (and (multi-cursor--edit-state-active state)
+                      mark (/= point mark))))
+    (if (and active delete-policy)
+        (multi-cursor--state-edit
+         state 'delete-backward-char 1 nil delete-policy)
+      (let (target replacement)
+        (pcase method
+          ('untabify
+           (if (or (= point (point-min))
+                   (/= (char-before point) ?\t))
+               (setq target
+                     (multi-cursor--step-delete-chars point -1)
+                     replacement "")
+             (let (column previous-column)
+               (save-excursion
+                 (goto-char point)
+                 (setq column (current-column))
+                 (forward-char -1)
+                 (setq previous-column (current-column)))
+               (setq target (1- point)
+                     replacement
+                     (make-string (1- (- column previous-column)) ?\s)))))
+          ((or 'hungry 'all)
+           (let ((characters (if (eq method 'hungry) " \t" " \t\n\r")))
+             (save-excursion
+               (goto-char point)
+               (skip-chars-backward characters)
+               (setq target (constrain-to-field nil point)))
+             (when (= target point)
+               (setq target
+                     (multi-cursor--step-delete-chars point -1)))
+             (setq replacement "")))
+          ('nil
+           (setq target (multi-cursor--step-delete-chars point -1)
+                 replacement ""))
+          (_
+           (user-error
+            "Unsupported backward-delete-char-untabify method: %S"
+            method)))
+        (let ((beg (min point target))
+              (end (max point target)))
+          (multi-cursor--preflight-edit-range beg end point target)
+          (multi-cursor--edit-create
+           :beg beg :end end :string replacement :survivor state
+           :members (list state)))))))
+
+(defun multi-cursor--partition-passive-replacement-edits (edits)
+  "Partition EDITS into primitive edits and passive no-op states.
+
+A zero-length empty edit is passive only when a nonempty replacement starts
+at the same position.  Return (PRIMITIVE-EDITS . PASSIVE-STATES), preserving
+the original order of both lists."
+  (let (primitive passive)
+    (dolist (edit edits)
+      (if (and (= (multi-cursor--edit-beg edit)
+                  (multi-cursor--edit-end edit))
+               (zerop (length (multi-cursor--edit-string edit)))
+               (cl-some
+                (lambda (other)
+                  (and (= (multi-cursor--edit-beg other)
+                          (multi-cursor--edit-beg edit))
+                       (> (length (multi-cursor--edit-string other)) 0)))
+                edits))
+          (push (multi-cursor--edit-survivor edit) passive)
+        (push edit primitive)))
+    (cons (nreverse primitive) (nreverse passive))))
+
 (defun multi-cursor--remap-edit-position (position groups positions)
   "Remap detached marker POSITION through GROUPS and POSITIONS.
 
@@ -1208,8 +1313,12 @@ parallel vector of their final ends."
          ((<= position end) final-end)
          (t (error "Invalid multiple-cursor edit transform")))))))
 
-(defun multi-cursor--install-edit-results (groups positions states)
-  "Install POSITIONS for merged edit GROUPS, releasing losing STATES."
+(defun multi-cursor--install-edit-results
+    (groups positions states &optional passive-states)
+  "Install POSITIONS for merged edit GROUPS, releasing losing STATES.
+
+PASSIVE-STATES are no-op cursors omitted from GROUPS.  Remap and retain them
+without sending their empty edits to the batch primitive."
   (let ((group-vector (vconcat groups))
         survivors)
     (cl-mapc
@@ -1234,9 +1343,28 @@ parallel vector of their final ends."
                    (multi-cursor--remap-edit-position
                     (multi-cursor--edit-state-mark survivor)
                     group-vector positions))
-              nil nil)
+             nil nil)
              (push cursor survivors)))))
      groups (append positions nil))
+    (dolist (state passive-states)
+      (let ((point
+             (multi-cursor--remap-edit-position
+              (multi-cursor--edit-state-point state)
+              group-vector positions))
+            (mark
+             (and (multi-cursor--edit-state-mark state)
+                  (multi-cursor--remap-edit-position
+                   (multi-cursor--edit-state-mark state)
+                   group-vector positions))))
+        (if (multi-cursor--edit-state-primary state)
+            (progn
+              (goto-char point)
+              (set-marker (mark-marker) mark
+                          (and mark (current-buffer)))
+              (setq mark-active nil temporary-goal-column nil))
+          (let ((cursor (multi-cursor--edit-state-cursor state)))
+            (multi-cursor--set-record-state cursor point mark nil nil)
+            (push cursor survivors)))))
     (dolist (state (cdr states))
       (unless (memq (multi-cursor--edit-state-cursor state) survivors)
         (multi-cursor--release-cursor
@@ -1759,6 +1887,86 @@ semantics.  RECORD-FLAG controls command-history recording."
     (when record-flag
       (add-to-history 'command-history (list command 1) nil t))))
 
+(defun multi-cursor--untabify-delete
+    (command prefix _keys record-flag _special)
+  "Safely apply no-prefix COMMAND when it is untabifying Backspace.
+
+PREFIX is rejected because an ordinary interactive prefix requests kill
+semantics.  RECORD-FLAG controls recording in the variable
+`command-history'."
+  (unless (eq command 'backward-delete-char-untabify)
+    (error "Invalid untabifying deletion command: %S" command))
+  (when prefix
+    (user-error "Prefix deletion is not multiple-cursor safe yet"))
+  (when overwrite-mode
+    (user-error
+     "Overwrite-mode backward deletion is not multiple-cursor safe"))
+  (let ((delete-policy delete-active-region)
+        (method backward-delete-char-untabify-method)
+        (planning-tab-width tab-width))
+    (unless (memq method '(nil untabify hungry all))
+      (user-error
+       "Unsupported backward-delete-char-untabify method: %S" method))
+    (when (and (eq delete-policy 'kill)
+               (or (and mark-active (mark t) (/= (point) (mark t)))
+                   (cl-some
+                    (lambda (cursor)
+                      (and (multi-cursor--cursor-mark-active cursor)
+                           (multi-cursor--cursor-mark cursor)
+                           (/= (marker-position
+                                (multi-cursor--cursor-point cursor))
+                               (marker-position
+                                (multi-cursor--cursor-mark cursor)))))
+                    multi-cursor--cursors)))
+      (user-error
+       "Killing active selections is not multiple-cursor safe here"))
+    (let* ((states (multi-cursor--snapshot-edit-states))
+           (original-cursors (copy-sequence multi-cursor--cursors))
+           (original-next-id multi-cursor--next-id)
+           edits groups passive-states planned)
+      (unwind-protect
+          (save-current-buffer
+            (save-restriction
+              (let ((delete-active-region delete-policy)
+                    (backward-delete-char-untabify-method method)
+                    (tab-width planning-tab-width))
+                (atomic-change-group
+                  (let ((context (multi-cursor--callback-context)))
+                    (setq edits
+                          (mapcar
+                           (lambda (state)
+                             (multi-cursor--untabify-state-edit
+                              state method delete-policy))
+                           states))
+                    (multi-cursor--validate-callback-state context)
+                    (unless (and (eq delete-active-region delete-policy)
+                                 (eq backward-delete-char-untabify-method
+                                     method)
+                                 (equal tab-width planning-tab-width))
+                      (error "Untabifying deletion changed its policy"))
+                    (pcase-let
+                        ((`(,primitive-edits . ,passive)
+                          (multi-cursor--partition-passive-replacement-edits
+                           edits)))
+                      (setq groups
+                            (multi-cursor--merge-edits primitive-edits t)
+                            passive-states passive
+                            planned t)))))))
+        (unless planned
+          (multi-cursor--restore-edit-states
+           states original-cursors original-next-id)
+          (unless multi-cursor-mode
+            (setq multi-cursor-mode t)
+            (multi-cursor--start))))
+      (multi-cursor--apply-edit-transaction
+       states groups
+       (when passive-states
+         (lambda (edits positions edit-states)
+           (multi-cursor--install-edit-results
+            edits positions edit-states passive-states)))))
+    (when record-flag
+      (add-to-history 'command-history (list command 1) nil t))))
+
 (defun multi-cursor--invoke-movement (command argument canonical-last-command)
   "Invoke vetted movement COMMAND once, accepting boundary clamping.
 
@@ -2080,6 +2288,9 @@ created.  This mode refuses to start while the external
   (multi-cursor-register-command
    command 'batch-edit #'multi-cursor--character-delete))
 
+(multi-cursor-register-command
+ 'backward-delete-char-untabify 'batch-edit #'multi-cursor--untabify-delete)
+
 (dolist (command '(kill-region copy-region-as-kill kill-ring-save))
   (multi-cursor-register-command
    command 'custom-handler #'multi-cursor--kill-or-copy))
@@ -2091,7 +2302,6 @@ created.  This mode refuses to start while the external
                    isearch-forward isearch-backward
                    query-replace query-replace-regexp
                    beginning-of-visual-line end-of-visual-line
-                   backward-delete-char-untabify
                    yank-pop))
   (when (commandp command)
     (multi-cursor-register-command command 'unsupported)))
