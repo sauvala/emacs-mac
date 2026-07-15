@@ -4523,6 +4523,27 @@ tick, followed by sorted cursor records of five elements each.  */)
   return Qnil;
 }
 
+DEFUN ("multi-cursor--native-decorations-p",
+       Fmulti_cursor__native_decorations_p,
+       Smulti_cursor__native_decorations_p, 1, 1, 0,
+       doc: /* Return non-nil if WINDOW can paint native cursor decorations.
+
+This is an internal capability query used by `multi-cursor.el' to decide
+whether secondary carets need a Lisp overlay fallback.  */)
+  (Lisp_Object window)
+{
+  CHECK_LIVE_WINDOW (window);
+#ifdef HAVE_WINDOW_SYSTEM
+  struct frame *f = XFRAME (XWINDOW (window)->frame);
+  return (FRAME_WINDOW_P (f)
+	  && FRAME_RIF (f) != NULL
+	  && FRAME_RIF (f)->draw_window_cursor_decorations != NULL
+	  ? Qt : Qnil);
+#else
+  return Qnil;
+#endif
+}
+
 DEFUN ("set-window-buffer", Fset_window_buffer, Sset_window_buffer, 2, 3, 0,
        doc: /* Make WINDOW display BUFFER-OR-NAME.
 WINDOW must be a live window and defaults to the selected one.
@@ -9837,6 +9858,7 @@ name to `'ignore'.  */);
   defsubr (&Sresize_mini_window_internal);
   defsubr (&Sset_window_buffer);
   defsubr (&Smulti_cursor__set_redisplay_snapshot);
+  defsubr (&Smulti_cursor__native_decorations_p);
   defsubr (&Srun_window_configuration_change_hook);
   defsubr (&Srun_window_scroll_functions);
   defsubr (&Sselect_window);

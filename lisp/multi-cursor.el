@@ -49,6 +49,16 @@ operation before changing the buffer or cursor session."
   :type '(choice (const eol) (const skip) (const pad) (const error))
   :group 'multi-cursor)
 
+(defface multi-cursor-region-face
+  '((t :inherit region))
+  "Face used for active secondary selections."
+  :group 'multi-cursor)
+
+(defface multi-cursor-caret-face
+  '((t :inherit cursor))
+  "Face used for secondary carets without native backend support."
+  :group 'multi-cursor)
+
 (cl-defstruct (multi-cursor--cursor
                (:constructor multi-cursor--cursor-create))
   id point mark mark-active direction goal-column last-yank)
@@ -76,6 +86,21 @@ operation before changing the buffer or cursor session."
 (defvar-local multi-cursor--redisplay-snapshot-dirty-p t
   "Non-nil means the cached redisplay snapshot must be rebuilt.")
 
+(defvar-local multi-cursor--region-overlays nil
+  "Overlays displaying active secondary selections in this buffer.")
+
+(defvar-local multi-cursor--caret-overlays nil
+  "Overlays displaying fallback secondary carets in this buffer.")
+
+(defvar-local multi-cursor--presentation-snapshot nil
+  "Redisplay snapshot represented by the current presentation overlays.")
+
+(defvar-local multi-cursor--presentation-window nil
+  "Selected window for which presentation overlays were built.")
+
+(defvar-local multi-cursor--presentation-native-p nil
+  "Non-nil when native carets were available for the current presentation.")
+
 (defvar multi-cursor--redisplay-window nil
   "Window which most recently received a secondary-cursor snapshot.")
 
@@ -95,6 +120,8 @@ operation before changing the buffer or cursor session."
 
 (defvar multi-cursor--dispatching nil
   "Non-nil while a command is running through the multiple-cursor dispatcher.")
+
+(declare-function multi-cursor--native-decorations-p "window.c" (window))
 
 ;;;###autoload
 (defun multi-cursor-register-command (command policy &optional handler)
@@ -242,20 +269,126 @@ dispatcher without the pre-command hook modifying the primary region."
   (sort (copy-sequence multi-cursor--cursors)
         #'multi-cursor--cursor-less-p))
 
+(defun multi-cursor--clear-presentation ()
+  "Delete presentation overlays owned by the current buffer."
+  (mapc #'delete-overlay multi-cursor--region-overlays)
+  (mapc #'delete-overlay multi-cursor--caret-overlays)
+  (setq multi-cursor--region-overlays nil
+        multi-cursor--caret-overlays nil
+        multi-cursor--presentation-snapshot nil
+        multi-cursor--presentation-window nil
+        multi-cursor--presentation-native-p nil))
+
+(defun multi-cursor--make-presentation-overlay (id beg end window face)
+  "Return an evaporating cursor ID overlay from BEG to END in WINDOW.
+
+FACE is the face used to render the overlay."
+  (let ((overlay (make-overlay beg end nil nil nil)))
+    (overlay-put overlay 'multi-cursor-id id)
+    (overlay-put overlay 'face face)
+    (overlay-put overlay 'window window)
+    (overlay-put overlay 'evaporate t)
+    (overlay-put overlay 'priority
+                 (if (eq face 'multi-cursor-caret-face)
+                     '(nil . 101)
+                   '(nil . 100)))
+    overlay))
+
+(defun multi-cursor--caret-overlay-bounds (position)
+  "Return face-overlay caret bounds for POSITION."
+  (if (< position (point-max))
+      (cons position (1+ position))
+    (cons (max (point-min) (1- position)) position)))
+
+(defun multi-cursor--presentation-table (overlays)
+  "Return a cursor-ID table containing OVERLAYS."
+  (let ((table (make-hash-table :test #'eql)))
+    (dolist (overlay overlays)
+      (puthash (overlay-get overlay 'multi-cursor-id) overlay table))
+    table))
+
+(defun multi-cursor--reuse-presentation-overlay
+    (id beg end window face table)
+  "Reuse cursor ID's overlay in TABLE at BEG and END, or create it.
+
+WINDOW restricts display and FACE is used when a new overlay is needed."
+  (let ((overlay (gethash id table)))
+    (if overlay
+        (progn
+          (remhash id table)
+          (unless (and (eq (overlay-buffer overlay) (current-buffer))
+                       (= (overlay-start overlay) beg)
+                       (= (overlay-end overlay) end))
+            (move-overlay overlay beg end (current-buffer)))
+          (unless (eq (overlay-get overlay 'window) window)
+            (overlay-put overlay 'window window))
+          overlay)
+      (multi-cursor--make-presentation-overlay id beg end window face))))
+
+(defun multi-cursor--native-cursor-decorations-p (window)
+  "Return non-nil when WINDOW's backend paints secondary carets natively."
+  (and (fboundp 'multi-cursor--native-decorations-p)
+       (multi-cursor--native-decorations-p window)))
+
+(defun multi-cursor--sync-presentation (window snapshot native-p)
+  "Synchronize overlays for WINDOW and SNAPSHOT using NATIVE-P carets.
+
+The immutable SNAPSHOT identity is also the presentation generation.  Thus
+an unchanged cursor generation causes no overlay churn during redisplay."
+  (unless (and (eq snapshot multi-cursor--presentation-snapshot)
+               (eq window multi-cursor--presentation-window)
+               (eq native-p multi-cursor--presentation-native-p))
+    (let ((regions (multi-cursor--presentation-table
+                    multi-cursor--region-overlays))
+          (carets (multi-cursor--presentation-table
+                   multi-cursor--caret-overlays))
+          new-regions new-carets)
+      (when snapshot
+        (let ((index 2))
+          (while (< index (length snapshot))
+            (let ((id (aref snapshot index))
+                  (position (aref snapshot (1+ index)))
+                  (mark (aref snapshot (+ index 2)))
+                  (active (aref snapshot (+ index 3))))
+              (when (and active mark)
+                (push (multi-cursor--reuse-presentation-overlay
+                       id (min position mark) (max position mark)
+                       window 'multi-cursor-region-face regions)
+                      new-regions))
+              (unless native-p
+                (pcase-let ((`(,beg . ,end)
+                             (multi-cursor--caret-overlay-bounds position)))
+                  (push (multi-cursor--reuse-presentation-overlay
+                         id beg end window 'multi-cursor-caret-face carets)
+                        new-carets))))
+            (setq index (+ index 5)))))
+      (maphash (lambda (_id overlay) (delete-overlay overlay)) regions)
+      (maphash (lambda (_id overlay) (delete-overlay overlay)) carets)
+      (setq multi-cursor--region-overlays (nreverse new-regions)
+            multi-cursor--caret-overlays (nreverse new-carets)))
+    (setq multi-cursor--presentation-snapshot snapshot
+          multi-cursor--presentation-window window
+          multi-cursor--presentation-native-p native-p)))
+
 (defun multi-cursor--publish-redisplay-snapshot (window)
   "Publish an immutable secondary-cursor snapshot for selected WINDOW.
 
 The flat vector contains the buffer and its character-change tick followed
-by records of ID, point, mark, active state, and direction.  Publication
-does not ask whether individual cursors are visible; generic redisplay will
-resolve geometry in a later implementation stage."
+by records of ID, point, mark, active state, and direction.  Native-capable
+backends receive the snapshot for caret geometry; other terminals receive
+nil and use the Lisp face-overlay caret fallback."
   (when (eq window (selected-window))
     (when (and (window-live-p multi-cursor--redisplay-window)
                (not (eq multi-cursor--redisplay-window window)))
+      (let ((old-buffer (window-buffer multi-cursor--redisplay-window)))
+        (when (buffer-live-p old-buffer)
+          (with-current-buffer old-buffer
+            (multi-cursor--clear-presentation))))
       (multi-cursor--set-redisplay-snapshot
        multi-cursor--redisplay-window nil))
     (setq multi-cursor--redisplay-window window)
-    (let ((tick (buffer-chars-modified-tick)))
+    (let ((tick (buffer-chars-modified-tick))
+          (native-p (multi-cursor--native-cursor-decorations-p window)))
       (when (or multi-cursor--redisplay-snapshot-dirty-p
                 (not (equal tick multi-cursor--redisplay-snapshot-tick)))
         (setq multi-cursor--redisplay-snapshot
@@ -276,7 +409,9 @@ resolve geometry in a later implementation stage."
               multi-cursor--redisplay-snapshot-tick tick
               multi-cursor--redisplay-snapshot-dirty-p nil))
       (multi-cursor--set-redisplay-snapshot
-       window multi-cursor--redisplay-snapshot))))
+       window (and native-p multi-cursor--redisplay-snapshot))
+      (multi-cursor--sync-presentation
+       window multi-cursor--redisplay-snapshot native-p))))
 
 (defun multi-cursor--mark-redisplay-snapshot-dirty (&rest _ignored)
   "Mark the current buffer's published cursor positions stale."
@@ -1316,6 +1451,28 @@ the variable `command-history'."
     (multi-cursor--remove-inaccessible-cursors))
   (setq multi-cursor--restriction-before-command nil))
 
+(defun multi-cursor--keyboard-quit
+    (command _prefix _keys _record-flag _special)
+  "Handle COMMAND with the two-stage multiple-cursor quit contract.
+
+The first invocation deactivates every primary and secondary selection while
+preserving its mark.  If no selection is active, the invocation ends the
+session."
+  (unless (eq command 'keyboard-quit)
+    (error "Invalid multiple-cursor quit command: %S" command))
+  (let ((active-p mark-active))
+    (dolist (cursor multi-cursor--cursors)
+      (when (multi-cursor--cursor-mark-active cursor)
+        (setq active-p t)
+        (setf (multi-cursor--cursor-mark-active cursor) nil)))
+    (if active-p
+        (progn
+          (when mark-active
+            (deactivate-mark t))
+          (setq multi-cursor--redisplay-snapshot-dirty-p t)
+          (force-window-update (current-buffer)))
+      (multi-cursor-mode -1))))
+
 (defun multi-cursor--remove-lifecycle-hooks ()
   "Remove lifecycle hooks installed for the current buffer."
   (remove-hook 'kill-buffer-hook #'multi-cursor--end-session t)
@@ -1330,6 +1487,12 @@ the variable `command-history'."
 
 (defun multi-cursor--clear ()
   "Release all cursor records and reset the current buffer's session."
+  (when (and (window-live-p multi-cursor--presentation-window)
+             (eq (window-buffer multi-cursor--presentation-window)
+                 (current-buffer)))
+    (multi-cursor--set-redisplay-snapshot
+     multi-cursor--presentation-window nil))
+  (multi-cursor--clear-presentation)
   (mapc #'multi-cursor--release-cursor multi-cursor--cursors)
   (setq multi-cursor--cursors nil
         multi-cursor--next-id 0
@@ -1408,7 +1571,7 @@ the variable `command-history'."
   (multi-cursor-register-command command 'batch-edit #'multi-cursor--batch-edit))
 
 (dolist (command '(undo undo-only undo-redo
-                   keyboard-quit execute-extended-command execute-kbd-macro
+                   execute-extended-command execute-kbd-macro
                    isearch-forward isearch-backward
                    query-replace query-replace-regexp
                    right-char left-char right-word left-word
@@ -1416,6 +1579,9 @@ the variable `command-history'."
                    beginning-of-visual-line end-of-visual-line))
   (when (commandp command)
     (multi-cursor-register-command command 'unsupported)))
+
+(multi-cursor-register-command
+ 'keyboard-quit 'custom-handler #'multi-cursor--keyboard-quit)
 
 (provide 'multi-cursor)
 
