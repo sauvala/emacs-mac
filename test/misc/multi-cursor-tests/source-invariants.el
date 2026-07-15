@@ -592,6 +592,117 @@
      (multi-cursor-source-tests--c-code-match-p
       "dispatch_\\(?:async\\|sync\\)" body))))
 
+(ert-deftest multi-cursor-source-mac-filled-cursors-redraw-contrast-spans ()
+  "Filled secondary boxes should redraw contrasting glyphs by row span."
+  (let ((body (multi-cursor-source-tests--function-body
+               "src/macterm.c" "mac_draw_window_cursor_decorations"))
+        (source (multi-cursor-source-tests--source "src/macterm.c")))
+    (dolist (field '("row" "vpos" "hpos" "x"))
+      (should
+       (string-match-p
+        (concat "struct mac_cursor_decoration_glyph"
+                "\\(?:.\\|\n\\)*?\\_<" field "\\_>")
+        source)))
+    (should
+     (string-match-p
+      (concat "if[[:space:]\n]*(kind[[:space:]]*==[[:space:]]*"
+              "FILLED_BOX_CURSOR[[:space:]\n]*&&[[:space:]\n]*"
+              "d->color_pixel[[:space:]]*==[[:space:]]*0)"
+              "[[:space:]\n]*glyphs\\[nglyphs\\+\\+\\]")
+      body))
+    (should (string-match-p "qsort[[:space:]\n]*(glyphs" body))
+    (should
+     (string-match-p
+      "glyphs\\[end\\]\\.row[[:space:]]*==[[:space:]]*glyph->row"
+      body))
+    (should
+     (string-match-p
+      "glyphs\\[end\\]\\.hpos[[:space:]]*==[[:space:]]*end_hpos"
+      body))
+    (should
+     (string-match-p
+      (concat "draw_glyphs[[:space:]\n]*(w,[^;]+"
+              "glyph->hpos,[[:space:]\n]*end_hpos,[[:space:]\n]*"
+              "DRAW_CURSOR")
+      body))
+    (should-not
+     (multi-cursor-source-tests--c-code-match-p
+      "w[[:space:]]*->[[:space:]]*phys_cursor" body))))
+
+(ert-deftest multi-cursor-source-mac-cursor-span-widens-clipping ()
+  "Secondary cursor spans should widen clipping without changing their face."
+  (let ((clip-body
+         (multi-cursor-source-tests--function-body
+          "src/macterm.c" "mac_set_glyph_string_clipping"))
+        (draw-body
+         (multi-cursor-source-tests--function-body
+          "src/macterm.c" "mac_draw_window_cursor_decorations")))
+    (should
+     (string-match-p
+      (concat "mac_cursor_decoration_span_p[[:space:]\n]*&&"
+              "[[:space:]\n]*s->hl[[:space:]]*==[[:space:]]*DRAW_CURSOR")
+      clip-body))
+    (should
+     (string-match-p
+      (concat "s->hl[[:space:]]*=[[:space:]]*DRAW_NORMAL_TEXT;"
+              "[^;]+get_glyph_string_clip_rects[^;]+;"
+              "[[:space:]\n]*s->hl[[:space:]]*=[[:space:]]*hl;")
+      clip-body))
+    (dolist (bound '("mac_cursor_decoration_span_left"
+                     "mac_cursor_decoration_span_right"))
+      (should (string-match-p bound clip-body)))
+    (should
+     (string-match-p
+      "r\\[i\\]\\.width[[:space:]]*=[[:space:]]*max[[:space:]\n]*(0,[[:space:]]*right[[:space:]]*-[[:space:]]*left)"
+      clip-body))
+    ;; The run metadata is set only around the synchronous glyph setup and is
+    ;; restored before processing another span or returning to primary draws.
+    (should
+     (string-match-p
+      (concat "mac_cursor_decoration_span_p[[:space:]]*=[[:space:]]*true;"
+              "[^}]+draw_glyphs[[:space:]\n]*(w,[^;]+DRAW_CURSOR[^;]+;"
+              "[[:space:]\n]*mac_cursor_decoration_span_p"
+              "[[:space:]]*=[[:space:]]*saved_span_p;")
+      draw-body))))
+
+(ert-deftest multi-cursor-source-mac-contrast-follows-primitive-body-batch ()
+  "Primitive commands should not escape their asynchronous drawing block."
+  (let* ((body (multi-cursor-source-tests--function-body
+                "src/macterm.c" "mac_draw_window_cursor_decorations"))
+         (metal-end (string-match "emacs_metal_reset_clip" body))
+         (metal-free (and metal-end
+                          (string-match "free[[:space:]\n]*(commands)"
+                                        body metal-end)))
+         (core-graphics-begin (string-match "MAC_BEGIN_DRAW_TO_FRAME" body))
+         (core-graphics-free
+          (and core-graphics-begin
+               (string-match "free[[:space:]\n]*(commands)"
+                             body core-graphics-begin)))
+         (core-graphics-end (string-match "MAC_END_DRAW_TO_FRAME" body))
+         (contrast
+          (string-match
+           (concat "draw_glyphs[[:space:]\n]*(w,[^;]+"
+                   "DRAW_CURSOR")
+           body))
+         (glyph-free (and contrast
+                          (string-match "free[[:space:]\n]*(glyphs)"
+                                        body contrast))))
+    (should metal-end)
+    (should metal-free)
+    (should core-graphics-begin)
+    (should core-graphics-free)
+    (should core-graphics-end)
+    (should contrast)
+    (should glyph-free)
+    (should (< metal-end metal-free core-graphics-begin))
+    ;; With DRAWING_USE_GCD this free executes inside the block introduced by
+    ;; MAC_BEGIN, after the final command use and before MAC_END queues it.
+    (should (< core-graphics-begin core-graphics-free core-graphics-end))
+    (should (< core-graphics-end contrast))
+    ;; Glyph-run metadata has separate ownership and survives until the
+    ;; synchronous contrasting-glyph pass is complete.
+    (should (< contrast glyph-free))))
+
 (provide 'multi-cursor-source-invariants)
 
 ;;; source-invariants.el ends here

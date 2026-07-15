@@ -1696,6 +1696,14 @@ mac_set_glyph_string_gc (struct glyph_string *s)
 }
 
 
+/* Secondary cursor spans use DRAW_CURSOR for its face selection, but unlike
+   the primary cursor they can cover more than one adjacent glyph.  This flag
+   is scoped around their synchronous draw_glyphs setup below.  */
+static bool mac_cursor_decoration_span_p;
+static int mac_cursor_decoration_span_left;
+static int mac_cursor_decoration_span_right;
+
+
 /* Set clipping for output of glyph string S.  S may be part of a mode
    line or menu if we don't have X toolkit support.  */
 
@@ -1703,7 +1711,28 @@ static void
 mac_set_glyph_string_clipping (struct glyph_string *s)
 {
   NativeRectangle *r = s->clip;
-  int n = get_glyph_string_clip_rects (s, r, 2);
+  int n;
+
+  if (mac_cursor_decoration_span_p && s->hl == DRAW_CURSOR)
+    {
+      /* get_glyph_string_clip_rects normally restricts DRAW_CURSOR to the
+         first glyph cell.  Obtain ordinary row clipping for this secondary
+         span without changing the face used by the renderer.  */
+      enum draw_glyphs_face hl = s->hl;
+      s->hl = DRAW_NORMAL_TEXT;
+      n = get_glyph_string_clip_rects (s, r, 2);
+      s->hl = hl;
+      for (int i = 0; i < n; ++i)
+	{
+	  int left = max (r[i].x, mac_cursor_decoration_span_left);
+	  int right = min (r[i].x + r[i].width,
+			   mac_cursor_decoration_span_right);
+	  r[i].x = left;
+	  r[i].width = max (0, right - left);
+	}
+    }
+  else
+    n = get_glyph_string_clip_rects (s, r, 2);
 
   mac_set_clip_rectangles (s->f, s->gc, r, n);
   s->num_clips = n;
@@ -4461,6 +4490,25 @@ struct mac_cursor_decoration_command
   bool outline_p;
 };
 
+struct mac_cursor_decoration_glyph
+{
+  struct glyph_row *row;
+  int vpos, hpos, x;
+};
+
+static int
+mac_compare_cursor_decoration_glyphs (const void *a, const void *b)
+{
+  const struct mac_cursor_decoration_glyph *ga = a;
+  const struct mac_cursor_decoration_glyph *gb = b;
+
+  if (ga->vpos != gb->vpos)
+    return ga->vpos < gb->vpos ? -1 : 1;
+  if (ga->hpos != gb->hpos)
+    return ga->hpos < gb->hpos ? -1 : 1;
+  return 0;
+}
+
 struct mac_cursor_decoration_restore_span
 {
   struct glyph_row *row;
@@ -4472,10 +4520,10 @@ struct mac_cursor_decoration_restore_span
    is widened to at most two glyph-renderer calls per affected row (normal and
    mouse-face spans).  All cursor shapes are copied to owned primitive commands
    and issued from one graphics context, so the GCD path never captures the
-   caller's alloca buffer or schedules one block per cursor.  Filled boxes
-   intentionally use the cursor body color in this first backend batch
-   implementation; drawing a contrasting glyph inside each box without
-   reintroducing per-cursor GCD dispatch is follow-up work.  */
+   caller's alloca buffer or schedules one block per cursor.  Afterwards,
+   adjacent default-color filled boxes are redrawn as cursor glyph spans.  This
+   gives their text the same contrasting face as the primary cursor while
+   avoiding one glyph-renderer call per adjacent secondary cursor.  */
 static void
 mac_draw_window_cursor_decorations (struct window *w,
 				    const struct cursor_decoration *decorations,
@@ -4486,15 +4534,19 @@ mac_draw_window_cursor_decorations (struct window *w,
     return;
   struct mac_cursor_decoration_command *commands
     = calloc (count, sizeof *commands);
+  struct mac_cursor_decoration_glyph *glyphs
+    = calloc (count, sizeof *glyphs);
   ptrdiff_t nrows = w->current_matrix->nrows;
   struct mac_cursor_decoration_restore_span *spans
     = calloc (nrows, sizeof *spans);
   ptrdiff_t ncommands = 0;
+  ptrdiff_t nglyphs = 0;
   CGRect invalid = CGRectNull;
 
-  if (commands == NULL || spans == NULL)
+  if (commands == NULL || glyphs == NULL || spans == NULL)
     {
       free (commands);
+      free (glyphs);
       free (spans);
       return;
     }
@@ -4640,6 +4692,11 @@ mac_draw_window_cursor_decorations (struct window *w,
       commands[ncommands++] = (struct mac_cursor_decoration_command)
 	{ .rect = outline_p ? rect : visible_rect, .clip = clip,
 	  .color = color, .outline_p = outline_p };
+      if (kind == FILLED_BOX_CURSOR && d->color_pixel == 0)
+	glyphs[nglyphs++] = (struct mac_cursor_decoration_glyph)
+	  { .row = row,
+	    .vpos = MATRIX_ROW_VPOS (row, w->current_matrix),
+	    .hpos = d->hpos, .x = d->x };
       invalid = CGRectIsNull (invalid) ? visible_rect
 	: CGRectUnion (invalid, visible_rect);
     }
@@ -4647,8 +4704,12 @@ mac_draw_window_cursor_decorations (struct window *w,
   if (ncommands == 0)
     {
       free (commands);
+      free (glyphs);
       return;
     }
+
+  qsort (glyphs, nglyphs, sizeof *glyphs,
+	 mac_compare_cursor_decoration_glyphs);
 
   GC gc = FRAME_DISPLAY_INFO (f)->scratch_cursor_gc;
   if (gc == NULL)
@@ -4703,9 +4764,47 @@ mac_draw_window_cursor_decorations (struct window *w,
       CGContextRestoreGState (context);
       CGColorRelease (color);
     }
+  /* With GCD drawing this executes inside the queued block, after the last
+     command use.  Keeping it before MAC_END avoids releasing captured
+     storage while the block is pending.  */
   free (commands);
   MAC_END_DRAW_TO_FRAME (f);
 #endif
+
+  /* DRAW_CURSOR selects a foreground which contrasts with the underlying
+     glyph face.  Calling draw_glyphs directly leaves w->phys_cursor_* alone;
+     sorting above lets adjacent cursor cells share one renderer call.  */
+  for (ptrdiff_t i = 0; i < nglyphs; )
+    {
+      struct mac_cursor_decoration_glyph *glyph = glyphs + i;
+      ptrdiff_t end = i + 1;
+      int end_hpos = glyph->hpos + 1;
+      while (end < nglyphs
+	     && glyphs[end].row == glyph->row
+	     && glyphs[end].hpos == end_hpos)
+	{
+	  ++end_hpos;
+	  ++end;
+	}
+      bool saved_span_p = mac_cursor_decoration_span_p;
+      int saved_span_left = mac_cursor_decoration_span_left;
+      int saved_span_right = mac_cursor_decoration_span_right;
+      int span_width = 0;
+      for (int hpos = glyph->hpos; hpos < end_hpos; ++hpos)
+	span_width += glyph->row->glyphs[TEXT_AREA][hpos].pixel_width;
+      mac_cursor_decoration_span_p = true;
+      mac_cursor_decoration_span_left
+	= WINDOW_TEXT_TO_FRAME_PIXEL_X (w, glyph->x);
+      mac_cursor_decoration_span_right
+	= mac_cursor_decoration_span_left + span_width;
+      draw_glyphs (w, glyph->x, glyph->row, TEXT_AREA,
+		   glyph->hpos, end_hpos, DRAW_CURSOR, 0);
+      mac_cursor_decoration_span_p = saved_span_p;
+      mac_cursor_decoration_span_left = saved_span_left;
+      mac_cursor_decoration_span_right = saved_span_right;
+      i = end;
+    }
+  free (glyphs);
 }
 
 

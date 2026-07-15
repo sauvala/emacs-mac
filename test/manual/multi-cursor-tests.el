@@ -30,6 +30,8 @@
 ;; frame and move focus to another application to check scale, clipping, and
 ;; inactive-frame cursor colors.  No secondary cursor should leave stale
 ;; pixels; the ordinary primary cursor should remain the only blinking caret.
+;; The first secondary box sits on text whose background equals the configured
+;; cursor color; its glyph must remain legible inside the filled box.
 
 ;;; Code:
 
@@ -155,11 +157,18 @@ Interactively, a prefix argument supplies COUNT; the default is 300."
          "Also drag the frame edges repeatedly, switch focus to another app,\n"
          "return to Emacs, and alternate `o' between split windows.  Cursor\n"
          "pixels must remain clipped to the text area with no stale remnants.\n\n")
+        (let* ((contrast-start (point))
+               (cursor-color (or (frame-parameter nil 'cursor-color) "red")))
+          (insert "CONTRAST  glyph text must remain visible inside this box.\n")
+          (add-text-properties
+           contrast-start (line-end-position)
+           `(face (:background ,cursor-color :foreground "yellow")))
+          (push (+ contrast-start 10) positions))
         (dotimes (line (+ count 200))
           (let ((start (point)))
             (insert (format "%04d  The quick brown fox jumps over row %04d.\n"
                             line line))
-            (when (< line count)
+            (when (< line (1- count))
               (push (+ start 7) positions)))))
       (goto-char (point-min))
       (setq-local cursor-type 'box)
