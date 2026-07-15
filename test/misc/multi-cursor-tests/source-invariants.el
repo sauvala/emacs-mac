@@ -249,14 +249,26 @@
 
 (ert-deftest multi-cursor-source-snapshot-setter-invalidates-precisely ()
   "The dedicated setter should retain snapshots and request redisplay."
-  (let ((body (multi-cursor-source-tests--c-defun
-               "src/window.c" "multi-cursor--set-redisplay-snapshot")))
+  (let* ((body (multi-cursor-source-tests--c-defun
+                "src/window.c" "multi-cursor--set-redisplay-snapshot"))
+         (tick-check (string-match "Fbuffer_chars_modified_tick" body))
+         (identity-check
+          (string-match
+           "EQ (snapshot, w->cursor_decorations_snapshot)" body))
+         (record-scan (string-match "for (ptrdiff_t i = 2" body)))
     (should (string-match-p "cursor_decorations_snapshot" body))
     (should (string-match-p "desired_cursor_decorations_snapshot" body))
     (should (string-match-p "cursor_decorations_changed_p" body))
     (should (string-match-p "redisplay" body))
     (should
-     (string-match-p "Fequal\\|internal_equal\\|equal_no_quit" body))))
+     (string-match-p "Fequal\\|internal_equal\\|equal_no_quit" body))
+    ;; Exact immutable generations may skip the O(n) record scan, but not the
+    ;; constant-time stale-header checks.
+    (should tick-check)
+    (should identity-check)
+    (should record-scan)
+    (should (< tick-check identity-check))
+    (should (< identity-check record-scan))))
 
 (ert-deftest multi-cursor-source-promotes-snapshot-after-completed-update ()
   "Only a completed window update should promote the desired snapshot."

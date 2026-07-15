@@ -4472,11 +4472,15 @@ tick, followed by sorted cursor records of five elements each.  */)
 {
   CHECK_LIVE_WINDOW (window);
   struct window *w = XWINDOW (window);
+  ptrdiff_t size = 0;
 
+  /* Keep the constant-time envelope checks ahead of the identity shortcut.
+     In particular, republishing an old generation after a buffer edit must
+     still reject its stale tick.  */
   if (!NILP (snapshot))
     {
       CHECK_VECTOR (snapshot);
-      ptrdiff_t size = ASIZE (snapshot);
+      size = ASIZE (snapshot);
       if (size < 2 || (size - 2) % 5 != 0)
 	xsignal1 (Qwrong_type_argument, snapshot);
       if (!EQ (window, selected_window)
@@ -4484,7 +4488,24 @@ tick, followed by sorted cursor records of five elements each.  */)
 	  || NILP (Fequal (AREF (snapshot, 1),
 			   Fbuffer_chars_modified_tick (w->contents))))
 	xsignal1 (Qargs_out_of_range, snapshot);
+    }
 
+  /* The publisher owns SNAPSHOT as an immutable generation object.  Avoid
+     rescanning and invalidating an identical generation on every pre-redisplay
+     call.  A displayed snapshot is reusable only while its geometry has not
+     been damaged; matrix teardown leaves CHANGED_P set so the same identity
+     is validated and resolved again.  Non-nil desired snapshots are
+     unambiguous pending transactions and can likewise be retained.  Nil
+     cannot represent both "no pending transaction" and a pending clear.  */
+  if ((!w->cursor_decorations_changed_p
+	&& EQ (snapshot, w->cursor_decorations_snapshot)
+	&& NILP (w->desired_cursor_decorations_snapshot))
+      || (!NILP (snapshot)
+	  && EQ (snapshot, w->desired_cursor_decorations_snapshot)))
+    return Qnil;
+
+  if (!NILP (snapshot))
+    {
       struct buffer *buffer = XBUFFER (w->contents);
       ptrdiff_t previous_point = -1;
       for (ptrdiff_t i = 2; i < size; i += 5)

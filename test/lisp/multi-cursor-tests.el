@@ -1628,7 +1628,29 @@
           (should-error
            (multi-cursor--set-redisplay-snapshot
             other-window
-            (vector buffer tick 1 2 nil nil nil))))))))
+           (vector buffer tick 1 2 nil nil nil))))))))
+
+(ert-deftest multi-cursor-redisplay-primitive-rejects-stale-same-snapshot ()
+  "Identity reuse must not bypass the published character-change tick."
+  (unless (and (fboundp 'multi-cursor--set-redisplay-snapshot)
+               (subrp (symbol-function
+                       'multi-cursor--set-redisplay-snapshot)))
+    (ert-skip "Fresh native multiple-cursor test binary is unavailable"))
+  (with-temp-buffer
+    (insert "abcdef")
+    (save-window-excursion
+      (switch-to-buffer (current-buffer))
+      (let* ((window (selected-window))
+             (snapshot
+              (vector (current-buffer) (buffer-chars-modified-tick)
+                      1 4 nil nil 'forward)))
+        (multi-cursor--set-redisplay-snapshot window snapshot)
+        (insert "x")
+        (unwind-protect
+            (should-error
+             (multi-cursor--set-redisplay-snapshot window snapshot)
+             :type 'args-out-of-range)
+          (multi-cursor--set-redisplay-snapshot window nil))))))
 
 (ert-deftest multi-cursor-redisplay-resolves-sorted-snapshot-safely ()
   "A sorted published snapshot should survive a completed redisplay."
