@@ -1434,6 +1434,34 @@
     (undo 1)
     (should (equal (buffer-string) "abcd"))))
 
+(ert-deftest multi-cursor-edit-batch-primitive-call-count-is-constant ()
+  (unless (fboundp 'multi-cursor--apply-edits)
+    (ert-skip "Fresh native multiple-cursor test binary is unavailable"))
+  (dolist (cursor-count '(2 10 100 500))
+    (with-temp-buffer
+      (insert (make-string (+ 2 (* cursor-count 2)) ?a))
+      (goto-char 1)
+      (dotimes (index (1- cursor-count))
+        (multi-cursor-add-at-point (+ 3 (* index 2))))
+      (let ((apply-calls 0)
+            (merge-calls 0)
+            (apply-function (symbol-function 'multi-cursor--apply-edits))
+            (merge-function (symbol-function 'multi-cursor--merge-edits))
+            (last-command-event ?X))
+        (cl-letf (((symbol-function 'multi-cursor--apply-edits)
+                   (lambda (edits)
+                     (cl-incf apply-calls)
+                     (funcall apply-function edits)))
+                  ((symbol-function 'multi-cursor--merge-edits)
+                   (lambda (edits)
+                     (cl-incf merge-calls)
+                     (funcall merge-function edits))))
+          (multi-cursor--batch-edit
+           'self-insert-command nil nil nil nil))
+        (should (= apply-calls 1))
+        (should (= merge-calls 1))
+        (should (= (cl-count ?X (buffer-string)) cursor-count))))))
+
 (ert-deftest multi-cursor-redisplay-publisher-reuses-clean-snapshot ()
   (with-temp-buffer
     (insert "abcdef")
@@ -1452,6 +1480,35 @@
           (multi-cursor--publish-redisplay-snapshot (selected-window)))
         (should (= (length snapshots) 2))
         (should (eq (car snapshots) (cadr snapshots)))))))
+
+(ert-deftest multi-cursor-redisplay-publishes-large-set-in-one-batch ()
+  (with-temp-buffer
+    (insert (make-string 1200 ?a))
+    (goto-char 1)
+    (dotimes (index 500)
+      (multi-cursor-add-at-point (+ 2 (* index 2))))
+    (save-window-excursion
+      (switch-to-buffer (current-buffer))
+      (let ((multi-cursor--redisplay-window nil)
+            (native-calls 0)
+            (presentation-calls 0)
+            published)
+        (cl-letf (((symbol-function 'multi-cursor--set-redisplay-snapshot)
+                   (lambda (_window snapshot)
+                     (cl-incf native-calls)
+                     (setq published snapshot)))
+                  ((symbol-function
+                    'multi-cursor--native-cursor-decorations-p)
+                   (lambda (_window) t))
+                  ((symbol-function 'multi-cursor--sync-presentation)
+                   (lambda (_window _snapshot _native-p)
+                     (cl-incf presentation-calls))))
+          (multi-cursor--publish-redisplay-snapshot (selected-window)))
+        (should (= native-calls 1))
+        (should (= presentation-calls 1))
+        (should (vectorp published))
+        ;; Two header elements followed by five immutable fields per cursor.
+        (should (= (length published) (+ 2 (* 5 500))))))))
 
 (ert-deftest multi-cursor-redisplay-publisher-rebuilds-stale-snapshot ()
   (with-temp-buffer
