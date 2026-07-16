@@ -414,11 +414,17 @@ cursor states before committing them.  Left and Right require logical-order
 cursor movement; Up and Down require logical-line movement.  Visual-order
 and display-line arrow movement are rejected because they depend on live
 window glyph geometry for every cursor.
-The command @code{newline}, normally bound to @key{RET}, has a guarded
-transactional fast path when electric indentation, auto-fill, abbrev
-expansion, hard newlines, left margins, custom post-insertion hooks,
-input translation, adjacent text properties, overwrite mode, prefix
-arguments, and active selections are absent.
+The command @code{newline}, normally bound to @key{RET}, runs as one
+transaction.  It has a guarded raw-newline fast path when electric
+indentation is disabled.  With Electric Indent mode enabled, it also supports
+the stock relative-indentation case: every cursor must be at the end of a
+complete accessible physical line, and the buffer must use
+@code{indent-relative} without custom electric, indentation, syntax, or
+post-insertion callbacks.  That electric path removes trailing horizontal
+whitespace and computes each new line's indentation before applying the
+complete edit set.  Auto-fill, abbrev expansion, hard newlines, left
+margins, input translation, adjacent text properties, overwrite mode, prefix
+arguments, and active selections remain unsupported.
 Higher-level newline commands such as
 @code{electric-newline-and-maybe-indent}, as well as mode-dependent
 @key{TAB} indentation and completion commands, remain unsupported.

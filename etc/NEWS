@@ -1344,8 +1344,9 @@ You can restore the previous behavior by removing
 +++
 ** New experimental native Multiple Cursor mode.
 The buffer-local mode 'multi-cursor-mode' manages marker-backed secondary
-selections.  Supported text edits use one transaction, supported movements
-stage all cursor states before committing them, and copy publishes combined
+selections.  Supported character edits, kill/yank operations, and raw or
+stock-relative electric RET use one transaction; supported movements stage
+all cursor states before committing them, and copy publishes combined
 selection text once.  Creation commands select occurrences or add cursors by
 line, region, API, or mouse event.  Commands use an explicit integration policy
 and unknown commands fail before editing.  Supported Mac GUI frames paint

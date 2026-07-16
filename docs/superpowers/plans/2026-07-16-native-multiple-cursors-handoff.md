@@ -19,7 +19,8 @@ enable a planned feature or remove measured overhead.
   `/Users/janne/Projects/emacs-mac/.worktrees/native-multiple-cursors`
 - Branch: `codex/native-multiple-cursors`
 - Remote tracking branch: `fork/codex/native-multiple-cursors`
-- Latest completed commit at handoff: `1b1a379c519` (`Add guarded native multiple cursor return`)
+- Latest completed commit at handoff: `ee8038954d2`
+  (`Preserve nested electric option references`)
 - Expected starting state: clean and synchronized with the fork branch.
 - Publish with:
 
@@ -55,7 +56,7 @@ slices:
   ordinary Backspace, and all four
   `backward-delete-char-untabify` modes;
 - transactional kill, copy, and yank;
-- a deliberately guarded plain `newline`/RET fast path;
+- transactional raw and bounded stock-relative electric `newline`/RET paths;
 - immutable redisplay snapshots, native Mac caret painting, active secondary
   selections, and overlay fallback on non-native displays;
 - threshold-free scalability benchmarks, manual fixtures, user/Elisp
@@ -67,16 +68,23 @@ The relevant commits, in order, can be listed with:
 git log --oneline --reverse fork/nemesis..HEAD
 ```
 
-The latest compatibility commits are:
+The latest compatibility and Return commits are:
 
 - `b7a63ee16a5` ordinary logical arrow movement;
 - `3259fdfc48e` grapheme-aware character deletion;
 - `a94c3e698fa` untabifying/hungry Backspace;
-- `1b1a379c519` guarded transactional RET.
+- `1b1a379c519` guarded transactional raw RET;
+- `494d2b3c3e0` and `70befe0bf7a` hook-context and rollback hardening;
+- `af85064513f` bounded stock-relative electric RET;
+- `0787be52ba8` single after-change/composition signaling in rope buffers;
+- `c70182d7d19` through `ee8038954d2` exact guarded-option, mark, binding,
+  alias, and dead-buffer restoration.
 
-At handoff, the combined Lisp/C ERT command passed **182/182** tests.  Treat
-that count as a useful reference, not a permanent assertion; new tests should
-increase it.
+At handoff, the combined Lisp/C ERT command passed **212/213** tests on the
+non-rope build; the one guarded rope test skipped because
+`buffer-enable-rope` was unavailable.  Source invariants passed **25/25**.
+Treat those counts as useful references, not permanent assertions; new tests
+should increase them.
 
 ## Architectural invariants to preserve
 
@@ -101,23 +109,39 @@ increase it.
 Important implementation details and traps:
 
 - `multi-cursor--apply-edit-transaction` is the common atomic owner and restores
-  detached cursor markers on failure.
+  detached cursor markers on failure.  Change-group cancellation inhibits
+  modification hooks so a hook that caused failure cannot re-enter rollback.
+- For each edit, the C batch primitive checks the entry buffer and accessible
+  bounds immediately after `prepare_to_modify_buffer` returns and again after
+  `signal_after_change` returns.  It deliberately retains already completed
+  higher edits when called without the Lisp transaction.  Both gap and rope
+  replacement paths honor the `run_mod_hooks` argument.
 - Edit merging intentionally has different behavior for plain deletions and
-  replacement-safe untabify edits.  A boundary no-op that shares the start of
-  a tab replacement is carried as a passive state so neither cursor is lost.
+  replacement-safe untabify/electric edits.  A boundary no-op that shares the
+  start of a replacement is carried as a passive state so neither cursor is
+  lost.
 - Forward Delete follows Emacs composition/grapheme boundaries.
 - Ordinary vertical arrows keep independent goal columns; visual-line and
   visual-order movement remain rejected because they need live glyph geometry
   per cursor.
-- The native edit primitive currently inserts with non-inheriting replacement
-  semantics.  Ordinary `newline` uses `insert_and_inherit`, so the guarded RET
-  path rejects all insertion boundaries adjacent to text properties.  The
-  check widens temporarily because properties just outside narrowing can be
-  inherited.
-- Guarded RET also requires `translation-table-for-input` to be nil and rejects
-  electric indentation, auto-fill, abbrevs, hard newlines, left margins,
-  custom post-insert hooks, overwrite mode, prefixes, active selections, and
-  minibuffers.  Do not silently relax these gates.
+- The native edit primitive inserts with non-inheriting replacement semantics.
+  Ordinary `newline` uses `insert_and_inherit`, so both RET paths reject all
+  insertion or replaced-whitespace boundaries containing relevant text
+  properties.  Checks widen temporarily because properties just outside
+  narrowing can be inherited.
+- Raw RET remains the fast path when electric indentation is disabled.
+  Bounded electric RET supports only the stock `indent-relative` case at the
+  physical end of complete accessible lines.  It computes every trailing-space
+  deletion and target indentation without invoking syntax, electric, or
+  indentation callbacks, then applies the disjoint set once.
+- Electric planning snapshots guarded binding locality, values, defaults, and
+  recursive mutable references.  Hook-time mutation, equal-object replacement,
+  alias changes, buffer switching, restriction changes, or session mutation
+  fail atomically and restore the original identities where the source buffer
+  remains live; process-wide defaults are restored even if a hook kills it.
+- Both RET paths continue to reject auto-fill, abbrevs, hard newlines, left
+  margins, input translation, overwrite mode, prefixes, active selections,
+  minibuffers, custom insertion hooks, and adjacent text properties.
 - The mode currently paints only the selected window when several windows show
   the same buffer.
 - Undo/redo commands remain unsupported while a session is active even though
@@ -125,34 +149,7 @@ Important implementation details and traps:
 
 ## Remaining plan, in priority order
 
-### 1. Complete Return integration
-
-The next task is a design-and-implementation slice for set-based electric
-indentation after batched newline insertion.  Start by auditing the exact
-implementations and hooks used by `newline`,
-`electric-newline-and-maybe-indent`,
-`electric-indent-post-self-insert-function`, and
-`indent-according-to-mode` in this checkout.
-
-Requirements:
-
-- retain a single atomic command and one undo unit;
-- compute behavior per cursor without replaying the whole command loop;
-- define which `electric-indent-functions`, `indent-line-function` values,
-  syntax states, text properties, and modification hooks are admitted;
-- stage or preflight the complete cursor set before committing;
-- reject arbitrary mode callbacks until their edit/side-effect contract is
-  explicit;
-- cover different per-cursor indentation depths, adjacent/overlapping lines,
-  narrowing, read-only text, callback errors/mutation, cursor remapping,
-  history, and undo;
-- keep the existing guarded raw-newline path as a fast path.
-
-If a correct set-based electric-indent design cannot be made bounded, document
-the blocker and implement the next strictly provable subcase rather than
-falling back to command replay.
-
-### 2. Add a narrowly proven TAB path
+### 1. Add a narrowly proven TAB path
 
 Audit actual bindings in Fundamental, Text, Emacs Lisp, and C modes before
 editing.  `indent-for-tab-command` may indent a region, call arbitrary
@@ -173,7 +170,7 @@ Start only with the provable literal `insert-tab` branch, if it remains useful:
 Do not claim general TAB support until mode indentation and completion have
 separate explicit contracts.
 
-### 3. Broaden editing commands and define session undo behavior
+### 2. Broaden editing commands and define session undo behavior
 
 After Return/TAB foundations, audit commonly used commands and add only
 bounded native handlers.  Likely candidates include `open-line`,
@@ -186,7 +183,7 @@ and yank metadata.  Do not merely allow ordinary `undo` while cursor records
 silently drift.  Preserve one undo unit per broadcast edit and test undo/redo
 across overlapping selections, killed cursors, narrowing, and failed hooks.
 
-### 4. Run and record GUI performance baselines
+### 3. Run and record GUI performance baselines
 
 The headless harness exists at
 `test/benchmarks/multi-cursor-benchmarks.el`.  Run it from a graphical Mac frame
@@ -201,7 +198,7 @@ results clearly labeled; do not turn them into universal timing thresholds.
 Use measurements to identify the next optimization instead of assuming the
 native path is faster.
 
-### 5. Improve multi-window painting and painter allocations
+### 4. Improve multi-window painting and painter allocations
 
 Extend presentation beyond the selected window so every live window showing
 the buffer receives correct cursor decorations.  Preserve generation/window
@@ -213,7 +210,7 @@ tests for clipping, scrolling, window splits, indirect visibility, frame
 activation, stale snapshots, and 1,000-cursor redisplay.  Commit measured
 optimizations separately from behavior changes.
 
-### 6. Compatibility and stabilization pass
+### 5. Compatibility and stabilization pass
 
 Exercise the feature in Fundamental, Text, Emacs Lisp, and C modes; narrowed
 buffers; TTY/overlay fallback; Mac GUI; read-only and propertized text; large
