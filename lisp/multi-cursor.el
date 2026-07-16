@@ -1282,11 +1282,13 @@ the original order of both lists."
         (push edit primitive)))
     (cons (nreverse primitive) (nreverse passive))))
 
-(defun multi-cursor--remap-edit-position (position groups positions)
+(defun multi-cursor--remap-edit-position
+    (position groups positions &optional replacement-to-beg)
   "Remap detached marker POSITION through GROUPS and POSITIONS.
 
 GROUPS is an ascending vector of disjoint edits and POSITIONS is the
-parallel vector of their final ends."
+parallel vector of their final ends.  When REPLACEMENT-TO-BEG is non-nil,
+map positions inside a replaced range to its final beginning."
   (let ((low 0)
         (high (length groups)))
     ;; Find the first edit whose original end is at or after POSITION.
@@ -1310,16 +1312,19 @@ parallel vector of their final ends."
         (cond
          ((< position beg) (+ position (- final-beg beg)))
          ((= position beg) final-beg)
-         ((<= position end) final-end)
+         ((<= position end) (if replacement-to-beg final-beg final-end))
          (t (error "Invalid multiple-cursor edit transform")))))))
 
 (defun multi-cursor--install-edit-results
-    (groups positions states &optional passive-states)
+    (groups positions states &optional passive-states mark-remapper)
   "Install POSITIONS for merged edit GROUPS, releasing losing STATES.
 
 PASSIVE-STATES are no-op cursors omitted from GROUPS.  Remap and retain them
-without sending their empty edits to the batch primitive."
+without sending their empty edits to the batch primitive.  MARK-REMAPPER,
+when non-nil, remaps detached marks instead of the standard transform."
   (let ((group-vector (vconcat groups))
+        (remap-mark
+         (or mark-remapper #'multi-cursor--remap-edit-position))
         survivors)
     (cl-mapc
      (lambda (group position)
@@ -1330,7 +1335,8 @@ without sending their empty edits to the batch primitive."
                (set-marker
                 (mark-marker)
                 (and (multi-cursor--edit-state-mark survivor)
-                     (multi-cursor--remap-edit-position
+                     (funcall
+                      remap-mark
                       (multi-cursor--edit-state-mark survivor)
                       group-vector positions))
                 (and (multi-cursor--edit-state-mark survivor)
@@ -1340,7 +1346,8 @@ without sending their empty edits to the batch primitive."
              (multi-cursor--set-record-state
               cursor position
               (and (multi-cursor--edit-state-mark survivor)
-                   (multi-cursor--remap-edit-position
+                   (funcall
+                    remap-mark
                     (multi-cursor--edit-state-mark survivor)
                     group-vector positions))
              nil nil)
@@ -1353,7 +1360,8 @@ without sending their empty edits to the batch primitive."
               group-vector positions))
             (mark
              (and (multi-cursor--edit-state-mark state)
-                  (multi-cursor--remap-edit-position
+                  (funcall
+                   remap-mark
                    (multi-cursor--edit-state-mark state)
                    group-vector positions))))
         (if (multi-cursor--edit-state-primary state)
@@ -1862,23 +1870,43 @@ history."
   "Options that must remain stable across electric-newline planning and edits.")
 
 (defun multi-cursor--electric-newline-options ()
-  "Capture guarded electric-newline options without sharing list structure."
-  (mapcar (lambda (variable)
-            (cons variable (copy-tree (symbol-value variable))))
-          multi-cursor--electric-newline-guarded-options))
+  "Capture guarded electric-newline option bindings and values."
+  (mapcar
+   (lambda (variable)
+     (list variable
+           (local-variable-p variable)
+           (copy-tree (symbol-value variable))
+           (copy-tree (default-value variable))))
+   multi-cursor--electric-newline-guarded-options))
 
 (defun multi-cursor--validate-electric-newline-options (options)
   "Signal an error unless guarded electric-newline OPTIONS are unchanged."
-  (unless (cl-every
-           (lambda (entry)
-             (equal (symbol-value (car entry)) (cdr entry)))
-           options)
+  (unless
+      (cl-every
+       (lambda (entry)
+         (let ((variable (nth 0 entry)))
+           (and (eq (local-variable-p variable) (nth 1 entry))
+                (equal (symbol-value variable) (nth 2 entry))
+                (equal (default-value variable) (nth 3 entry)))))
+       options)
     (error "Electric newline changed guarded options")))
 
 (defun multi-cursor--restore-electric-newline-options (options)
   "Restore guarded electric-newline OPTIONS after a failed operation."
   (dolist (entry options)
-    (set (car entry) (copy-tree (cdr entry)))))
+    (set-default (nth 0 entry) (copy-tree (nth 3 entry))))
+  (dolist (entry options)
+    (let ((variable (nth 0 entry))
+          (local (nth 1 entry))
+          (value (copy-tree (nth 2 entry))))
+      (if local
+          (set (make-local-variable variable) value)
+        (when (local-variable-p variable)
+          (kill-local-variable variable))
+        (unless (equal (symbol-value variable) value)
+          (set variable value)
+          (when (local-variable-p variable)
+            (kill-local-variable variable)))))))
 
 (defun multi-cursor--validate-electric-newline-contract ()
   "Reject electric indentation outside the bounded relative-indent contract."
@@ -1988,6 +2016,21 @@ The neighboring characters are inheritance boundaries for the replacement."
      :beg trailing-beg :end position :string replacement
      :survivor state :members (list state))))
 
+(defun multi-cursor--remap-electric-newline-mark
+    (position groups positions)
+  "Remap electric-newline mark POSITION through GROUPS and POSITIONS.
+
+Marks in a removed trailing-whitespace range stay before the inserted
+newline and indentation, matching ordinary before-gravity mark behavior."
+  (multi-cursor--remap-edit-position position groups positions t))
+
+(defun multi-cursor--install-electric-newline-results
+    (groups positions states)
+  "Install electric-newline GROUPS and POSITIONS for cursor STATES."
+  (multi-cursor--install-edit-results
+   groups positions states nil
+   #'multi-cursor--remap-electric-newline-mark))
+
 (defun multi-cursor--electric-newline (record-flag)
   "Apply one bounded electric newline at every native cursor.
 
@@ -2029,7 +2072,7 @@ RECORD-FLAG controls the single logical command-history entry."
              states groups
              (lambda (edit-groups positions edit-states)
                (multi-cursor--validate-electric-newline-options options)
-               (multi-cursor--install-edit-results
+               (multi-cursor--install-electric-newline-results
                 edit-groups positions edit-states))))
           (setq completed t))
       (unless completed
