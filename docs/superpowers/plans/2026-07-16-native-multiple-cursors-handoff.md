@@ -142,6 +142,12 @@ Important implementation details and traps:
 - Both RET paths continue to reject auto-fill, abbrevs, hard newlines, left
   margins, input translation, overwrite mode, prefixes, active selections,
   minibuffers, custom insertion hooks, and adjacent text properties.
+- Computer Use verification on 2026-07-17 found that transactional broadcast
+  insertion works in the branch GUI, but the native Mac cursor painter corrupts
+  displayed pixels even with three secondary cursors.  Buffer and accessibility
+  text remain correct while the frame shows duplicated, fragmented, and stale
+  glyphs.  Forced redisplay and scrolling do not repair the frame.  Treat native
+  painting as broken until the first remaining task below is complete.
 - The mode currently paints only the selected window when several windows show
   the same buffer.
 - Undo/redo commands remain unsupported while a session is active even though
@@ -149,7 +155,110 @@ Important implementation details and traps:
 
 ## Remaining plan, in priority order
 
-### 1. Add a narrowly proven TAB path
+### 1. Fix native Mac cursor painting
+
+This is a correctness blocker and takes priority over TAB, compatibility
+expansion, and performance optimization.  The evidence currently points to
+`mac_draw_window_cursor_decorations` in `src/macterm.c`, especially its
+interaction with Metal clipping, old-glyph restoration, and contrasting-glyph
+drawing.  The session and edit layers are less likely causes because a
+three-secondary-cursor GUI test inserted text correctly at all four positions
+and the buffer contents remained intact.
+
+#### 1.1 Add a deterministic GUI regression fixture
+
+Extend the graphical fixture with distinctive text and backgrounds, known
+cursor coordinates, and automated actions for insertion, movement, cursor
+removal, scrolling, forced redisplay, and frame resizing.  Capture frames
+before and after each action and assert that pixels outside the expected cursor
+rectangles do not change.  Cover 1, 3, 30, and 300 secondary cursors; three is
+the smallest currently confirmed reproducer.
+
+Commit the fixture separately as `Add native cursor painter regression
+fixture`.
+
+#### 1.2 Bisect the native rendering stages
+
+Add temporary internal switches or build variants that exercise these stages
+independently:
+
+1. force the Lisp overlay fallback by reporting no native capability;
+2. install the native callback but make it a no-op;
+3. paint cursor rectangles only;
+4. restore underlying glyphs when old cursors disappear;
+5. redraw contrasting glyphs inside filled box cursors.
+
+Run the deterministic fixture after each stage.  If the overlay fallback is
+clean, the snapshot and editing layers are exonerated.  If rectangles-only is
+clean, one of the direct `draw_glyphs` paths is responsible.
+
+Run the same matrix with Metal and Core Graphics and with box, hollow, bar, and
+horizontal-bar cursors.  A Metal-only failure points to clip/scissor or command
+ordering; a failure in both backends points to glyph geometry, cache
+publication, or direct `draw_glyphs` use; a filled-box-only failure points to
+contrast rendering.
+
+#### 1.3 Scope renderer state correctly
+
+The Metal painter currently changes the frame-wide clip with
+`emacs_metal_set_clip_rect` and later resets it.  Replace this with scoped
+clip-state handling: save or push the current clip, intersect it with the
+window text area and cursor rectangle, draw, and restore or pop the original
+clip.  Never reset renderer state owned by another drawing operation.  Assert
+that every cursor rectangle and clip is contained by the target window's text
+area.
+
+Commit this behavior separately as `Scope Metal clipping for secondary
+cursors`.
+
+#### 1.4 Restore old cursor cells through ordinary redisplay
+
+`damage_window_cursor_decorations` currently invokes the backend with
+`on=false`; the Mac callback then calls `draw_glyphs` directly before the
+ordinary window update.  Replace that restoration path with precise row or
+rectangle damage and let normal redisplay repaint the underlying text.  Paint
+new secondary cursors only after the completed row update, and never repaint
+geometry resolved from an old glyph matrix when cache publication fails.
+
+Commit this behavior separately as `Restore old secondary cursor cells through
+redisplay`.
+
+#### 1.5 Reintroduce filled-box contrast conservatively
+
+After rectangle painting and cursor removal are clean, redraw one contrasting
+glyph at a time under a local clip.  Remove the process-global
+`mac_cursor_decoration_span_*` state if possible.  Test wide glyphs, combining
+characters, bidi text, tabs, images, and overlapping glyph rows.  Reintroduce
+adjacent-glyph batching only after the graphical checks pass.
+
+Commit this behavior separately as `Restore contrasting secondary cursor
+glyphs safely`.
+
+#### 1.6 Add permanent graphical acceptance coverage
+
+The source-pattern invariants are useful but did not detect this failure.  Add
+GUI checks proving that:
+
+- add, move, remove, scroll, resize, split, and refocus leave no trails;
+- forced redisplay is visually idempotent;
+- disabling the session restores pixels identical to the no-cursor frame;
+- split windows clip independently;
+- every cursor shape is correct;
+- the 1,000-cursor fixture completes without corruption.
+
+Keep the combined ERT suite and source invariants as mandatory gates.  Test
+both Metal and Core Graphics where the build supports them.
+
+Only after correctness is established should painter batching be restored and
+measured.  Record Mac painter counters for 1, 10, 100, and 1,000 cursors, and
+run the graphical regression fixture after every optimization.
+
+This task is complete only when broadcast edits remain one undo unit, displayed
+and accessible buffer contents agree, no pixels outside expected cursor cells
+change, and the 3-, 30-, and 300-cursor fixtures pass movement, removal,
+scrolling, resizing, splitting, and refocus tests without trails.
+
+### 2. Add a narrowly proven TAB path
 
 Audit actual bindings in Fundamental, Text, Emacs Lisp, and C modes before
 editing.  `indent-for-tab-command` may indent a region, call arbitrary
@@ -170,7 +279,7 @@ Start only with the provable literal `insert-tab` branch, if it remains useful:
 Do not claim general TAB support until mode indentation and completion have
 separate explicit contracts.
 
-### 2. Broaden editing commands and define session undo behavior
+### 3. Broaden editing commands and define session undo behavior
 
 After Return/TAB foundations, audit commonly used commands and add only
 bounded native handlers.  Likely candidates include `open-line`,
@@ -183,7 +292,7 @@ and yank metadata.  Do not merely allow ordinary `undo` while cursor records
 silently drift.  Preserve one undo unit per broadcast edit and test undo/redo
 across overlapping selections, killed cursors, narrowing, and failed hooks.
 
-### 3. Run and record GUI performance baselines
+### 4. Run and record GUI performance baselines
 
 The headless harness exists at
 `test/benchmarks/multi-cursor-benchmarks.el`.  Run it from a graphical Mac frame
@@ -198,7 +307,7 @@ results clearly labeled; do not turn them into universal timing thresholds.
 Use measurements to identify the next optimization instead of assuming the
 native path is faster.
 
-### 4. Improve multi-window painting and painter allocations
+### 5. Improve multi-window painting and painter allocations
 
 Extend presentation beyond the selected window so every live window showing
 the buffer receives correct cursor decorations.  Preserve generation/window
@@ -210,7 +319,7 @@ tests for clipping, scrolling, window splits, indirect visibility, frame
 activation, stale snapshots, and 1,000-cursor redisplay.  Commit measured
 optimizations separately from behavior changes.
 
-### 5. Compatibility and stabilization pass
+### 6. Compatibility and stabilization pass
 
 Exercise the feature in Fundamental, Text, Emacs Lisp, and C modes; narrowed
 buffers; TTY/overlay fallback; Mac GUI; read-only and propertized text; large
