@@ -1852,9 +1852,200 @@ history."
                   blink-paren-post-self-insert-function)))
         hook)))
 
+(defconst multi-cursor--electric-newline-guarded-options
+  '(overwrite-mode abbrev-mode auto-fill-function use-hard-newlines
+    electric-indent-mode translation-table-for-input delete-active-region
+    left-margin post-self-insert-hook electric-indent-functions
+    electric-indent-chars indent-line-function indent-line-ignored-functions
+    electric-indent-functions-without-reindent electric-indent-inhibit
+    indent-tabs-mode tab-width syntax-propertize-function)
+  "Options that must remain stable across electric-newline planning and edits.")
+
+(defun multi-cursor--electric-newline-options ()
+  "Capture guarded electric-newline options without sharing list structure."
+  (mapcar (lambda (variable)
+            (cons variable (copy-tree (symbol-value variable))))
+          multi-cursor--electric-newline-guarded-options))
+
+(defun multi-cursor--validate-electric-newline-options (options)
+  "Signal an error unless guarded electric-newline OPTIONS are unchanged."
+  (unless (cl-every
+           (lambda (entry)
+             (equal (symbol-value (car entry)) (cdr entry)))
+           options)
+    (error "Electric newline changed guarded options")))
+
+(defun multi-cursor--restore-electric-newline-options (options)
+  "Restore guarded electric-newline OPTIONS after a failed operation."
+  (dolist (entry options)
+    (set (car entry) (copy-tree (cdr entry)))))
+
+(defun multi-cursor--validate-electric-newline-contract ()
+  "Reject electric indentation outside the bounded relative-indent contract."
+  (unless
+      (and electric-indent-mode
+           (memq #'electric-indent-post-self-insert-function
+                 post-self-insert-hook)
+           (null electric-indent-functions)
+           (proper-list-p electric-indent-chars)
+           (memq ?\n electric-indent-chars)
+           (eq indent-line-function #'indent-relative)
+           (proper-list-p indent-line-ignored-functions)
+           (memq #'indent-relative indent-line-ignored-functions)
+           (proper-list-p electric-indent-functions-without-reindent)
+           (memq #'indent-relative
+                 electric-indent-functions-without-reindent)
+           (not (eq electric-indent-inhibit 'electric-layout-mode))
+           (memq syntax-propertize-function '(nil ignore)))
+    (user-error
+     "Electric newline is outside the bounded relative-indent contract")))
+
+(defun multi-cursor--electric-newline-tab-width ()
+  "Return `tab-width' sanitized for canonical electric indentation."
+  (if (and (integerp tab-width) (<= 1 tab-width 1000))
+      tab-width
+    8))
+
+(defun multi-cursor--electric-newline-indentation (column)
+  "Return canonical indentation from column zero through COLUMN."
+  (let ((width (multi-cursor--electric-newline-tab-width)))
+    (if indent-tabs-mode
+        (concat (make-string (/ column width) ?\t)
+                (make-string (% column width) ?\s))
+      (make-string column ?\s))))
+
+(defun multi-cursor--electric-newline-reject-properties (beg end)
+  "Reject text properties or active read-only values around BEG..END.
+
+The neighboring characters are inheritance boundaries for the replacement."
+  (let ((buffer-beg (point-min))
+        (buffer-end (point-max))
+        (position beg))
+    (while (< position end)
+      (when (or (text-properties-at position)
+                (multi-cursor--read-only-value-blocks-p
+                 (get-char-property position 'read-only)))
+        (user-error
+         "Electric newline in a property context is not multiple-cursor safe"))
+      (setq position (1+ position)))
+    (dolist (boundary (list (1- beg) beg (1- end) end))
+      (when (and (<= buffer-beg boundary)
+                 (< boundary buffer-end)
+                 (or (text-properties-at boundary)
+                     (multi-cursor--read-only-value-blocks-p
+                      (get-char-property boundary 'read-only))))
+        (user-error
+         "Electric newline at a property boundary is not multiple-cursor safe")))))
+
+(defun multi-cursor--electric-newline-state-edit (state)
+  "Plan the bounded electric newline replacement for detached cursor STATE."
+  (let* ((position (multi-cursor--edit-state-point state))
+         (accessible-beg (point-min))
+         (accessible-end (point-max))
+         line-beg indent-end trailing-beg target-column replacement)
+    (goto-char position)
+    (unless (= position (line-end-position))
+      (user-error "Electric newline requires every cursor at end of line"))
+    (unless (zerop (current-left-margin))
+      (user-error
+       "Electric newline with a left margin is not multiple-cursor safe"))
+    (save-restriction
+      (widen)
+      (goto-char position)
+      (unless (= position (line-end-position))
+        (user-error
+         "Electric newline at a narrowed physical mid-line is unsupported"))
+      (setq line-beg (line-beginning-position))
+      (unless (<= accessible-beg line-beg position accessible-end)
+        (user-error
+         "Electric newline requires complete accessible physical lines"))
+      (save-excursion
+        (goto-char line-beg)
+        (skip-chars-forward " \t" position)
+        (setq indent-end (point)))
+      (save-excursion
+        (goto-char position)
+        (skip-chars-backward " \t" line-beg)
+        (setq trailing-beg (point)))
+      (setq target-column
+            (if (= trailing-beg line-beg)
+                0
+              (let ((tab-width
+                     (multi-cursor--electric-newline-tab-width)))
+                (save-excursion
+                  (goto-char position)
+                  (current-indentation)))))
+      (multi-cursor--electric-newline-reject-properties line-beg indent-end)
+      (multi-cursor--electric-newline-reject-properties
+       trailing-beg position))
+    (multi-cursor--preflight-edit-range
+     trailing-beg position position trailing-beg)
+    (setq replacement
+          (concat "\n"
+                  (multi-cursor--electric-newline-indentation
+                   target-column)))
+    (multi-cursor--edit-create
+     :beg trailing-beg :end position :string replacement
+     :survivor state :members (list state))))
+
+(defun multi-cursor--electric-newline (record-flag)
+  "Apply one bounded electric newline at every native cursor.
+
+RECORD-FLAG controls the single logical command-history entry."
+  (multi-cursor--validate-electric-newline-contract)
+  (let* ((buffer (current-buffer))
+         (options (multi-cursor--electric-newline-options))
+         (states (multi-cursor--snapshot-edit-states))
+         (original-cursors (copy-sequence multi-cursor--cursors))
+         (original-next-id multi-cursor--next-id)
+         edits groups planned completed)
+    (unwind-protect
+        (save-current-buffer
+          (save-restriction
+            (atomic-change-group
+              (let ((context (multi-cursor--callback-context)))
+                (setq edits
+                      (mapcar
+                       (lambda (state)
+                         (save-excursion
+                           (multi-cursor--electric-newline-state-edit state)))
+                       states))
+                (multi-cursor--validate-callback-state context)
+                (multi-cursor--validate-electric-newline-options options)
+                (setq groups (multi-cursor--merge-edits edits t)
+                      planned t)))))
+      (unless planned
+        (set-buffer buffer)
+        (multi-cursor--restore-electric-newline-options options)
+        (multi-cursor--restore-edit-states
+         states original-cursors original-next-id)
+        (unless multi-cursor-mode
+          (setq multi-cursor-mode t)
+          (multi-cursor--start))))
+    (unwind-protect
+        (save-current-buffer
+          (save-restriction
+            (multi-cursor--apply-edit-transaction
+             states groups
+             (lambda (edit-groups positions edit-states)
+               (multi-cursor--validate-electric-newline-options options)
+               (multi-cursor--install-edit-results
+                edit-groups positions edit-states))))
+          (setq completed t))
+      (unless completed
+        (set-buffer buffer)
+        (multi-cursor--restore-electric-newline-options options)
+        (multi-cursor--restore-edit-states
+         states original-cursors original-next-id)
+        (unless multi-cursor-mode
+          (setq multi-cursor-mode t)
+          (multi-cursor--start))))
+    (when record-flag
+      (add-to-history 'command-history '(newline nil 1) nil t))))
+
 (defun multi-cursor--newline
     (command prefix _keys record-flag _special)
-  "Insert one guarded plain newline for COMMAND at every native cursor.
+  "Insert one guarded newline for COMMAND at every native cursor.
 
 PREFIX is rejected.  RECORD-FLAG controls recording in the variable
 `command-history'."
@@ -1878,10 +2069,12 @@ PREFIX is rejected.  RECORD-FLAG controls recording in the variable
     (user-error "Hard newline insertion is not multiple-cursor safe"))
   (when translation-table-for-input
     (user-error "Translated newline input is not multiple-cursor safe"))
-  (when (bound-and-true-p electric-indent-mode)
-    (user-error "Electric-indent newline is not multiple-cursor safe"))
+  ;; Electric indentation is admitted only by the explicit bounded planner.
   (unless (multi-cursor--newline-post-hook-safe-p post-self-insert-hook)
     (user-error "Custom newline insertion hooks are not multiple-cursor safe"))
+  (if (bound-and-true-p electric-indent-mode)
+      (multi-cursor--electric-newline record-flag)
+    (progn
   (let ((newline-overwrite-mode overwrite-mode)
         (newline-abbrev-mode abbrev-mode)
         (newline-auto-fill-function auto-fill-function)
@@ -1960,7 +2153,7 @@ PREFIX is rejected.  RECORD-FLAG controls recording in the variable
             (multi-cursor--start))))
       (multi-cursor--apply-edit-transaction states groups))
     (when record-flag
-      (add-to-history 'command-history '(newline nil 1) nil t))))
+      (add-to-history 'command-history '(newline nil 1) nil t))))))
 
 (defun multi-cursor--character-delete
     (command prefix _keys record-flag _special)

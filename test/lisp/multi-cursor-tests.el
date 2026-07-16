@@ -111,6 +111,29 @@
          (use-hard-newlines nil))
      ,@body))
 
+(defmacro multi-cursor-tests--with-electric-newline (&rest body)
+  "Run BODY with the bounded stock electric-newline contract enabled."
+  (declare (indent 0) (debug t))
+  `(let ((abbrev-mode nil)
+         (auto-fill-function nil)
+         (electric-indent-chars '(?\n))
+         (electric-indent-functions nil)
+         (electric-indent-functions-without-reindent '(indent-relative))
+         (electric-indent-inhibit nil)
+         (electric-indent-mode t)
+         (indent-line-function #'indent-relative)
+         (indent-line-ignored-functions '(indent-relative))
+         (indent-tabs-mode nil)
+         (left-margin 0)
+         (overwrite-mode nil)
+         (post-self-insert-hook
+          '(electric-indent-post-self-insert-function))
+         (syntax-propertize-function nil)
+         (tab-width 8)
+         (translation-table-for-input nil)
+         (use-hard-newlines nil))
+     ,@body))
+
 (ert-deftest multi-cursor-lifecycle-enable-creates-local-session ()
   (with-temp-buffer
     (multi-cursor-mode 1)
@@ -1759,29 +1782,6 @@
         (should (= (point) 2))
         (should (= (marker-position (multi-cursor--cursor-point cursor)) 5))))))
 
-(ert-deftest multi-cursor-edit-delete-forward-planning-mutation-rolls-back ()
-  (with-temp-buffer
-    (insert "abcdef")
-    (goto-char 2)
-    (let* ((id (multi-cursor-add-at-point 5))
-           (cursor (multi-cursor-tests--cursor id))
-           (before (buffer-string))
-           (original-find-composition (symbol-function 'find-composition))
-           mutated)
-      (cl-letf (((symbol-function 'find-composition)
-                 (lambda (&rest arguments)
-                   (unless mutated
-                     (setq mutated t)
-                     (insert "X")
-                     (narrow-to-region 2 (point-max)))
-                   (apply original-find-composition arguments))))
-        (should-error (command-execute 'delete-forward-char) :type 'error))
-      (should (equal (buffer-string) before))
-      (should (= (point-min) 1))
-      (should (= (point-max) 7))
-      (should (= (point) 2))
-      (should (= (marker-position (multi-cursor--cursor-point cursor)) 5)))))
-
 (ert-deftest multi-cursor-edit-transaction-cancels-with-failing-hooks-inhibited ()
   (with-temp-buffer
     (buffer-enable-undo)
@@ -1814,6 +1814,29 @@
       (should (= (marker-position
                   (multi-cursor--cursor-point cursor))
                  5)))))
+
+(ert-deftest multi-cursor-edit-delete-forward-planning-mutation-rolls-back ()
+  (with-temp-buffer
+    (insert "abcdef")
+    (goto-char 2)
+    (let* ((id (multi-cursor-add-at-point 5))
+           (cursor (multi-cursor-tests--cursor id))
+           (before (buffer-string))
+           (original-find-composition (symbol-function 'find-composition))
+           mutated)
+      (cl-letf (((symbol-function 'find-composition)
+                 (lambda (&rest arguments)
+                   (unless mutated
+                     (setq mutated t)
+                     (insert "X")
+                     (narrow-to-region 2 (point-max)))
+                   (apply original-find-composition arguments))))
+        (should-error (command-execute 'delete-forward-char) :type 'error))
+      (should (equal (buffer-string) before))
+      (should (= (point-min) 1))
+      (should (= (point-max) 7))
+      (should (= (point) 2))
+      (should (= (marker-position (multi-cursor--cursor-point cursor)) 5)))))
 
 (ert-deftest multi-cursor-edit-delete-forward-policy-mutation-rolls-back ()
   (with-temp-buffer
@@ -2213,25 +2236,38 @@
 
 (ert-deftest multi-cursor-edit-newline-same-position-coalesces ()
   ;; The public API prevents a secondary cursor at the primary point.  Test
-  ;; the edit merger directly so stale/internal duplicate snapshots still
-  ;; cannot insert two newlines at one position.
+  ;; replacement-safe merging directly so stale duplicate electric plans
+  ;; coalesce without losing their common replacement payload.
   (let* ((primary (multi-cursor--edit-state-create
-                   :id 0 :primary t :point 2))
+                   :id 0 :primary t :point 4))
          (secondary (multi-cursor--edit-state-create
-                     :id 1 :point 2))
+                     :id 1 :point 4))
          (groups
           (multi-cursor--merge-edits
            (list
             (multi-cursor--edit-create
-             :beg 2 :end 2 :string "\n" :survivor primary
+             :beg 2 :end 4 :string "\n  " :survivor primary
              :members (list primary))
             (multi-cursor--edit-create
-             :beg 2 :end 2 :string "\n" :survivor secondary
-             :members (list secondary))))))
+             :beg 2 :end 4 :string "\n  " :survivor secondary
+             :members (list secondary)))
+           t)))
     (should (= (length groups) 1))
-    (should (equal (multi-cursor--edit-string (car groups)) "\n"))
-    (should (multi-cursor--edit-state-primary
-             (multi-cursor--edit-survivor (car groups))))))
+    (should (equal (multi-cursor--edit-string (car groups)) "\n  "))
+    (should
+     (multi-cursor--edit-state-primary
+      (multi-cursor--edit-survivor (car groups))))
+    (should-error
+     (multi-cursor--merge-edits
+      (list
+       (multi-cursor--edit-create
+        :beg 2 :end 4 :string "\n " :survivor primary
+        :members (list primary))
+       (multi-cursor--edit-create
+        :beg 3 :end 4 :string "\n  " :survivor secondary
+        :members (list secondary)))
+      t)
+     :type 'user-error)))
 
 (ert-deftest multi-cursor-edit-newline-bounds-and-narrowing ()
   (with-temp-buffer
@@ -2457,6 +2493,342 @@
     (undo-boundary)
     (undo 1)
     (should (equal (buffer-string) "abcd"))))
+
+(ert-deftest multi-cursor-edit-newline-electric-stock-relative-ret ()
+  (dolist (mode '(fundamental-mode text-mode))
+    (dolist (syntax-function '(nil ignore))
+      (ert-with-test-buffer (:selected t)
+        (funcall mode)
+        (insert "  alpha   \n    beta\t ")
+        (goto-char (point-min))
+        (end-of-line)
+        (let* ((secondary-position
+                (save-excursion
+                  (forward-line 1)
+                  (line-end-position)))
+               (id (multi-cursor-add-at-point secondary-position))
+               (cursor (multi-cursor-tests--cursor id)))
+          (multi-cursor-tests--with-electric-newline
+            (setq syntax-propertize-function syntax-function)
+            (ert-play-keys (kbd "RET")))
+          (should (equal (buffer-string)
+                         "  alpha\n  \n    beta\n    "))
+          (should (= (line-number-at-pos (point)) 2))
+          (should (= (current-column) 2))
+          (save-excursion
+            (goto-char (marker-position
+                        (multi-cursor--cursor-point cursor)))
+            (should (= (line-number-at-pos) 4))
+            (should (= (current-column) 4))))))))
+
+(ert-deftest multi-cursor-edit-newline-electric-canonical-tabs-and-adjacent-lines ()
+  (with-temp-buffer
+    (insert "\t  alpha \t\n   beta ")
+    (goto-char (point-min))
+    (end-of-line)
+    (let* ((secondary-position
+            (save-excursion
+              (forward-line 1)
+              (line-end-position)))
+           (id (multi-cursor-add-at-point secondary-position))
+           (cursor (multi-cursor-tests--cursor id)))
+      (multi-cursor-tests--with-electric-newline
+        (let ((indent-tabs-mode t)
+              (tab-width 4))
+          (command-execute 'newline)))
+      (should (equal (buffer-string)
+                     "\t  alpha\n\t  \n   beta\n   "))
+      (let ((tab-width 4))
+        (should (= (current-column) 6))
+        (save-excursion
+          (goto-char (marker-position
+                      (multi-cursor--cursor-point cursor)))
+          (should (= (current-column) 3)))))))
+
+(ert-deftest multi-cursor-edit-newline-electric-remaps-inactive-marks ()
+  (with-temp-buffer
+    (insert "  aa\n    bb")
+    (goto-char 5)
+    (set-mark 3)
+    (setq mark-active nil)
+    (let* ((id (multi-cursor-add-selection 12 6 nil))
+           (cursor (multi-cursor-tests--cursor id)))
+      (multi-cursor-tests--with-electric-newline
+        (command-execute 'newline))
+      (should (equal (buffer-string) "  aa\n  \n    bb\n    "))
+      (should (= (point) 8))
+      (should (= (mark t) 3))
+      (should-not mark-active)
+      (should (= (marker-position
+                  (multi-cursor--cursor-point cursor))
+                 20))
+      (should (= (marker-position
+                  (multi-cursor--cursor-mark cursor))
+                 9))
+      (should-not (multi-cursor--cursor-mark-active cursor)))))
+
+(ert-deftest multi-cursor-edit-newline-electric-narrowed-physical-lines ()
+  (with-temp-buffer
+    (insert "outside\n  a  \n    b  \noutside")
+    (goto-char (point-min))
+    (forward-line 1)
+    (let ((beg (point)))
+      (forward-line 1)
+      (end-of-line)
+      (narrow-to-region beg (point)))
+    (goto-char (point-min))
+    (end-of-line)
+    (let* ((old-min (point-min))
+           (old-max (point-max))
+           (id (multi-cursor-add-at-point old-max))
+           (cursor (multi-cursor-tests--cursor id)))
+      (multi-cursor-tests--with-electric-newline
+        (command-execute 'newline))
+      (should (equal (buffer-string) "  a\n  \n    b\n    "))
+      (should (= (point-min) old-min))
+      (should (= (point-max) (+ old-max 4)))
+      (should (= (point) (+ old-min 6)))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point cursor))
+                 (point-max))))))
+
+(ert-deftest multi-cursor-edit-newline-electric-rejects-mid-physical-line ()
+  (with-temp-buffer
+    (insert "  a\n  alpha suffix")
+    (goto-char (point-min))
+    (end-of-line)
+    (let ((id (multi-cursor-add-at-point
+               (save-excursion
+                 (forward-line 1)
+                 (search-forward "alpha")
+                 (point)))))
+      (narrow-to-region (point-min)
+                        (marker-position
+                         (multi-cursor--cursor-point
+                          (multi-cursor-tests--cursor id))))
+      (let ((before
+             (save-restriction
+               (widen)
+               (buffer-string)))
+            (command-history nil))
+        (multi-cursor-tests--with-electric-newline
+          (should-error (command-execute 'newline)
+                        :type 'user-error))
+        (should (equal
+                 (save-restriction
+                   (widen)
+                   (buffer-string))
+                 before))
+        (should-not command-history)))))
+
+(ert-deftest multi-cursor-edit-newline-electric-property-gates ()
+  (dolist (gate '(buffer-read-only text-leading text-trailing
+                                   inheritance-boundary overlay-read-only))
+    (with-temp-buffer
+      (insert "  a  \n    b  ")
+      (goto-char (point-min))
+      (end-of-line)
+      (let* ((primary-position (point))
+             (id (multi-cursor-add-at-point (point-max)))
+             (cursor (multi-cursor-tests--cursor id))
+             overlay)
+        (pcase gate
+          ('buffer-read-only (setq buffer-read-only t))
+          ('text-leading
+           (put-text-property 1 2 'multi-cursor-test-property gate))
+          ('text-trailing
+           (put-text-property (1- primary-position) primary-position
+                              'multi-cursor-test-property gate))
+          ('inheritance-boundary
+           (put-text-property primary-position (1+ primary-position)
+                              'multi-cursor-test-property gate))
+          ('overlay-read-only
+           (setq overlay
+                 (make-overlay (1- primary-position) primary-position))
+           (overlay-put overlay 'read-only t)))
+        (let ((before
+               (buffer-substring (point-min) (point-max)))
+              (command-history nil))
+          (multi-cursor-tests--with-electric-newline
+            (should-error (command-execute 'newline)))
+          (should (equal-including-properties
+                   (buffer-substring (point-min) (point-max))
+                   before))
+          (should (= (point) primary-position))
+          (should (= (marker-position
+                      (multi-cursor--cursor-point cursor))
+                     (point-max)))
+          (should-not command-history))
+        (when overlay
+          (delete-overlay overlay))))))
+
+(ert-deftest multi-cursor-edit-newline-electric-rejects-custom-contexts ()
+  (dolist (gate '(non-eol electric-function custom-indent
+                          emacs-lisp-indent c-indent custom-syntax
+                          layout missing-trigger ignored-functions
+                          reindent-functions unsafe-hook))
+    (with-temp-buffer
+      (insert "  a\n    b")
+      (goto-char 4)
+      (let* ((id (multi-cursor-add-at-point (point-max)))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string))
+             (command-history nil)
+             called)
+        (multi-cursor-tests--with-electric-newline
+          (pcase gate
+            ('non-eol (backward-char))
+            ('electric-function
+             (setq electric-indent-functions
+                   (list (lambda (_character)
+                           (setq called t)))))
+            ('custom-indent
+             (setq indent-line-function
+                   (lambda ()
+                     (setq called t))))
+            ('emacs-lisp-indent
+             (setq indent-line-function #'lisp-indent-line))
+            ('c-indent
+             (setq indent-line-function 'c-indent-line))
+            ('custom-syntax
+             (setq syntax-propertize-function
+                   (lambda (_start _end)
+                     (setq called t))))
+            ('layout
+             (setq electric-indent-inhibit 'electric-layout-mode))
+            ('missing-trigger
+             (setq electric-indent-chars '(?\t)))
+            ('ignored-functions
+             (setq indent-line-ignored-functions nil))
+            ('reindent-functions
+             (setq electric-indent-functions-without-reindent nil))
+            ('unsafe-hook
+             (setq post-self-insert-hook
+                   (list (lambda ()
+                           (setq called t))))))
+          (should-error (command-execute 'newline)
+                        :type 'user-error))
+        (should (equal (buffer-string) before))
+        (should (= (point) (if (eq gate 'non-eol) 3 4)))
+        (should (= (marker-position
+                    (multi-cursor--cursor-point cursor))
+                   (point-max)))
+        (should-not called)
+        (should-not command-history)))))
+
+(ert-deftest multi-cursor-edit-newline-electric-planning-mutation-rolls-back ()
+  (with-temp-buffer
+    (insert "  a\n    b")
+    (goto-char 4)
+    (let* ((id (multi-cursor-add-at-point (point-max)))
+           (cursor (multi-cursor-tests--cursor id))
+           (before (buffer-string))
+           (command-history nil)
+           (original-left-margin
+            (symbol-function 'current-left-margin)))
+      (multi-cursor-tests--with-electric-newline
+        (cl-letf (((symbol-function 'current-left-margin)
+                   (lambda ()
+                     (setq tab-width 4)
+                     (funcall original-left-margin))))
+          (should-error (command-execute 'newline)
+                        :type 'error))
+        (should (= tab-width 8)))
+      (should (equal (buffer-string) before))
+      (should (= (point) 4))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point cursor))
+                 (point-max)))
+      (should-not command-history))))
+
+(ert-deftest multi-cursor-edit-newline-electric-blank-line-targets-zero ()
+  (with-temp-buffer
+    (insert " \t \n  text")
+    (goto-char (point-min))
+    (end-of-line)
+    (multi-cursor-add-at-point (point-max))
+    (multi-cursor-tests--with-electric-newline
+      (command-execute 'newline))
+    (should (equal (buffer-string) "\n\n  text\n  "))
+    (should (= (point) 2))))
+
+(ert-deftest multi-cursor-edit-newline-electric-hook-rollback ()
+  (dolist (failure '(error option session buffer restriction))
+    (with-temp-buffer
+      (let ((source (current-buffer))
+            (other (generate-new-buffer " *multi-cursor-newline-hook*")))
+        (unwind-protect
+            (progn
+              (insert "  a  \n    b  ")
+              (goto-char (point-min))
+              (end-of-line)
+              (let* ((primary-position (point))
+                     (id (multi-cursor-add-at-point (point-max)))
+                     (cursor (multi-cursor-tests--cursor id))
+                     (before (buffer-string))
+                     (before-min (point-min))
+                     (before-max (point-max))
+                     (command-history nil)
+                     (before-change-functions
+                      (when (eq failure 'error)
+                        (list (lambda (&rest _)
+                                (error "Electric newline hook failed")))))
+                     (after-change-functions
+                      (unless (eq failure 'error)
+                        (list
+                         (lambda (&rest _)
+                           (pcase failure
+                             ('option
+                              (setq electric-indent-chars nil))
+                             ('session
+                              (multi-cursor-mode -1))
+                             ('buffer
+                              (set-buffer other))
+                             ('restriction
+                              (narrow-to-region
+                               (point-min) (1- (point-max))))))))))
+                (ert-info ((format "Hook failure kind: %S" failure))
+                (multi-cursor-tests--with-electric-newline
+                  (should-error (command-execute 'newline))
+                  (should (equal electric-indent-chars '(?\n))))
+                (with-current-buffer source
+                  (should (equal (buffer-string) before))
+                  (should (= (point-min) before-min))
+                  (should (= (point-max) before-max))
+                  (should (= (point) primary-position))
+                  (should multi-cursor-mode)
+                  (should (= (multi-cursor-count) 2))
+                  (should (= (marker-position
+                              (multi-cursor--cursor-point cursor))
+                             before-max))
+                  (should-not command-history)))))
+          (when (buffer-live-p other)
+            (kill-buffer other)))))))
+
+(ert-deftest multi-cursor-edit-newline-electric-one-apply-undo-and-history ()
+  (with-temp-buffer
+    (buffer-enable-undo)
+    (insert "  a  \n    b  ")
+    (undo-boundary)
+    (goto-char (point-min))
+    (end-of-line)
+    (multi-cursor-add-at-point (point-max))
+    (let ((command-history nil)
+          (apply-count 0)
+          (original-apply (symbol-function 'multi-cursor--apply-edits)))
+      (multi-cursor-tests--with-electric-newline
+        (cl-letf (((symbol-function 'multi-cursor--apply-edits)
+                   (lambda (edits)
+                     (cl-incf apply-count)
+                     (funcall original-apply edits))))
+          (command-execute 'newline t)))
+      (should (= apply-count 1))
+      (should (equal command-history '((newline nil 1))))
+      (should (equal (buffer-string) "  a\n  \n    b\n    ")))
+    (multi-cursor-mode -1)
+    (undo-boundary)
+    (undo 1)
+    (should (equal (buffer-string) "  a  \n    b  "))))
 
 (ert-deftest multi-cursor-edit-insertion-at-exact-narrowed-end-grows-zv ()
   (with-temp-buffer
