@@ -91,6 +91,24 @@
                      '((before 5 7) (after 5 7 2)
                        (before 1 1) (after 1 2 0)))))))
 
+(ert-deftest multicursor-apply-edits-rope-runs-hooks-once-per-edit ()
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "abcdef")
+    (let ((before-count 0)
+          (after-count 0))
+      (let ((before-change-functions
+             (list (lambda (&rest _args)
+                     (setq before-count (1+ before-count)))))
+            (after-change-functions
+             (list (lambda (&rest _args)
+                     (setq after-count (1+ after-count))))))
+        (multi-cursor--apply-edits [[1 1 "Q"] [5 7 "XY"]]))
+      (should (= before-count 2))
+      (should (= after-count 2)))
+    (should (equal (buffer-string) "QabcdXY"))))
+
 (ert-deftest multicursor-apply-edits-restores-buffer-after-hook-switch ()
   (let ((other (generate-new-buffer " *multicursor-test*")))
     (unwind-protect

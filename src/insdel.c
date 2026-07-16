@@ -1764,8 +1764,11 @@ replace_range (ptrdiff_t from, ptrdiff_t to, Lisp_Object new,
 	  if (adjust_match_data)
 	    update_search_regs (from, to, from + inschars);
 
-	  signal_after_change (from, nchars_del, inschars);
-	  update_compositions (from, from + inschars, CHECK_BORDER);
+	  if (run_mod_hooks)
+	    {
+	      signal_after_change (from, nchars_del, inschars);
+	      update_compositions (from, from + inschars, CHECK_BORDER);
+	    }
 
 	  check_markers ();
 	  return;
