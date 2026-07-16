@@ -2955,6 +2955,53 @@
               (should-not command-history))))
       (set-default 'translation-table-for-input original-default))))
 
+(ert-deftest multi-cursor-edit-newline-electric-rejects-equal-list-tail ()
+  (with-temp-buffer
+    (insert "  a\n    b")
+    (goto-char 4)
+    (multi-cursor-add-at-point (point-max))
+    (let* ((chars (list ?\n ?x))
+           (tail (cdr chars))
+           (before (buffer-string))
+           (command-history nil))
+      (multi-cursor-tests--with-electric-newline
+        (setq-local electric-indent-chars chars)
+        (let ((after-change-functions
+               (list
+                (lambda (&rest _)
+                  (setcdr chars (copy-sequence tail))))))
+          (should-error (command-execute 'newline)
+                        :type 'error))
+        (should (eq electric-indent-chars chars))
+        (should (eq (cdr chars) tail))
+        (should (equal chars '(?\n ?x))))
+      (should (equal (buffer-string) before))
+      (should-not command-history))))
+
+(ert-deftest multi-cursor-edit-newline-electric-rejects-equal-vector-child ()
+  (with-temp-buffer
+    (insert "  a\n    b")
+    (goto-char 4)
+    (multi-cursor-add-at-point (point-max))
+    (let* ((child (list ?x))
+           (vector (vector child))
+           (chars (list ?\n vector))
+           (before (buffer-string))
+           (command-history nil))
+      (multi-cursor-tests--with-electric-newline
+        (setq-local electric-indent-chars chars)
+        (let ((after-change-functions
+               (list
+                (lambda (&rest _)
+                  (aset vector 0 (copy-sequence child))))))
+          (should-error (command-execute 'newline)
+                        :type 'error))
+        (should (eq electric-indent-chars chars))
+        (should (eq (aref vector 0) child))
+        (should (equal chars (list ?\n (vector (list ?x))))))
+      (should (equal (buffer-string) before))
+      (should-not command-history))))
+
 (ert-deftest multi-cursor-edit-newline-electric-restores-char-table-parent ()
   (let ((original-default (default-value 'translation-table-for-input))
         (parent (make-char-table 'translation-table nil))
