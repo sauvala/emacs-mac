@@ -2989,6 +2989,69 @@
               (should-not command-history))))
       (set-default 'translation-table-for-input original-default))))
 
+(ert-deftest multi-cursor-edit-newline-electric-rejects-nested-equal-references ()
+  (dolist (location '(default range extra-slot parent))
+    (let ((original-default
+           (default-value 'translation-table-for-input))
+          (leaf (make-char-table 'translation-table nil))
+          (middle (make-char-table 'translation-table nil))
+          (table (make-char-table 'translation-table nil)))
+      (set-char-table-range leaf ?a ?a)
+      (set-char-table-parent middle leaf)
+      (pcase location
+        ('default (set-char-table-range table nil middle))
+        ('range (set-char-table-range table ?b middle))
+        ('extra-slot (set-char-table-extra-slot table 0 middle))
+        ('parent (set-char-table-parent table middle)))
+      (unwind-protect
+          (progn
+            (set-default 'translation-table-for-input table)
+            (with-temp-buffer
+              (insert "  a\n    b")
+              (goto-char 4)
+              (multi-cursor-add-at-point (point-max))
+              (setq-local translation-table-for-input nil)
+              (let ((before (buffer-string))
+                    (command-history nil)
+                    (replacement (copy-sequence middle)))
+                (multi-cursor-tests--with-electric-newline
+                  (let ((after-change-functions
+                         (list
+                          (lambda (&rest _)
+                            (set-char-table-parent
+                             middle (copy-sequence leaf))
+                            (pcase location
+                              ('default
+                               (set-char-table-range
+                                table nil replacement))
+                              ('range
+                               (set-char-table-range
+                                table ?b replacement))
+                              ('extra-slot
+                               (set-char-table-extra-slot
+                                table 0 replacement))
+                              ('parent
+                               (set-char-table-parent
+                                table replacement)))))))
+                    (should-error (command-execute 'newline)
+                                  :type 'error))
+                  (should
+                   (eq (default-value 'translation-table-for-input)
+                       table))
+                  (should
+                   (eq
+                    (pcase location
+                      ('default (char-table-range table nil))
+                      ('range (char-table-range table ?b))
+                      ('extra-slot (char-table-extra-slot table 0))
+                      ('parent (char-table-parent table)))
+                    middle))
+                  (should (eq (char-table-parent middle) leaf))
+                  (should (= (char-table-range leaf ?a) ?a)))
+                (should (equal (buffer-string) before))
+                (should-not command-history))))
+        (set-default 'translation-table-for-input original-default)))))
+
 (ert-deftest multi-cursor-edit-newline-electric-restores-option-aliases ()
   (dolist (failure '(unrelated mutation))
     (with-temp-buffer

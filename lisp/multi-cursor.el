@@ -1871,6 +1871,86 @@ history."
     indent-tabs-mode tab-width syntax-propertize-function)
   "Options that must remain stable across electric-newline planning and edits.")
 
+(defun multi-cursor--electric-newline-char-table-child-state (value)
+  "Capture VALUE identity and nested char-table reference state."
+  (list value
+        (and (char-table-p value)
+             (multi-cursor--electric-newline-char-table-state value))))
+
+(defun multi-cursor--electric-newline-char-table-state (table)
+  "Capture direct child references of guarded char TABLE.
+
+Inherited ranges are excluded.  Only nested char tables carry recursive
+reference metadata; other children retain their direct object reference."
+  (when (char-table-p table)
+    (let* ((direct (copy-sequence table))
+           (subtype (char-table-subtype table))
+           (slots (or (get subtype 'char-table-extra-slots) 0))
+           (slot-states (make-vector slots nil))
+           ranges)
+      (set-char-table-parent direct nil)
+      (map-char-table
+       (lambda (range value)
+         (push
+          (list range
+                (multi-cursor--electric-newline-char-table-child-state
+                 value))
+          ranges))
+       direct)
+      (dotimes (index slots)
+        (aset
+         slot-states index
+         (multi-cursor--electric-newline-char-table-child-state
+          (char-table-extra-slot table index))))
+      (list
+       (multi-cursor--electric-newline-char-table-child-state
+        (char-table-range table nil))
+       ranges
+       slot-states
+       (multi-cursor--electric-newline-char-table-child-state
+        (char-table-parent table))))))
+
+(defun multi-cursor--validate-electric-newline-char-table-child
+    (value state)
+  "Return non-nil when VALUE retains identities recorded in child STATE."
+  (and (eq value (nth 0 state))
+       (let ((nested (nth 1 state)))
+         (or (null nested)
+             (multi-cursor--validate-electric-newline-char-table-state
+              value nested)))))
+
+(defun multi-cursor--validate-electric-newline-char-table-state
+    (table state)
+  "Return non-nil when guarded char TABLE retains reference STATE."
+  (and
+   (char-table-p table)
+   (let* ((direct (copy-sequence table))
+          (slot-states (nth 2 state)))
+     (set-char-table-parent direct nil)
+     (and
+      (multi-cursor--validate-electric-newline-char-table-child
+       (char-table-range table nil) (nth 0 state))
+      (cl-every
+       (lambda (range-state)
+         (multi-cursor--validate-electric-newline-char-table-child
+          (char-table-range direct (nth 0 range-state))
+          (nth 1 range-state)))
+       (nth 1 state))
+      (cl-loop
+       for index below (length slot-states)
+       always
+       (multi-cursor--validate-electric-newline-char-table-child
+        (char-table-extra-slot table index)
+        (aref slot-states index)))
+      (multi-cursor--validate-electric-newline-char-table-child
+       (char-table-parent table) (nth 3 state))))))
+
+(defun multi-cursor--restore-electric-newline-char-table-child
+    (state snapshot)
+  "Restore saved char-table child STATE from SNAPSHOT."
+  (multi-cursor--restore-electric-newline-value
+   (nth 0 state) snapshot (nth 1 state)))
+
 (defun multi-cursor--snapshot-electric-newline-value (value)
   "Return a detached snapshot of mutable guarded option VALUE."
   (cond
@@ -1919,9 +1999,11 @@ history."
       copy))
    (t value)))
 
-(defun multi-cursor--restore-electric-newline-value (original snapshot)
+(defun multi-cursor--restore-electric-newline-value
+    (original snapshot &optional char-table-state)
   "Repair mutable ORIGINAL from detached SNAPSHOT and return ORIGINAL.
 
+CHAR-TABLE-STATE preserves pre-callback child references for char tables.
 When ORIGINAL cannot be repaired in place, return the detached snapshot."
   (cond
    ((eq original snapshot) original)
@@ -1941,47 +2023,36 @@ When ORIGINAL cannot be repaired in place, return the detached snapshot."
    ((and (char-table-p original) (char-table-p snapshot)
          (eq (char-table-subtype original)
              (char-table-subtype snapshot)))
-    (let* ((subtype (char-table-subtype original))
-           (slots (or (get subtype 'char-table-extra-slots) 0))
-           (original-default (char-table-range original nil))
-           (original-parent (char-table-parent original))
-           (original-slots
-            (let ((values (make-vector slots nil)))
-              (dotimes (index slots)
-                (aset values index
-                      (char-table-extra-slot original index)))
-              values))
-           (direct-snapshot (copy-sequence snapshot))
-           ranges)
-      ;; Exclude inherited ranges while retaining each live direct child
-      ;; reference needed for identity-preserving repair.
+    (let* ((state
+            (or char-table-state
+                (multi-cursor--electric-newline-char-table-state original)))
+           (range-states (nth 1 state))
+           (slot-states (nth 2 state))
+           (direct-snapshot (copy-sequence snapshot)))
       (set-char-table-parent direct-snapshot nil)
-      (map-char-table
-       (lambda (range entry)
-         (push (list range (char-table-range original range) entry)
-               ranges))
-       direct-snapshot)
       (set-char-table-parent original nil)
       (set-char-table-range original t nil)
       (set-char-table-range
        original nil
-       (multi-cursor--restore-electric-newline-value
-        original-default (char-table-range snapshot nil)))
-      (dolist (range-state ranges)
-        (set-char-table-range
-         original (nth 0 range-state)
-         (multi-cursor--restore-electric-newline-value
-          (nth 1 range-state) (nth 2 range-state))))
-      (dotimes (index slots)
+       (multi-cursor--restore-electric-newline-char-table-child
+        (nth 0 state) (char-table-range snapshot nil)))
+      (dolist (range-state range-states)
+        (let ((range (nth 0 range-state)))
+          (set-char-table-range
+           original range
+           (multi-cursor--restore-electric-newline-char-table-child
+            (nth 1 range-state)
+            (char-table-range direct-snapshot range)))))
+      (dotimes (index (length slot-states))
         (set-char-table-extra-slot
          original index
-         (multi-cursor--restore-electric-newline-value
-          (aref original-slots index)
+         (multi-cursor--restore-electric-newline-char-table-child
+          (aref slot-states index)
           (char-table-extra-slot snapshot index))))
       (set-char-table-parent
        original
-       (multi-cursor--restore-electric-newline-value
-        original-parent (char-table-parent snapshot)))
+       (multi-cursor--restore-electric-newline-char-table-child
+        (nth 3 state) (char-table-parent snapshot)))
       original))
    ((and (bool-vector-p original) (bool-vector-p snapshot)
          (= (length original) (length snapshot)))
@@ -2009,7 +2080,9 @@ When ORIGINAL cannot be repaired in place, return the detached snapshot."
              value
              (multi-cursor--snapshot-electric-newline-value value)
              default
-             (multi-cursor--snapshot-electric-newline-value default))))
+             (multi-cursor--snapshot-electric-newline-value default)
+             (multi-cursor--electric-newline-char-table-state value)
+             (multi-cursor--electric-newline-char-table-state default))))
    multi-cursor--electric-newline-guarded-options))
 
 (defun multi-cursor--validate-electric-newline-options (options)
@@ -2018,11 +2091,20 @@ When ORIGINAL cannot be repaired in place, return the detached snapshot."
       (cl-every
        (lambda (entry)
          (let ((variable (nth 0 entry)))
-           (and (eq (local-variable-p variable) (nth 1 entry))
-                (eq (symbol-value variable) (nth 2 entry))
-                (equal (symbol-value variable) (nth 3 entry))
-                (eq (default-value variable) (nth 4 entry))
-                (equal (default-value variable) (nth 5 entry)))))
+           (and
+            (eq (local-variable-p variable) (nth 1 entry))
+            (eq (symbol-value variable) (nth 2 entry))
+            (equal (symbol-value variable) (nth 3 entry))
+            (eq (default-value variable) (nth 4 entry))
+            (equal (default-value variable) (nth 5 entry))
+            (or
+             (null (nth 6 entry))
+             (multi-cursor--validate-electric-newline-char-table-state
+              (symbol-value variable) (nth 6 entry)))
+            (or
+             (null (nth 7 entry))
+             (multi-cursor--validate-electric-newline-char-table-state
+              (default-value variable) (nth 7 entry))))))
        options)
     (error "Electric newline changed guarded options")))
 
@@ -2032,7 +2114,7 @@ When ORIGINAL cannot be repaired in place, return the detached snapshot."
     (set-default
      (nth 0 entry)
      (multi-cursor--restore-electric-newline-value
-      (nth 4 entry) (nth 5 entry)))))
+      (nth 4 entry) (nth 5 entry) (nth 7 entry)))))
 
 (defun multi-cursor--restore-electric-newline-locals (options)
   "Restore guarded local binding states and values in OPTIONS."
@@ -2041,7 +2123,7 @@ When ORIGINAL cannot be repaired in place, return the detached snapshot."
            (local (nth 1 entry))
            (value
             (multi-cursor--restore-electric-newline-value
-             (nth 2 entry) (nth 3 entry))))
+             (nth 2 entry) (nth 3 entry) (nth 6 entry))))
       (if local
           (set (make-local-variable variable) value)
         (when (local-variable-p variable)
