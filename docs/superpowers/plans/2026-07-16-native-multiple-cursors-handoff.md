@@ -142,12 +142,22 @@ Important implementation details and traps:
 - Both RET paths continue to reject auto-fill, abbrevs, hard newlines, left
   margins, input translation, overwrite mode, prefixes, active selections,
   minibuffers, custom insertion hooks, and adjacent text properties.
-- Computer Use verification on 2026-07-17 found that transactional broadcast
-  insertion works in the branch GUI, but the native Mac cursor painter corrupts
-  displayed pixels even with three secondary cursors.  Buffer and accessibility
-  text remain correct while the frame shows duplicated, fragmented, and stale
-  glyphs.  Forced redisplay and scrolling do not repair the frame.  Treat native
-  painting as broken until the first remaining task below is complete.
+- Computer Use verification on 2026-07-17 confirmed transactional broadcast
+  insertion in the branch GUI.  The captured frame showed duplicated,
+  fragmented, and stale glyphs, but subsequent controls produced the same
+  corruption with no secondary cursors, a no-op native callback, and the Lisp
+  overlay fallback.  This Core Graphics build therefore has a general
+  source-build or Computer Use capture problem; the recording is not evidence
+  that the native cursor painter is broken.  Native painting still needs visual
+  verification through a trustworthy display or capture path.
+- Commit `2e674c0fddf` adds a deterministic GUI fixture with 1, 3, 30, and 300
+  cursor presets, forced redisplay, movement, insertion, scrolling, removal,
+  resize, screenshot hooks, and machine-readable state.
+- Commit `d827416a2f4` distinguishes an intentional pending nil clear from no
+  cursor-decoration transaction.  Unrelated redisplay re-resolves the current
+  generation, matrix teardown preserves pending nil and non-nil generations,
+  split-window replacement is transaction-safe, and confirmed window death
+  releases snapshot ownership.
 - The mode currently paints only the selected window when several windows show
   the same buffer.
 - Undo/redo commands remain unsupported while a session is active even though
@@ -155,27 +165,26 @@ Important implementation details and traps:
 
 ## Remaining plan, in priority order
 
-### 1. Fix native Mac cursor painting
+### 1. Establish a trustworthy native Mac painter baseline
 
-This is a correctness blocker and takes priority over TAB, compatibility
-expansion, and performance optimization.  The evidence currently points to
-`mac_draw_window_cursor_decorations` in `src/macterm.c`, especially its
-interaction with Metal clipping, old-glyph restoration, and contrasting-glyph
-drawing.  The session and edit layers are less likely causes because a
-three-secondary-cursor GUI test inserted text correctly at all four positions
-and the buffer contents remained intact.
+Visual correctness remains a release gate and takes priority over TAB,
+compatibility expansion, and performance optimization.  The available capture
+is not a painter-specific reproducer: identical corruption occurs without
+multiple cursors and outside the native callback.  First reproduce on a known
+good ordinary source-built frame or establish a trustworthy capture path.  Do
+not change `mac_draw_window_cursor_decorations` merely to improve a corrupted
+Computer Use recording.
 
-#### 1.1 Add a deterministic GUI regression fixture
+#### 1.1 Deterministic GUI regression fixture (complete)
 
-Extend the graphical fixture with distinctive text and backgrounds, known
-cursor coordinates, and automated actions for insertion, movement, cursor
-removal, scrolling, forced redisplay, and frame resizing.  Capture frames
-before and after each action and assert that pixels outside the expected cursor
-rectangles do not change.  Cover 1, 3, 30, and 300 secondary cursors; three is
-the smallest currently confirmed reproducer.
+`test/manual/multi-cursor-tests.el` now provides distinctive deterministic
+content, 1/3/30/300 cursor presets, automated insertion, movement, removal,
+scrolling, forced redisplay and resize steps, synchronous capture hooks, and
+machine-readable text/pixel-mask/geometry/counter state.  It was committed
+separately as `Add deterministic multiple cursor GUI fixture` (`2e674c0fddf`).
 
-Commit the fixture separately as `Add native cursor painter regression
-fixture`.
+The remaining acceptance work is to run this fixture through a trustworthy
+graphical path and compare pixels outside the expected cursor masks.
 
 #### 1.2 Bisect the native rendering stages
 
@@ -188,9 +197,13 @@ independently:
 4. restore underlying glyphs when old cursors disappear;
 5. redraw contrasting glyphs inside filled box cursors.
 
-Run the deterministic fixture after each stage.  If the overlay fallback is
-clean, the snapshot and editing layers are exonerated.  If rectangles-only is
-clean, one of the direct `draw_glyphs` paths is responsible.
+Temporary no-op-native and overlay-fallback controls were run, but the same
+whole-frame corruption remained even with zero cursors.  Those Computer Use
+captures are inconclusive and all temporary bisection edits were reverted.
+Repeat the stage matrix only after an ordinary no-cursor control renders
+cleanly.  If the overlay fallback is then clean, the snapshot and editing
+layers are exonerated.  If rectangles-only is clean, one of the direct
+`draw_glyphs` paths is responsible.
 
 Run the same matrix with Metal and Core Graphics and with box, hollow, bar, and
 horizontal-bar cursors.  A Metal-only failure points to clip/scissor or command
