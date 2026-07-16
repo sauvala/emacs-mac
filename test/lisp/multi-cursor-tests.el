@@ -1782,6 +1782,39 @@
       (should (= (point) 2))
       (should (= (marker-position (multi-cursor--cursor-point cursor)) 5)))))
 
+(ert-deftest multi-cursor-edit-transaction-cancels-with-failing-hooks-inhibited ()
+  (with-temp-buffer
+    (buffer-enable-undo)
+    (insert "abcdef")
+    (goto-char 2)
+    (let* ((id (multi-cursor-add-at-point 5))
+           (cursor (multi-cursor-tests--cursor id))
+           (before (buffer-string))
+           (states (multi-cursor--snapshot-edit-states))
+           (groups
+            (multi-cursor--merge-edits
+             (mapcar
+              (lambda (state)
+                (multi-cursor--state-edit
+                 state 'self-insert-command 1 "X"))
+              states)))
+           rolling-back)
+      (let ((after-change-functions
+             (list (lambda (&rest _)
+                     (when rolling-back
+                       (error "Rollback hook failed"))))))
+        (should-error
+         (multi-cursor--apply-edit-transaction
+          states groups
+          (lambda (&rest _)
+            (setq rolling-back t)
+            (error "Installer failed")))))
+      (should (equal (buffer-string) before))
+      (should (= (point) 2))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point cursor))
+                 5)))))
+
 (ert-deftest multi-cursor-edit-delete-forward-policy-mutation-rolls-back ()
   (with-temp-buffer
     (insert "abcdef")

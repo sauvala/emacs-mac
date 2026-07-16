@@ -1395,27 +1395,44 @@ vector."
     (save-current-buffer
       (unwind-protect
           (progn
-            (atomic-change-group
-              (setq positions (multi-cursor--apply-edits vector))
-              (unless (eq (current-buffer) buffer)
-                (error "Modification hook changed the current buffer"))
-              (unless
-                  (equal
-                   (cons
-                    (car restriction)
-                    (+ (cdr restriction)
-                       (cl-loop
-                        for group in groups
-                        sum (- (length (multi-cursor--edit-string group))
-                               (- (multi-cursor--edit-end group)
-                                  (multi-cursor--edit-beg group))))))
-                   (cons (point-min) (point-max)))
-                (error "Modification hook changed the buffer restriction"))
-              (unless (and (equal multi-cursor--cursors original-cursors)
-                           (= multi-cursor--next-id original-next-id))
-                (error "Modification hook changed the cursor session"))
-              (funcall (or installer #'multi-cursor--install-edit-results)
-                       groups positions states))
+            (let ((change-group (prepare-change-group))
+                  (undo-outer-limit nil)
+                  (undo-limit most-positive-fixnum)
+                  (undo-strong-limit most-positive-fixnum)
+                  group-completed)
+              (unwind-protect
+                  (progn
+                    (activate-change-group change-group)
+                    (setq positions (multi-cursor--apply-edits vector))
+                    (unless (eq (current-buffer) buffer)
+                      (error
+                       "Modification hook changed the current buffer"))
+                    (unless
+                        (equal
+                         (cons
+                          (car restriction)
+                          (+ (cdr restriction)
+                             (cl-loop
+                              for group in groups
+                              sum (- (length
+                                      (multi-cursor--edit-string group))
+                                     (- (multi-cursor--edit-end group)
+                                        (multi-cursor--edit-beg group))))))
+                         (cons (point-min) (point-max)))
+                      (error
+                       "Modification hook changed the buffer restriction"))
+                    (unless
+                        (and (equal multi-cursor--cursors original-cursors)
+                             (= multi-cursor--next-id original-next-id))
+                      (error "Modification hook changed the cursor session"))
+                    (funcall
+                     (or installer #'multi-cursor--install-edit-results)
+                     groups positions states)
+                    (setq group-completed t))
+                (if group-completed
+                    (accept-change-group change-group)
+                  (let ((inhibit-modification-hooks t))
+                    (cancel-change-group change-group)))))
             (setq completed t))
         (unless completed
           (set-buffer buffer)
