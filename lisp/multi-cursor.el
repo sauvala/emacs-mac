@@ -1881,27 +1881,33 @@ history."
    ((stringp value) (copy-sequence value))
    ((char-table-p value)
     (let* ((copy (copy-sequence value))
+           (parent (char-table-parent value))
            (subtype (char-table-subtype value))
            (slots (or (get subtype 'char-table-extra-slots) 0)))
+      ;; `map-char-table' includes inherited parent ranges.  Detach the
+      ;; parent while copying direct entries, then snapshot it separately.
+      (set-char-table-parent copy nil)
       (set-char-table-range
        copy nil
        (multi-cursor--snapshot-electric-newline-value
         (char-table-range value nil)))
-      (map-char-table
-       (lambda (range entry)
-         (set-char-table-range
-          copy range
-          (multi-cursor--snapshot-electric-newline-value entry)))
-       value)
+      (let (ranges)
+        (map-char-table
+         (lambda (range entry)
+           (push (cons range entry) ranges))
+         copy)
+        (dolist (range-state ranges)
+          (set-char-table-range
+           copy (car range-state)
+           (multi-cursor--snapshot-electric-newline-value
+            (cdr range-state)))))
       (dotimes (index slots)
         (set-char-table-extra-slot
          copy index
          (multi-cursor--snapshot-electric-newline-value
           (char-table-extra-slot value index))))
       (set-char-table-parent
-       copy
-       (multi-cursor--snapshot-electric-newline-value
-        (char-table-parent value)))
+       copy (multi-cursor--snapshot-electric-newline-value parent))
       copy))
    ((bool-vector-p value) (copy-sequence value))
    ((or (recordp value) (vectorp value))
@@ -1936,28 +1942,46 @@ When ORIGINAL cannot be repaired in place, return the detached snapshot."
          (eq (char-table-subtype original)
              (char-table-subtype snapshot)))
     (let* ((subtype (char-table-subtype original))
-           (slots (or (get subtype 'char-table-extra-slots) 0)))
+           (slots (or (get subtype 'char-table-extra-slots) 0))
+           (original-default (char-table-range original nil))
+           (original-parent (char-table-parent original))
+           (original-slots
+            (let ((values (make-vector slots nil)))
+              (dotimes (index slots)
+                (aset values index
+                      (char-table-extra-slot original index)))
+              values))
+           (direct-snapshot (copy-sequence snapshot))
+           ranges)
+      ;; Exclude inherited ranges while retaining each live direct child
+      ;; reference needed for identity-preserving repair.
+      (set-char-table-parent direct-snapshot nil)
+      (map-char-table
+       (lambda (range entry)
+         (push (list range (char-table-range original range) entry)
+               ranges))
+       direct-snapshot)
       (set-char-table-parent original nil)
       (set-char-table-range original t nil)
       (set-char-table-range
        original nil
-       (multi-cursor--snapshot-electric-newline-value
-        (char-table-range snapshot nil)))
-      (map-char-table
-       (lambda (range entry)
-         (set-char-table-range
-          original range
-          (multi-cursor--snapshot-electric-newline-value entry)))
-       snapshot)
+       (multi-cursor--restore-electric-newline-value
+        original-default (char-table-range snapshot nil)))
+      (dolist (range-state ranges)
+        (set-char-table-range
+         original (nth 0 range-state)
+         (multi-cursor--restore-electric-newline-value
+          (nth 1 range-state) (nth 2 range-state))))
       (dotimes (index slots)
         (set-char-table-extra-slot
          original index
-         (multi-cursor--snapshot-electric-newline-value
+         (multi-cursor--restore-electric-newline-value
+          (aref original-slots index)
           (char-table-extra-slot snapshot index))))
       (set-char-table-parent
        original
-       (multi-cursor--snapshot-electric-newline-value
-        (char-table-parent snapshot)))
+       (multi-cursor--restore-electric-newline-value
+        original-parent (char-table-parent snapshot)))
       original))
    ((and (bool-vector-p original) (bool-vector-p snapshot)
          (= (length original) (length snapshot)))
@@ -1995,7 +2019,9 @@ When ORIGINAL cannot be repaired in place, return the detached snapshot."
        (lambda (entry)
          (let ((variable (nth 0 entry)))
            (and (eq (local-variable-p variable) (nth 1 entry))
+                (eq (symbol-value variable) (nth 2 entry))
                 (equal (symbol-value variable) (nth 3 entry))
+                (eq (default-value variable) (nth 4 entry))
                 (equal (default-value variable) (nth 5 entry)))))
        options)
     (error "Electric newline changed guarded options")))

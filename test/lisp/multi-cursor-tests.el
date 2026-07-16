@@ -2922,6 +2922,73 @@
               (should-not command-history))))
       (set-default 'translation-table-for-input original-default))))
 
+(ert-deftest multi-cursor-edit-newline-electric-rejects-equal-replacements ()
+  (let ((original-default (default-value 'translation-table-for-input))
+        (table (make-char-table 'translation-table nil)))
+    (unwind-protect
+        (progn
+          (set-default 'translation-table-for-input table)
+          (with-temp-buffer
+            (insert "  a\n    b")
+            (goto-char 4)
+            (multi-cursor-add-at-point (point-max))
+            (setq-local translation-table-for-input nil)
+            (let ((chars (list ?\n))
+                  (before (buffer-string))
+                  (command-history nil))
+              (multi-cursor-tests--with-electric-newline
+                (setq-local electric-indent-chars chars)
+                (let ((after-change-functions
+                       (list
+                        (lambda (&rest _)
+                          (setq electric-indent-chars (list ?\n))
+                          (setq-default
+                           translation-table-for-input
+                           (copy-sequence table))))))
+                  (should-error (command-execute 'newline)
+                                :type 'error))
+                (should (eq electric-indent-chars chars))
+                (should
+                 (eq (default-value 'translation-table-for-input)
+                     table)))
+              (should (equal (buffer-string) before))
+              (should-not command-history))))
+      (set-default 'translation-table-for-input original-default))))
+
+(ert-deftest multi-cursor-edit-newline-electric-restores-char-table-parent ()
+  (let ((original-default (default-value 'translation-table-for-input))
+        (parent (make-char-table 'translation-table nil))
+        (table (make-char-table 'translation-table nil)))
+    (set-char-table-range parent ?a ?a)
+    (set-char-table-parent table parent)
+    (unwind-protect
+        (progn
+          (set-default 'translation-table-for-input table)
+          (with-temp-buffer
+            (insert "  a\n    b")
+            (goto-char 4)
+            (multi-cursor-add-at-point (point-max))
+            (setq-local translation-table-for-input nil)
+            (let ((original-left-margin
+                   (symbol-function 'current-left-margin))
+                  (before (buffer-string))
+                  (command-history nil))
+              (multi-cursor-tests--with-electric-newline
+                (cl-letf (((symbol-function 'current-left-margin)
+                           (lambda ()
+                             (set-char-table-range parent ?a ?b)
+                             (funcall original-left-margin))))
+                  (should-error (command-execute 'newline)
+                                :type 'error))
+                (should
+                 (eq (default-value 'translation-table-for-input)
+                     table))
+                (should (eq (char-table-parent table) parent))
+                (should (= (char-table-range parent ?a) ?a)))
+              (should (equal (buffer-string) before))
+              (should-not command-history))))
+      (set-default 'translation-table-for-input original-default))))
+
 (ert-deftest multi-cursor-edit-newline-electric-restores-option-aliases ()
   (dolist (failure '(unrelated mutation))
     (with-temp-buffer
