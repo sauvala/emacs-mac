@@ -24,6 +24,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "lisp.h"
 #include "buffer.h"
+#include "composite.h"
 
 
 struct multi_cursor_edit
@@ -64,11 +65,24 @@ normal buffer modification machinery.
 
 Return a vector of the final end positions, in the same order as EDITS.
 Changes at lower positions are reflected in returned positions for edits
-at higher positions.  This primitive does not provide transaction rollback;
-its Lisp caller should arrange that when atomic behavior is required.  */)
+at higher positions.  Modification hooks must leave the current buffer
+and its accessible bounds unchanged except for each expected replacement;
+otherwise this function signals an error and restores the entry buffer
+and restriction.
+Completed edits are not rolled back, so a Lisp caller should arrange
+transaction rollback when atomic behavior is required.  */)
   (Lisp_Object edits)
 {
   CHECK_VECTOR (edits);
+
+  specpdl_ref count = SPECPDL_INDEX ();
+  USE_SAFE_ALLOCA;
+  struct buffer *entry_buffer = current_buffer;
+  ptrdiff_t expected_begv = BEGV;
+  ptrdiff_t expected_zv = ZV;
+  record_unwind_current_buffer ();
+  record_unwind_protect (save_restriction_restore,
+			 save_restriction_save ());
 
   ptrdiff_t n = ASIZE (edits);
   Lisp_Object result = make_nil_vector (n);
@@ -76,7 +90,6 @@ its Lisp caller should arrange that when atomic behavior is required.  */)
      can run arbitrary Lisp, including changing the caller's vector.  */
   Lisp_Object strings = make_nil_vector (n);
   struct multi_cursor_edit *sorted;
-  USE_SAFE_ALLOCA;
   SAFE_NALLOCA (sorted, 1, n);
 
   /* Complete all structural validation before the first modification.  */
@@ -146,13 +159,40 @@ its Lisp caller should arrange that when atomic behavior is required.  */)
     {
       maybe_quit ();
       Lisp_Object string = AREF (strings, sorted[i].input_index);
-      if (sorted[i].beg != sorted[i].end || SCHARS (string) != 0)
-	replace_range (sorted[i].beg, sorted[i].end, string,
-		       true, false, false);
+      ptrdiff_t inserted = SCHARS (string);
+      if (sorted[i].beg != sorted[i].end || inserted != 0)
+	{
+	  /* Run the hooks explicitly so a before-change hook cannot redirect
+	     the replacement to another buffer or restriction.  */
+	  ptrdiff_t from = sorted[i].beg;
+	  ptrdiff_t to = sorted[i].end;
+	  ptrdiff_t range_length = to - from;
+	  prepare_to_modify_buffer (from, to, &from);
+	  if (current_buffer != entry_buffer
+	      || BEGV != expected_begv || ZV != expected_zv)
+	    error ("Modification hook changed current buffer or restriction");
+
+	  to = from + range_length;
+	  if (from < BEGV)
+	    from = BEGV;
+	  if (to > ZV)
+	    to = ZV;
+	  ptrdiff_t deleted = to - from;
+	  ptrdiff_t expected_zv_after;
+	  if (ckd_add (&expected_zv_after, expected_zv, inserted - deleted))
+	    buffer_overflow ();
+
+	  replace_range (from, to, string, false, false, false);
+	  expected_zv = expected_zv_after;
+	  signal_after_change (from, deleted, inserted);
+	  if (current_buffer != entry_buffer
+	      || BEGV != expected_begv || ZV != expected_zv)
+	    error ("Modification hook changed current buffer or restriction");
+	  update_compositions (from, from + inserted, CHECK_BORDER);
+	}
     }
 
-  SAFE_FREE ();
-  return result;
+  return SAFE_FREE_UNBIND_TO (count, result);
 }
 
 

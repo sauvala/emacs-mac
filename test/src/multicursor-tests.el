@@ -91,6 +91,82 @@
                      '((before 5 7) (after 5 7 2)
                        (before 1 1) (after 1 2 0)))))))
 
+(ert-deftest multicursor-apply-edits-restores-buffer-after-hook-switch ()
+  (let ((other (generate-new-buffer " *multicursor-test*")))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "abcdef")
+          (with-current-buffer other
+            (insert "uvwxyz"))
+          (let ((entry (current-buffer))
+                switched)
+            (let ((after-change-functions
+                   (list (lambda (&rest _args)
+                           (unless switched
+                             (setq switched t)
+                             (set-buffer other))))))
+              (should-error
+               (multi-cursor--apply-edits [[2 3 "L"] [5 7 "XY"]])))
+            (should (eq (current-buffer) entry))
+            (should (equal (buffer-string) "abcdXY"))
+            (should (equal (with-current-buffer other (buffer-string))
+                           "uvwxyz"))))
+      (kill-buffer other))))
+
+(ert-deftest multicursor-apply-edits-restores-restriction-after-hook-narrows ()
+  (with-temp-buffer
+    (insert "abcdef")
+    (let ((entry (current-buffer))
+          narrowed)
+      (let ((after-change-functions
+             (list (lambda (&rest _args)
+                     (unless narrowed
+                       (setq narrowed t)
+                       (narrow-to-region 2 6))))))
+        (should-error
+         (multi-cursor--apply-edits [[2 3 "L"] [5 7 "XY"]])))
+      (should (eq (current-buffer) entry))
+      (should (= (point-min) 1))
+      (should (= (point-max) 7))
+      (should (equal (buffer-string) "abcdXY")))))
+
+(ert-deftest multicursor-apply-edits-stops-after-before-hook-switches-buffer ()
+  (let ((other (generate-new-buffer " *multicursor-test*")))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "abcdef")
+          (with-current-buffer other
+            (insert "uvwxyz"))
+          (let ((entry (current-buffer))
+                switched)
+            (let ((before-change-functions
+                   (list (lambda (&rest _args)
+                           (unless switched
+                             (setq switched t)
+                             (set-buffer other))))))
+              (should-error
+               (multi-cursor--apply-edits [[2 3 "L"] [5 7 "XY"]])))
+            (should (eq (current-buffer) entry))
+            (should (equal (buffer-string) "abcdef"))
+            (should (equal (with-current-buffer other (buffer-string))
+                           "uvwxyz"))))
+      (kill-buffer other))))
+
+(ert-deftest multicursor-apply-edits-stops-after-before-hook-narrows ()
+  (with-temp-buffer
+    (insert "abcdef")
+    (let (narrowed)
+      (let ((before-change-functions
+             (list (lambda (&rest _args)
+                     (unless narrowed
+                       (setq narrowed t)
+                       (narrow-to-region 2 6))))))
+        (should-error
+         (multi-cursor--apply-edits [[2 3 "L"] [5 7 "XY"]])))
+      (should (= (point-min) 1))
+      (should (= (point-max) 7))
+      (should (equal (buffer-string) "abcdef")))))
+
 (ert-deftest multicursor-apply-edits-caches-strings-before-hooks ()
   (with-temp-buffer
     (insert "abcdef")
