@@ -1164,7 +1164,8 @@ static bool resolve_cursor_pos_from_row (struct window *, struct glyph_row *,
 					struct glyph_matrix *, ptrdiff_t,
 					ptrdiff_t, int, int,
 					struct cursor_pos *);
-void resolve_window_cursor_decorations (struct window *, struct glyph_matrix *);
+void resolve_window_cursor_decorations (struct window *, struct glyph_matrix *,
+					Lisp_Object);
 static bool set_cursor_from_row (struct window *, struct glyph_row *,
 				 struct glyph_matrix *, ptrdiff_t, ptrdiff_t,
 				 int, int);
@@ -19995,10 +19996,9 @@ set_cursor_from_row (struct window *w, struct glyph_row *row,
 
 void
 resolve_window_cursor_decorations (struct window *w,
-				   struct glyph_matrix *matrix)
+				   struct glyph_matrix *matrix,
+				   Lisp_Object snapshot)
 {
-  Lisp_Object snapshot = w->desired_cursor_decorations_snapshot;
-
   w->desired_cursor_decorations_count = 0;
   w->desired_cursor_decorations_valid_p = false;
 

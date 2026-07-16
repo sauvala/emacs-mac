@@ -242,6 +242,11 @@ struct window
        the buffer displayed by the finalized current matrix.  */
     bool desired_cursor_decorations_valid_p;
 
+    /* A desired snapshot transaction is pending.  This is distinct from
+       DESIRED_CURSOR_DECORATIONS_SNAPSHOT being nil: nil can be an
+       intentional request to clear the displayed decorations.  */
+    bool desired_cursor_decorations_pending_p;
+
     /* A published snapshot differs from the last completed update.  */
     bool cursor_decorations_changed_p;
 

@@ -3737,7 +3737,7 @@ extern int draw_glyphs (struct window *, int, struct glyph_row *,
 			enum glyph_row_area, ptrdiff_t, ptrdiff_t,
 			enum draw_glyphs_face, int);
 extern void resolve_window_cursor_decorations (struct window *,
-					       struct glyph_matrix *);
+					       struct glyph_matrix *, Lisp_Object);
 extern bool gui_intersect_rectangles (const Emacs_Rectangle *,
                                       const Emacs_Rectangle *,
                                       Emacs_Rectangle *);

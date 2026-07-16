@@ -2556,6 +2556,18 @@ unshow_buffer (register struct window *w)
     bset_last_selected_window (b, Qnil);
 }
 
+/* End ownership of both matrix-dependent cursor geometry and its Lisp
+   publication transaction for a window which is genuinely being deleted.  */
+static void
+discard_window_cursor_decorations (struct window *w)
+{
+  free_window_cursor_decorations (w);
+  wset_cursor_decorations_snapshot (w, Qnil);
+  wset_desired_cursor_decorations_snapshot (w, Qnil);
+  w->desired_cursor_decorations_pending_p = false;
+  w->cursor_decorations_changed_p = false;
+}
+
 /* Put NEW into the window structure in place of OLD.  SETFLAG false
    means change window structure only.  Otherwise store geometry and
    other settings as well.  */
@@ -2687,6 +2699,7 @@ recombine_windows (Lisp_Object window)
 	    }
 
 	  /* WINDOW can be deleted now.  */
+	  discard_window_cursor_decorations (w);
 	  wset_combination (w, false, Qnil);
 	}
     }
@@ -3681,6 +3694,7 @@ window-start value is reasonable when this function is called.  */)
       wset_combination (r, false, Qnil);
     }
 
+  discard_window_cursor_decorations (r);
   replace_window (root, window, true);
   /* Assign new total sizes to all windows on FRAME.  We can't do that
      _before_ WINDOW replaces ROOT since 'window--pixel-to-total' works
@@ -4368,6 +4382,9 @@ set_window_buffer (Lisp_Object window, Lisp_Object buffer,
       free_window_cursor_decorations (w);
       wset_desired_cursor_decorations_snapshot (w, Qnil);
       w->desired_cursor_decorations_valid_p = false;
+      /* The old displayed generation belongs to another buffer.  Record an
+         explicit clear rather than treating nil as no transaction.  */
+      w->desired_cursor_decorations_pending_p = true;
       if (!NILP (w->cursor_decorations_snapshot))
 	w->cursor_decorations_changed_p = true;
     }
@@ -4495,12 +4512,12 @@ tick, followed by sorted cursor records of five elements each.  */)
      call.  A displayed snapshot is reusable only while its geometry has not
      been damaged; matrix teardown leaves CHANGED_P set so the same identity
      is validated and resolved again.  Non-nil desired snapshots are
-     unambiguous pending transactions and can likewise be retained.  Nil
-     cannot represent both "no pending transaction" and a pending clear.  */
+     unambiguous pending transactions and can likewise be retained.  The
+     explicit pending bit distinguishes a nil clear from no transaction.  */
   if ((!w->cursor_decorations_changed_p
 	&& EQ (snapshot, w->cursor_decorations_snapshot)
-	&& NILP (w->desired_cursor_decorations_snapshot))
-      || (!NILP (snapshot)
+	&& !w->desired_cursor_decorations_pending_p)
+      || (w->desired_cursor_decorations_pending_p
 	  && EQ (snapshot, w->desired_cursor_decorations_snapshot)))
     return Qnil;
 
@@ -4537,6 +4554,7 @@ tick, followed by sorted cursor records of five elements each.  */)
     w->cursor_decorations_changed_p = true;
   wset_desired_cursor_decorations_snapshot (w, snapshot);
   w->desired_cursor_decorations_valid_p = false;
+  w->desired_cursor_decorations_pending_p = true;
 
   if (w->cursor_decorations_changed_p)
     wset_redisplay (w);
@@ -4730,8 +4748,10 @@ allocate_window (void)
 				       PVEC_WINDOW);
 }
 
-/* Release both cursor-decoration caches owned by W.  This is zero-safe,
-   since matrix teardown and window deletion can visit the same window.  */
+/* Release only the matrix-dependent cursor-decoration geometry owned by W.
+   Lisp snapshot transactions have a separate lifetime and must survive
+   ordinary matrix teardown.  This is zero-safe, since teardown and window
+   deletion can visit the same window.  */
 void
 free_window_cursor_decorations (struct window *w)
 {
@@ -5976,11 +5996,14 @@ Signal an error when WINDOW is the only window on its frame.  */)
 		    window, window_dead_windows_table);
 	}
 
+      discard_window_cursor_decorations (w);
+
       if (NILP (s->prev) && NILP (s->next))
 	  /* A matrjoshka where SIBLING has become the only child of
 	     PARENT.  */
 	{
 	  /* Put SIBLING into PARENT's place.  */
+	  discard_window_cursor_decorations (p);
 	  replace_window (parent, sibling, false);
 	  /* Have SIBLING inherit the following three slot values from
 	     PARENT (the combination_limit slot is not inherited).  */
@@ -8371,8 +8394,14 @@ delete_all_child_windows (Lisp_Object window)
 	 WINDOW mentions, all references to that buffer can be removed
 	 and the buffer be collected.  */
       Fputhash (make_fixnum (w->sequence_number),
-		window, window_dead_windows_table);
+		    window, window_dead_windows_table);
     }
+
+  /* WINDOW is now dead, even when a window-configuration operation might
+     resurrect it later.  End ownership of both its resolved geometry and
+     Lisp publication transaction; a resurrected window will publish a
+     fresh generation during pre-redisplay.  */
+  discard_window_cursor_decorations (w);
 
   Vwindow_list = Qnil;
 }

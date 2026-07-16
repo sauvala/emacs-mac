@@ -245,7 +245,9 @@
     (should (< field last-lisp))
     (should (< desired last-lisp))
     (should
-     (string-match-p "cursor_decorations_changed_p" header))))
+     (string-match-p "cursor_decorations_changed_p" header))
+    (should
+     (string-match-p "desired_cursor_decorations_pending_p" header))))
 
 (ert-deftest multi-cursor-source-snapshot-setter-invalidates-precisely ()
   "The dedicated setter should retain snapshots and request redisplay."
@@ -258,6 +260,7 @@
          (record-scan (string-match "for (ptrdiff_t i = 2" body)))
     (should (string-match-p "cursor_decorations_snapshot" body))
     (should (string-match-p "desired_cursor_decorations_snapshot" body))
+    (should (string-match-p "desired_cursor_decorations_pending_p" body))
     (should (string-match-p "cursor_decorations_changed_p" body))
     (should (string-match-p "redisplay" body))
     (should
@@ -269,6 +272,30 @@
     (should record-scan)
     (should (< tick-check identity-check))
     (should (< identity-check record-scan))))
+
+(ert-deftest multi-cursor-source-nil-clear-is-an-explicit-transaction ()
+  "A nil desired snapshot should be distinguishable from no transaction."
+  (let* ((body (multi-cursor-source-tests--c-defun
+                "src/window.c" "multi-cursor--set-redisplay-snapshot"))
+         (record (string-match "wset_desired_cursor_decorations_snapshot"
+                               body))
+         (pending (and record
+                       (string-match
+                        (concat "desired_cursor_decorations_pending_p"
+                                "[[:space:]]*=[[:space:]]*true")
+                        body record))))
+    (should record)
+    (should pending)
+    (should (< record pending))
+    ;; An identical pending nil clear is a no-op, just like an identical
+    ;; non-nil immutable generation.
+    (should
+     (string-match-p
+      (concat "desired_cursor_decorations_pending_p"
+              "[[:space:]\n]*&&[[:space:]\n]*EQ"
+              "[[:space:]]*(snapshot,[[:space:]]*"
+              "w->desired_cursor_decorations_snapshot)")
+      body))))
 
 (ert-deftest multi-cursor-source-promotes-snapshot-after-completed-update ()
   "Only a completed window update should promote the desired snapshot."
@@ -290,6 +317,49 @@
     (should (< completed promotion))
     (should (< promotion clear))))
 
+(ert-deftest multi-cursor-source-retains-current-snapshot-without-transaction ()
+  "An unrelated update should re-resolve, not clear, the current generation."
+  (let* ((body (multi-cursor-source-tests--function-body
+                "src/dispnew.c" "update_window"))
+         (pending (string-match
+                   (concat "cursor_decorations_transaction_p"
+                           "[[:space:]\n]*=[[:space:]\n]*"
+                           "w->desired_cursor_decorations_pending_p")
+                   body))
+         (choice (string-match
+                  (concat "cursor_decorations_transaction_p"
+                          "[[:space:]\n]*\\?"
+                          "[[:space:]\n]*w->desired_cursor_decorations_snapshot"
+                          "[[:space:]\n]*:"
+                          "[[:space:]\n]*w->cursor_decorations_snapshot")
+                  body))
+         (resolve (string-match "resolve_window_cursor_decorations" body))
+         (promotion (string-match
+                     "wset_cursor_decorations_snapshot" body)))
+    (should pending)
+    (should choice)
+    (should resolve)
+    (should promotion)
+    (should (< pending choice))
+    (should (< choice resolve))
+    ;; Promotion is guarded by the transaction captured at update start;
+    ;; geometry-only publication leaves the current Lisp snapshot untouched.
+    (let ((guard (string-match
+                  (concat "if[[:space:]\n]*(cursor_decorations_published_p"
+                          "[[:space:]\n]*&&[[:space:]\n]*"
+                          "cursor_decorations_transaction_p)")
+                  body)))
+      (should guard)
+      (should (< guard promotion)))))
+
+(ert-deftest multi-cursor-source-resolver-takes-selected-generation ()
+  "The resolver should not implicitly interpret absent desired state as nil."
+  (let ((body (multi-cursor-source-tests--function-body
+               "src/xdisp.c" "resolve_window_cursor_decorations")))
+    (should (string-match-p "NILP (snapshot)" body))
+    (should-not
+     (string-match-p "w->desired_cursor_decorations_snapshot" body))))
+
 (ert-deftest multi-cursor-source-invalidates-snapshot-with-window-state ()
   "Buffer replacement and matrix teardown should invalidate snapshots."
   (let ((buffer-setter (multi-cursor-source-tests--function-body
@@ -298,11 +368,74 @@
                       "src/dispnew.c" "free_window_matrices")))
     (should
      (string-match-p "desired_cursor_decorations_snapshot" buffer-setter))
+    (should
+     (string-match-p "desired_cursor_decorations_pending_p" buffer-setter))
     (should (string-match-p "cursor_decorations_changed_p" buffer-setter))
     (should (string-match-p "free_window_cursor_decorations" matrix-free))
-    (should
-     (string-match-p "desired_cursor_decorations_snapshot" matrix-free))
+    (should-not
+     (string-match-p "wset_desired_cursor_decorations_snapshot" matrix-free))
+    (should-not
+     (string-match-p
+      (concat "desired_cursor_decorations_pending_p"
+              "[[:space:]]*=[[:space:]]*")
+      matrix-free))
     (should (string-match-p "cursor_decorations_changed_p" matrix-free))))
+
+(ert-deftest multi-cursor-source-buffer-switch-enqueues-explicit-clear ()
+  "Changing buffers should clear old decorations as a pending transaction."
+  (let ((buffer-setter (multi-cursor-source-tests--function-body
+                        "src/window.c" "set_window_buffer"))
+        (matrix-free (multi-cursor-source-tests--function-body
+                      "src/dispnew.c" "free_window_matrices")))
+    (should
+     (string-match-p
+      (concat "desired_cursor_decorations_pending_p"
+              "[[:space:]]*=[[:space:]]*true")
+      buffer-setter))
+    ;; Matrix replacement for the same displayed buffer preserves either a
+    ;; pending desired transaction or the current generation to re-resolve.
+    (should-not
+     (string-match-p "wset_desired_cursor_decorations_snapshot" matrix-free))
+    (should-not
+     (string-match-p
+      (concat "desired_cursor_decorations_pending_p"
+              "[[:space:]]*=[[:space:]]*")
+      matrix-free))))
+
+(ert-deftest multi-cursor-source-cache-free-is-geometry-only ()
+  "Freeing matrix caches should not discard Lisp publication state."
+  (let ((free-cache (multi-cursor-source-tests--function-body
+                     "src/window.c" "free_window_cursor_decorations"))
+        (discard (multi-cursor-source-tests--function-body
+                  "src/window.c" "discard_window_cursor_decorations")))
+    (dolist (field '("cursor_decorations_snapshot"
+                     "desired_cursor_decorations_snapshot"
+                     "desired_cursor_decorations_pending_p"
+                     "cursor_decorations_changed_p"))
+      (should-not (string-match-p field free-cache))
+      (should (string-match-p field discard)))
+    (should (string-match-p "free_window_cursor_decorations" discard))))
+
+(ert-deftest multi-cursor-source-window-deletion-discards-publication-state ()
+  "True window destruction should explicitly discard snapshot ownership."
+  (let ((replace (multi-cursor-source-tests--function-body
+                  "src/window.c" "replace_window"))
+        (delete-tree (multi-cursor-source-tests--function-body
+                      "src/window.c" "delete_all_child_windows"))
+        (delete-one (multi-cursor-source-tests--c-defun
+                     "src/window.c" "delete-window-internal")))
+    ;; Structural replacement can reattach OLD as a live child during a
+    ;; split, so the helper itself is geometry-only for both participants.
+    (should (string-match-p "free_window_cursor_decorations (o)" replace))
+    (should (string-match-p "free_window_cursor_decorations (n)" replace))
+    (should-not (string-match-p "discard_window_cursor_decorations (o)"
+                                replace))
+    (should-not (string-match-p "discard_window_cursor_decorations (n)"
+                                replace))
+    (should (string-match-p "discard_window_cursor_decorations (w)"
+                            delete-tree))
+    (should (string-match-p "discard_window_cursor_decorations (w)"
+                            delete-one))))
 
 (ert-deftest multi-cursor-source-changed-only-fast-path-guards ()
   "No-op and cursor-motion shortcuts should care only about snapshot change."

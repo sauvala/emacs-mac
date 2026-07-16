@@ -96,7 +96,8 @@ static void mirror_line_dance (struct window *, int, int, int *, char *);
 static void update_window_tree (struct window *);
 static void update_window (struct window *);
 void draw_window_cursor_decorations (struct window *);
-void resolve_window_cursor_decorations (struct window *, struct glyph_matrix *);
+void resolve_window_cursor_decorations (struct window *, struct glyph_matrix *,
+					Lisp_Object);
 static void damage_window_cursor_decorations (struct window *);
 static bool publish_window_cursor_decorations (struct window *);
 static void write_matrix (struct frame *, bool, bool);
@@ -2417,8 +2418,9 @@ free_window_matrices (struct window *w)
       /* Cached geometry is indexed into these matrices, so its lifetime is
          centralized with matrix ownership.  */
       free_window_cursor_decorations (w);
-      wset_desired_cursor_decorations_snapshot (w, Qnil);
-      w->desired_cursor_decorations_valid_p = false;
+      /* Keep both current and desired Lisp generations.  A pending nil is an
+         intentional clear, while a non-pending current generation must be
+         re-resolved after replacement matrices are built.  */
       if (!NILP (w->cursor_decorations_snapshot))
 	w->cursor_decorations_changed_p = true;
 
@@ -4537,6 +4539,8 @@ update_window (struct window *w)
   bool changed_p = 0, mouse_face_overwritten_p = 0;
   bool invisible_rows_marked = false;
   bool cursor_decorations_published_p;
+  bool cursor_decorations_transaction_p
+    = w->desired_cursor_decorations_pending_p;
 
 #ifdef HAVE_WINDOW_SYSTEM
   gui_update_window_begin (w);
@@ -4719,7 +4723,12 @@ update_window (struct window *w)
   /* All desired rows have now become current, including partial-update
      reuse.  Resolve against that finalized matrix so cursor-movement
      shortcuts cannot publish an empty desired cache.  */
-  resolve_window_cursor_decorations (w, w->current_matrix);
+  Lisp_Object cursor_decorations_snapshot
+    = cursor_decorations_transaction_p
+      ? w->desired_cursor_decorations_snapshot
+      : w->cursor_decorations_snapshot;
+  resolve_window_cursor_decorations (w, w->current_matrix,
+				     cursor_decorations_snapshot);
   cursor_decorations_published_p = publish_window_cursor_decorations (w);
   if (!cursor_decorations_published_p)
     /* The old batch was erased before updating rows, and its vpos values no
@@ -4738,13 +4747,18 @@ update_window (struct window *w)
 #endif
   /* Only a completed update with a matching resolved cache may make the
      published snapshot current.  A stale transaction remains pending.  */
-  if (cursor_decorations_published_p)
+  if (cursor_decorations_published_p
+      && cursor_decorations_transaction_p)
     {
       wset_cursor_decorations_snapshot
 	(w, w->desired_cursor_decorations_snapshot);
       wset_desired_cursor_decorations_snapshot (w, Qnil);
+      w->desired_cursor_decorations_pending_p = false;
       w->cursor_decorations_changed_p = false;
     }
+  else if (cursor_decorations_published_p)
+    /* Geometry-only publication retains the displayed generation.  */
+    w->cursor_decorations_changed_p = false;
 
   /* If the update wasn't interrupted, this window has been
      completely updated.  */
