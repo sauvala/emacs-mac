@@ -2891,6 +2891,104 @@
       (should (equal (buffer-string) before))
       (should-not command-history))))
 
+(ert-deftest multi-cursor-edit-newline-electric-restores-mutated-char-table ()
+  (let ((original-default (default-value 'translation-table-for-input))
+        (table (make-char-table 'translation-table nil)))
+    (set-char-table-range table ?a ?a)
+    (unwind-protect
+        (progn
+          (set-default 'translation-table-for-input table)
+          (with-temp-buffer
+            (insert "  a\n    b")
+            (goto-char 4)
+            (multi-cursor-add-at-point (point-max))
+            (setq-local translation-table-for-input nil)
+            (let ((original-left-margin
+                   (symbol-function 'current-left-margin))
+                  (before (buffer-string))
+                  (command-history nil))
+              (multi-cursor-tests--with-electric-newline
+                (cl-letf (((symbol-function 'current-left-margin)
+                           (lambda ()
+                             (set-char-table-range table ?a ?b)
+                             (funcall original-left-margin))))
+                  (should-error (command-execute 'newline)
+                                :type 'error))
+                (should (eq (default-value 'translation-table-for-input)
+                            table))
+                (should (= (char-table-range table ?a) ?a))
+                (should (null translation-table-for-input)))
+              (should (equal (buffer-string) before))
+              (should-not command-history))))
+      (set-default 'translation-table-for-input original-default))))
+
+(ert-deftest multi-cursor-edit-newline-electric-restores-option-aliases ()
+  (dolist (failure '(unrelated mutation))
+    (with-temp-buffer
+      (insert "  a\n    b")
+      (goto-char 4)
+      (multi-cursor-add-at-point (point-max))
+      (let ((chars (list ?\n))
+            (hooks (list #'electric-indent-post-self-insert-function
+                         #'blink-paren-post-self-insert-function))
+            (original-left-margin
+             (symbol-function 'current-left-margin))
+            (before (buffer-string))
+            (command-history nil))
+        (multi-cursor-tests--with-electric-newline
+          (setq-local electric-indent-chars chars)
+          (setq-local post-self-insert-hook hooks)
+          (cl-letf (((symbol-function 'current-left-margin)
+                     (lambda ()
+                       (if (eq failure 'unrelated)
+                           (error "Unrelated electric planning failure")
+                         (setcar chars ?\t)
+                         (setcar hooks #'ignore)
+                         (funcall original-left-margin)))))
+            (should-error (command-execute 'newline)
+                          :type 'error))
+          (should (eq electric-indent-chars chars))
+          (should (eq post-self-insert-hook hooks))
+          (should (equal chars '(?\n)))
+          (should
+           (equal hooks
+                  '(electric-indent-post-self-insert-function
+                    blink-paren-post-self-insert-function))))
+        (should (equal (buffer-string) before))
+        (should-not command-history)))))
+
+(ert-deftest multi-cursor-edit-newline-electric-dead-buffer-restores-default ()
+  (let ((original-default (default-value 'translation-table-for-input))
+        (source (generate-new-buffer " *multi-cursor-dead-newline*"))
+        condition)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (insert "  a\n    b")
+            (goto-char 4)
+            (multi-cursor-add-at-point (point-max))
+            (multi-cursor-tests--with-electric-newline
+              (let ((after-change-functions
+                     (list
+                      (lambda (&rest _)
+                        (setq-default
+                         translation-table-for-input '(changed))
+                        (kill-buffer source)))))
+                (setq condition
+                      (should-error (command-execute 'newline)
+                                    :type 'error)))))
+          (should-not (buffer-live-p source))
+          (should
+           (eq (default-value 'translation-table-for-input)
+               original-default))
+          (should-not
+           (string-match-p
+            "Selecting deleted buffer"
+            (error-message-string condition))))
+      (when (buffer-live-p source)
+        (kill-buffer source))
+      (set-default 'translation-table-for-input original-default))))
+
 (ert-deftest multi-cursor-edit-newline-electric-blank-line-targets-zero ()
   (with-temp-buffer
     (insert " \t \n  text")

@@ -1400,7 +1400,7 @@ vector."
                    groups)))
          positions completed)
     (multi-cursor--detach-edit-markers states)
-    (save-current-buffer
+    (progn
       (unwind-protect
           (progn
             (let ((change-group (prepare-change-group))
@@ -1439,13 +1439,15 @@ vector."
                     (setq group-completed t))
                 (if group-completed
                     (accept-change-group change-group)
-                  (let ((inhibit-modification-hooks t))
-                    (cancel-change-group change-group)))))
+                  (when (buffer-live-p buffer)
+                    (let ((inhibit-modification-hooks t))
+                      (cancel-change-group change-group))))))
             (setq completed t))
         (unless completed
-          (set-buffer buffer)
-          (multi-cursor--restore-edit-states
-           states original-cursors original-next-id))))
+          (when (buffer-live-p buffer)
+            (set-buffer buffer)
+            (multi-cursor--restore-edit-states
+             states original-cursors original-next-id)))))
     positions))
 
 (defun multi-cursor--kill-ring-state ()
@@ -1869,14 +1871,121 @@ history."
     indent-tabs-mode tab-width syntax-propertize-function)
   "Options that must remain stable across electric-newline planning and edits.")
 
+(defun multi-cursor--snapshot-electric-newline-value (value)
+  "Return a detached snapshot of mutable guarded option VALUE."
+  (cond
+   ((functionp value) value)
+   ((consp value)
+    (cons (multi-cursor--snapshot-electric-newline-value (car value))
+          (multi-cursor--snapshot-electric-newline-value (cdr value))))
+   ((stringp value) (copy-sequence value))
+   ((char-table-p value)
+    (let* ((copy (copy-sequence value))
+           (subtype (char-table-subtype value))
+           (slots (or (get subtype 'char-table-extra-slots) 0)))
+      (set-char-table-range
+       copy nil
+       (multi-cursor--snapshot-electric-newline-value
+        (char-table-range value nil)))
+      (map-char-table
+       (lambda (range entry)
+         (set-char-table-range
+          copy range
+          (multi-cursor--snapshot-electric-newline-value entry)))
+       value)
+      (dotimes (index slots)
+        (set-char-table-extra-slot
+         copy index
+         (multi-cursor--snapshot-electric-newline-value
+          (char-table-extra-slot value index))))
+      (set-char-table-parent
+       copy
+       (multi-cursor--snapshot-electric-newline-value
+        (char-table-parent value)))
+      copy))
+   ((bool-vector-p value) (copy-sequence value))
+   ((or (recordp value) (vectorp value))
+    (let ((copy (copy-sequence value)))
+      (dotimes (index (length value))
+        (aset copy index
+              (multi-cursor--snapshot-electric-newline-value
+               (aref value index))))
+      copy))
+   (t value)))
+
+(defun multi-cursor--restore-electric-newline-value (original snapshot)
+  "Repair mutable ORIGINAL from detached SNAPSHOT and return ORIGINAL.
+
+When ORIGINAL cannot be repaired in place, return the detached snapshot."
+  (cond
+   ((eq original snapshot) original)
+   ((and (consp original) (consp snapshot))
+    (setcar original
+            (multi-cursor--restore-electric-newline-value
+             (car original) (car snapshot)))
+    (setcdr original
+            (multi-cursor--restore-electric-newline-value
+             (cdr original) (cdr snapshot)))
+    original)
+   ((and (stringp original) (stringp snapshot)
+         (= (length original) (length snapshot)))
+    (dotimes (index (length original))
+      (aset original index (aref snapshot index)))
+    original)
+   ((and (char-table-p original) (char-table-p snapshot)
+         (eq (char-table-subtype original)
+             (char-table-subtype snapshot)))
+    (let* ((subtype (char-table-subtype original))
+           (slots (or (get subtype 'char-table-extra-slots) 0)))
+      (set-char-table-parent original nil)
+      (set-char-table-range original t nil)
+      (set-char-table-range
+       original nil
+       (multi-cursor--snapshot-electric-newline-value
+        (char-table-range snapshot nil)))
+      (map-char-table
+       (lambda (range entry)
+         (set-char-table-range
+          original range
+          (multi-cursor--snapshot-electric-newline-value entry)))
+       snapshot)
+      (dotimes (index slots)
+        (set-char-table-extra-slot
+         original index
+         (multi-cursor--snapshot-electric-newline-value
+          (char-table-extra-slot snapshot index))))
+      (set-char-table-parent
+       original
+       (multi-cursor--snapshot-electric-newline-value
+        (char-table-parent snapshot)))
+      original))
+   ((and (bool-vector-p original) (bool-vector-p snapshot)
+         (= (length original) (length snapshot)))
+    (dotimes (index (length original))
+      (aset original index (aref snapshot index)))
+    original)
+   ((and (or (recordp original) (vectorp original))
+         (or (recordp snapshot) (vectorp snapshot))
+         (= (length original) (length snapshot)))
+    (dotimes (index (length original))
+      (aset original index
+            (multi-cursor--restore-electric-newline-value
+             (aref original index) (aref snapshot index))))
+    original)
+   (t snapshot)))
+
 (defun multi-cursor--electric-newline-options ()
-  "Capture guarded electric-newline option bindings and values."
+  "Capture guarded option binding states, references, and snapshots."
   (mapcar
    (lambda (variable)
-     (list variable
-           (local-variable-p variable)
-           (copy-tree (symbol-value variable))
-           (copy-tree (default-value variable))))
+     (let ((value (symbol-value variable))
+           (default (default-value variable)))
+       (list variable
+             (local-variable-p variable)
+             value
+             (multi-cursor--snapshot-electric-newline-value value)
+             default
+             (multi-cursor--snapshot-electric-newline-value default))))
    multi-cursor--electric-newline-guarded-options))
 
 (defun multi-cursor--validate-electric-newline-options (options)
@@ -1886,27 +1995,48 @@ history."
        (lambda (entry)
          (let ((variable (nth 0 entry)))
            (and (eq (local-variable-p variable) (nth 1 entry))
-                (equal (symbol-value variable) (nth 2 entry))
-                (equal (default-value variable) (nth 3 entry)))))
+                (equal (symbol-value variable) (nth 3 entry))
+                (equal (default-value variable) (nth 5 entry)))))
        options)
     (error "Electric newline changed guarded options")))
 
-(defun multi-cursor--restore-electric-newline-options (options)
-  "Restore guarded electric-newline OPTIONS after a failed operation."
+(defun multi-cursor--restore-electric-newline-defaults (options)
+  "Restore process-wide guarded defaults in OPTIONS."
   (dolist (entry options)
-    (set-default (nth 0 entry) (copy-tree (nth 3 entry))))
+    (set-default
+     (nth 0 entry)
+     (multi-cursor--restore-electric-newline-value
+      (nth 4 entry) (nth 5 entry)))))
+
+(defun multi-cursor--restore-electric-newline-locals (options)
+  "Restore guarded local binding states and values in OPTIONS."
   (dolist (entry options)
-    (let ((variable (nth 0 entry))
-          (local (nth 1 entry))
-          (value (copy-tree (nth 2 entry))))
+    (let* ((variable (nth 0 entry))
+           (local (nth 1 entry))
+           (value
+            (multi-cursor--restore-electric-newline-value
+             (nth 2 entry) (nth 3 entry))))
       (if local
           (set (make-local-variable variable) value)
         (when (local-variable-p variable)
           (kill-local-variable variable))
-        (unless (equal (symbol-value variable) value)
+        (unless (eq (symbol-value variable) value)
           (set variable value)
           (when (local-variable-p variable)
             (kill-local-variable variable)))))))
+
+(defun multi-cursor--restore-electric-newline-failure
+    (options buffer states cursors next-id)
+  "Restore failed electric newline state, tolerating a dead BUFFER."
+  (multi-cursor--restore-electric-newline-defaults options)
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (multi-cursor--restore-electric-newline-locals options)
+      (multi-cursor--restore-edit-states states cursors next-id)
+      (unless multi-cursor-mode
+        (setq multi-cursor-mode t)
+        (multi-cursor--start)))
+    (set-buffer buffer)))
 
 (defun multi-cursor--validate-electric-newline-contract ()
   "Reject electric indentation outside the bounded relative-indent contract."
@@ -2043,7 +2173,7 @@ RECORD-FLAG controls the single logical command-history entry."
          (original-next-id multi-cursor--next-id)
          edits groups planned completed)
     (unwind-protect
-        (save-current-buffer
+        (progn
           (save-restriction
             (atomic-change-group
               (let ((context (multi-cursor--callback-context)))
@@ -2058,15 +2188,10 @@ RECORD-FLAG controls the single logical command-history entry."
                 (setq groups (multi-cursor--merge-edits edits t)
                       planned t)))))
       (unless planned
-        (set-buffer buffer)
-        (multi-cursor--restore-electric-newline-options options)
-        (multi-cursor--restore-edit-states
-         states original-cursors original-next-id)
-        (unless multi-cursor-mode
-          (setq multi-cursor-mode t)
-          (multi-cursor--start))))
+        (multi-cursor--restore-electric-newline-failure
+         options buffer states original-cursors original-next-id)))
     (unwind-protect
-        (save-current-buffer
+        (progn
           (save-restriction
             (multi-cursor--apply-edit-transaction
              states groups
@@ -2076,13 +2201,8 @@ RECORD-FLAG controls the single logical command-history entry."
                 edit-groups positions edit-states))))
           (setq completed t))
       (unless completed
-        (set-buffer buffer)
-        (multi-cursor--restore-electric-newline-options options)
-        (multi-cursor--restore-edit-states
-         states original-cursors original-next-id)
-        (unless multi-cursor-mode
-          (setq multi-cursor-mode t)
-          (multi-cursor--start))))
+        (multi-cursor--restore-electric-newline-failure
+         options buffer states original-cursors original-next-id)))
     (when record-flag
       (add-to-history 'command-history '(newline nil 1) nil t))))
 
