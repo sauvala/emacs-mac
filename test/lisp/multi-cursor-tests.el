@@ -5423,6 +5423,607 @@ session state, so the bounded operation must reject before modification."
             (should (equal (buffer-string) result))
             (should (equal (multi-cursor--session-fingerprint) after-state))))))))
 
+;;;; Bounded stock Emacs Lisp TAB indentation
+
+(defmacro multi-cursor-tests--with-bounded-elisp-indent (&rest body)
+  "Run BODY with the supported stock Emacs Lisp TAB contract."
+  (declare (indent 0) (debug t))
+  `(progn
+     ;; Use buffer-local values rather than dynamic bindings.  This makes a
+     ;; test's `setq-local' mutation visible to the bounded handler, which is
+     ;; the property its option-drift checks must protect.
+     (setq-local abbrev-mode nil
+                 indent-tabs-mode nil
+                 lisp-indent-offset 2
+                 tab-always-indent t
+                 tab-width 8)
+     ,@body))
+
+(defun multi-cursor-tests--session-edit-state-positions ()
+  "Return point, mark, and activity for every cursor in session order."
+  (mapcar (lambda (state)
+            (list (multi-cursor--edit-state-point state)
+                  (multi-cursor--edit-state-mark state)
+                  (multi-cursor--edit-state-active state)))
+          (multi-cursor--snapshot-edit-states)))
+
+(defun multi-cursor-tests--stock-elisp-indent-oracle (text states)
+  "Return stock ascending TAB result for TEXT and inactive STATES.
+
+STATES is ordered primary first and contains (POINT MARK ACTIVE) triples.
+The native path must produce this same text and cursor state without
+replaying a command against its live session one cursor at a time."
+  (with-temp-buffer
+    (insert text)
+    (emacs-lisp-mode)
+    (multi-cursor-tests--with-bounded-elisp-indent
+      (let ((records
+             (mapcar
+              (lambda (state)
+                (list (copy-marker (nth 0 state))
+                      (and (nth 1 state) (copy-marker (nth 1 state)))
+                      (nth 2 state)))
+              states)))
+        (unwind-protect
+            (progn
+              ;; Keep every target live while applying stock TAB in source
+              ;; order.  This is the observable reference for nested forms:
+              ;; a selected child line sees the parent line already indented.
+              (dolist (record
+                       (sort (copy-sequence records)
+                             (lambda (left right)
+                               (< (marker-position (car left))
+                                  (marker-position (car right))))))
+                (goto-char (marker-position (car record)))
+                (set-marker (mark-marker) (and (nth 1 record)
+                                                (marker-position
+                                                 (nth 1 record))))
+                (setq mark-active (nth 2 record))
+                (let ((this-command 'indent-for-tab-command)
+                      (last-command 'other-command))
+                  (indent-for-tab-command))
+                ;; A point on indentation moves to its first nonblank;
+                ;; preserve that command result across later source edits.
+                (set-marker (car record) (point)))
+              (list (buffer-string)
+                    (mapcar
+                     (lambda (record)
+                       (list (marker-position (car record))
+                             (and (nth 1 record)
+                                  (marker-position (nth 1 record)))
+                             (nth 2 record)))
+                     records)))
+          (dolist (record records)
+            (set-marker (car record) nil)
+            (when (nth 1 record)
+              (set-marker (nth 1 record) nil))))))))
+
+(ert-deftest multi-cursor-tab-elisp-dispatches-and-indents-sibling-lines ()
+  "Bounded TAB recognizes stock Lisp indentation, not literal insertion."
+  (let ((entry (gethash 'indent-for-tab-command
+                        multi-cursor--command-policies)))
+    (should (eq (car entry) 'custom-handler))
+    (should (functionp (cdr entry))))
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(defun alpha ()\n(foo)\n(bar))")
+    (goto-char (point-min))
+    (forward-line 1)
+    (let* ((primary (point))
+           (primary-mark (point-min))
+           (secondary (save-excursion (forward-line 1) (point)))
+           (secondary-mark primary)
+           (states (list (list primary primary-mark nil)
+                         (list secondary secondary-mark nil)))
+           (expected
+            (multi-cursor-tests--stock-elisp-indent-oracle
+             (buffer-string) states)))
+      (goto-char primary)
+      (set-mark primary-mark)
+      (setq mark-active nil)
+      (let ((id (multi-cursor-add-selection secondary secondary-mark nil)))
+        (multi-cursor-tests--with-bounded-elisp-indent
+          (command-execute 'indent-for-tab-command))
+        (should (equal (buffer-string) "(defun alpha ()\n  (foo)\n  (bar))"))
+        (should (equal (buffer-string) (nth 0 expected)))
+        (should (equal (multi-cursor-tests--session-edit-state-positions)
+                       (nth 1 expected)))
+        (should (= (multi-cursor--cursor-id
+                    (multi-cursor-tests--cursor id))
+                   id))))))
+
+(ert-deftest multi-cursor-tab-elisp-parent-child-matches-stock-ascending ()
+  "A selected child line is planned from the selected parent result."
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(defun sample (value)\n(when value\n(message \"%s\" value)))")
+    (goto-char (point-min))
+    (forward-line 1)
+    (let* ((parent (point))
+           (child (save-excursion (forward-line 1) (point)))
+           (states (list (list parent (point-min) nil)
+                         (list child parent nil)))
+           (expected
+            (multi-cursor-tests--stock-elisp-indent-oracle
+             (buffer-string) states)))
+      (goto-char parent)
+      (set-mark (point-min))
+      (setq mark-active nil)
+      (multi-cursor-add-selection child parent nil)
+      (multi-cursor-tests--with-bounded-elisp-indent
+        (command-execute 'indent-for-tab-command))
+      (should (equal (buffer-string)
+                     "(defun sample (value)\n  (when value\n    (message \"%s\" value)))"))
+      (should (equal (buffer-string) (nth 0 expected)))
+      (should (equal (multi-cursor-tests--session-edit-state-positions)
+                     (nth 1 expected))))))
+
+(ert-deftest multi-cursor-tab-elisp-same-line-rejects-atomically ()
+  "Two independent cursor records on one Lisp line are not coalesced."
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(progn\n(foo))")
+    (goto-char (point-min))
+    (forward-line 1)
+    (let* ((id (multi-cursor-add-at-point (+ (point) 2)))
+           (cursor (multi-cursor-tests--cursor id))
+           (before (buffer-string))
+           (before-state (multi-cursor--session-fingerprint)))
+      (multi-cursor-tests--with-bounded-elisp-indent
+        (should-error (command-execute 'indent-for-tab-command) :type 'user-error))
+      (should (equal (buffer-string) before))
+      (should (equal (multi-cursor--session-fingerprint) before-state))
+      (should (= (marker-position (multi-cursor--cursor-point cursor))
+                 (+ (point-min) 9))))))
+
+(ert-deftest multi-cursor-tab-elisp-honors-tabs-and-spaces ()
+  "Lisp indentation preserves `indent-tabs-mode' byte-for-byte."
+  (dolist (case '((t "\t") (nil "        ")))
+    (pcase-let ((`(,tabs ,padding) case))
+      (with-temp-buffer
+        (emacs-lisp-mode)
+        (insert "(progn\n(foo)\n(bar))")
+        (goto-char (point-min))
+        (forward-line 1)
+        (let ((secondary (save-excursion (forward-line 1) (point))))
+          (multi-cursor-add-at-point secondary)
+          (let ((indent-tabs-mode tabs)
+                (lisp-indent-offset 8)
+                (tab-always-indent t)
+                (tab-width 8))
+            (command-execute 'indent-for-tab-command))
+          (should (equal (buffer-string)
+                         (concat "(progn\n" padding "(foo)\n"
+                                 padding "(bar))"))))))))
+
+(ert-deftest multi-cursor-tab-elisp-rejects-comment-and-string-lines ()
+  "Comment and string-line TAB is deliberately outside the bounded contract."
+  (dolist (contents '("(progn\n;; comment\n(foo))"
+                      "(progn\n\"string literal\"\n(foo))"))
+    (with-temp-buffer
+      (emacs-lisp-mode)
+      (insert contents)
+      (goto-char (point-min))
+      (forward-line 1)
+      (let* ((id (multi-cursor-add-at-point
+                  (save-excursion (forward-line 1) (point))))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string))
+             (before-state (multi-cursor--session-fingerprint)))
+        (multi-cursor-tests--with-bounded-elisp-indent
+          (should-error (command-execute 'indent-for-tab-command)
+                        :type 'user-error))
+        (should (equal (buffer-string) before))
+        (should (equal (multi-cursor--session-fingerprint) before-state))
+        (should (= (marker-position (multi-cursor--cursor-point cursor))
+                   (save-excursion (goto-char (point-min))
+                                   (forward-line 2) (point))))))))
+
+(ert-deftest multi-cursor-tab-elisp-narrowing-requires-complete-lines ()
+  "Full physical lines work under narrowing; partial ones fail closed."
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "outside\n(progn\n(foo)\n(bar))\noutside")
+    (goto-char (point-min))
+    (forward-line 1)
+    (let ((first (point)))
+      (forward-line 2)
+      (end-of-line)
+      (narrow-to-region first (point)))
+    (goto-char (point-min))
+    (forward-line 1)
+    (let* ((secondary (save-excursion (forward-line 1) (point)))
+           (old-min (point-min))
+           (old-max (point-max)))
+      (multi-cursor-add-at-point secondary)
+      (multi-cursor-tests--with-bounded-elisp-indent
+        (command-execute 'indent-for-tab-command))
+      (should (equal (buffer-string) "(progn\n  (foo)\n  (bar))"))
+      (should (= (point-min) old-min))
+      (should (= (point-max) (+ old-max 4)))))
+  (dolist (case '(partial-line inaccessible-secondary))
+    (with-temp-buffer
+      (emacs-lisp-mode)
+      (insert "(progn\n(foo)\n(bar))")
+      (goto-char (point-min))
+      (forward-line 1)
+      (let* ((primary (point))
+             (secondary (save-excursion (forward-line 1) (point)))
+             (id (multi-cursor-add-at-point secondary))
+             (cursor (multi-cursor-tests--cursor id)))
+        (pcase case
+          ('partial-line
+           (goto-char secondary)
+           (narrow-to-region primary (1+ secondary)))
+          ('inaccessible-secondary
+           (narrow-to-region primary (1- secondary))))
+        (goto-char primary)
+        (let ((before (save-restriction (widen) (buffer-string)))
+              (before-state (multi-cursor--session-fingerprint)))
+          (multi-cursor-tests--with-bounded-elisp-indent
+            (should-error (command-execute 'indent-for-tab-command)
+                          :type 'user-error))
+          (should (equal (save-restriction (widen) (buffer-string)) before))
+          (should (equal (multi-cursor--session-fingerprint) before-state))
+          (should (= (marker-position (multi-cursor--cursor-point cursor))
+                     secondary)))))))
+
+(ert-deftest multi-cursor-tab-elisp-rejects-properties-and-read-only ()
+  "Every planned indentation range is preflighted before native mutation."
+  (dolist (gate '(buffer text overlay))
+    (with-temp-buffer
+      (emacs-lisp-mode)
+      (insert "(progn\n (foo)\n (bar))")
+      (goto-char (point-min))
+      (forward-line 1)
+      (let* ((primary (point))
+             (secondary (save-excursion (forward-line 1) (point)))
+             (id (multi-cursor-add-at-point secondary))
+             (cursor (multi-cursor-tests--cursor id))
+             overlay)
+        (pcase gate
+          ('buffer (setq buffer-read-only t))
+          ('text (put-text-property primary (1+ primary) 'read-only t))
+          ('overlay
+           (setq overlay (make-overlay primary (1+ primary)))
+           (overlay-put overlay 'read-only t)))
+        (let ((before (buffer-string))
+              (before-state (multi-cursor--session-fingerprint)))
+          (multi-cursor-tests--with-bounded-elisp-indent
+            (should-error (command-execute 'indent-for-tab-command)))
+          (should (equal (buffer-string) before))
+          (should (equal (multi-cursor--session-fingerprint) before-state))
+          (should (= (marker-position (multi-cursor--cursor-point cursor))
+                     secondary)))
+        (when overlay (delete-overlay overlay))))))
+
+(ert-deftest multi-cursor-tab-elisp-rejects-unsupported-mode-and-overrides ()
+  "Only unadvised stock `lisp-indent-line' in Emacs Lisp mode is accepted."
+  (dolist (case '(wrong-mode custom-indent functional-indent advice))
+    (with-temp-buffer
+      ;; Changing a major mode ends an active session, so establish the
+      ;; negative mode before adding its secondary cursor.
+      (if (eq case 'wrong-mode)
+          (fundamental-mode)
+        (emacs-lisp-mode))
+      (insert "(progn\n(foo)\n(bar))")
+      (goto-char (point-min))
+      (forward-line 1)
+      (let* ((secondary (save-excursion (forward-line 1) (point)))
+             (id (multi-cursor-add-at-point secondary))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string))
+             (before-state (multi-cursor--session-fingerprint))
+             (called nil)
+             (wrapper
+              (lambda (original &rest arguments)
+                (setq called t)
+                (apply original arguments))))
+        (pcase case
+          ('custom-indent (setq-local indent-line-function #'ignore))
+          ('functional-indent
+           (setq-local lisp-indent-function (lambda (&rest _) 0)))
+          ('advice (advice-add 'lisp-indent-line :around wrapper)))
+        (unwind-protect
+            (multi-cursor-tests--with-bounded-elisp-indent
+              (should-error (command-execute 'indent-for-tab-command)
+                            :type 'user-error))
+          (when (eq case 'advice)
+            (advice-remove 'lisp-indent-line wrapper)))
+        (should-not called)
+        (should (equal (buffer-string) before))
+        (should (equal (multi-cursor--session-fingerprint) before-state))
+        (should (= (marker-position (multi-cursor--cursor-point cursor))
+                   secondary))))))
+
+(ert-deftest multi-cursor-tab-elisp-option-drift-and-hook-failure-roll-back ()
+  "Option changes and failing modification hooks leave no partial indentation."
+  (dolist (failure '(option hook))
+    (with-temp-buffer
+      (emacs-lisp-mode)
+      (insert "(progn\n(foo)\n(bar))")
+      (goto-char (point-min))
+      (forward-line 1)
+      (let* ((secondary (save-excursion (forward-line 1) (point)))
+             (id (multi-cursor-add-at-point secondary))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string))
+             (before-state (multi-cursor--session-fingerprint))
+             (after-change-functions
+              (when (eq failure 'option)
+                (list (lambda (&rest _) (setq-local lisp-indent-offset 4)))))
+             (before-change-functions
+              (when (eq failure 'hook)
+                (list (lambda (beg &rest _)
+                        (when (= beg (point))
+                          (error "Indent hook failed")))))))
+        (multi-cursor-tests--with-bounded-elisp-indent
+          (should-error (command-execute 'indent-for-tab-command)))
+        (should (equal (buffer-string) before))
+        (should (equal (multi-cursor--session-fingerprint) before-state))
+        (should (= (marker-position (multi-cursor--cursor-point cursor))
+                   secondary))
+        (when (eq failure 'option)
+          (should (= lisp-indent-offset 2)))))))
+
+(ert-deftest multi-cursor-tab-elisp-one-apply-history-undo-and-redo ()
+  "One Lisp TAB is one native edit and one active-session generation."
+  (with-temp-buffer
+    (buffer-enable-undo)
+    (emacs-lisp-mode)
+    (insert "(progn\n(foo)\n(bar))")
+    (undo-boundary)
+    (goto-char (point-min))
+    (forward-line 1)
+    (let* ((secondary (save-excursion (forward-line 1) (point)))
+           (id (multi-cursor-add-at-point secondary))
+           (cursor (multi-cursor-tests--cursor id))
+           (before-state (multi-cursor--session-fingerprint))
+           (command-history nil)
+           (apply-count 0)
+           (original-apply (symbol-function 'multi-cursor--apply-edits)))
+      (multi-cursor-tests--with-bounded-elisp-indent
+        (cl-letf (((symbol-function 'multi-cursor--apply-edits)
+                   (lambda (edits)
+                     (cl-incf apply-count)
+                     (funcall original-apply edits))))
+          (command-execute 'indent-for-tab-command t)))
+      (should (= apply-count 1))
+      (should (equal command-history '((indent-for-tab-command))))
+      (should (= (length multi-cursor--undo-generations) 1))
+      (should (equal (buffer-string) "(progn\n  (foo)\n  (bar))"))
+      (should (= (multi-cursor--cursor-id
+                  (multi-cursor-tests--cursor id))
+                 id))
+      (let ((after-state (multi-cursor--session-fingerprint)))
+        (command-execute 'undo)
+        (should (equal (buffer-string) "(progn\n(foo)\n(bar))"))
+        (should (equal (multi-cursor--session-fingerprint) before-state))
+        (command-execute 'undo-redo)
+        (should (equal (buffer-string) "(progn\n  (foo)\n  (bar))"))
+        (should (equal (multi-cursor--session-fingerprint) after-state))))))
+
+(ert-deftest multi-cursor-tab-elisp-already-correct-is-not-an-edit ()
+  "No-op Lisp TAB moves points as stock does without creating undo history."
+  (with-temp-buffer
+    (buffer-enable-undo)
+    (emacs-lisp-mode)
+    (insert "(progn\n  (foo)\n  (bar))")
+    (undo-boundary)
+    (goto-char (point-min))
+    (forward-line 1)
+    (let* ((primary (point))
+           (secondary (save-excursion (forward-line 1) (point)))
+           (states (list (list primary nil nil)
+                         (list secondary nil nil)))
+           (expected
+            (multi-cursor-tests--stock-elisp-indent-oracle
+             (buffer-string) states))
+           (id (multi-cursor-add-at-point secondary))
+           (cursor (multi-cursor-tests--cursor id))
+           (apply-count 0)
+           (original-apply (symbol-function 'multi-cursor--apply-edits)))
+      (multi-cursor-tests--with-bounded-elisp-indent
+        (cl-letf (((symbol-function 'multi-cursor--apply-edits)
+                   (lambda (edits)
+                     (cl-incf apply-count)
+                     (funcall original-apply edits))))
+          (command-execute 'indent-for-tab-command)))
+      (should (= apply-count 0))
+      (should-not multi-cursor--undo-generations)
+      (should (equal (buffer-string) "(progn\n  (foo)\n  (bar))"))
+      (should (equal (multi-cursor-tests--session-edit-state-positions)
+                     (nth 1 expected))))))
+
+(ert-deftest multi-cursor-tab-elisp-topology-hook-rolls-back-atomically ()
+  "A hook adding a cursor aborts and restores the original session exactly."
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(progn\n(foo)\n(bar))")
+    (goto-char (point-min))
+    (forward-line 1)
+    (let* ((secondary (save-excursion (forward-line 1) (point)))
+           (id (multi-cursor-add-at-point secondary))
+           (cursor (multi-cursor-tests--cursor id))
+           (before (buffer-string))
+           (before-state (multi-cursor--session-fingerprint))
+           (mutated nil)
+           (after-change-functions
+            (list (lambda (&rest _)
+                    (unless mutated
+                      (setq mutated t)
+                      (multi-cursor-add-at-point (point-max)))))))
+      (multi-cursor-tests--with-bounded-elisp-indent
+        (should-error (command-execute 'indent-for-tab-command)))
+      (should mutated)
+      (should (equal (buffer-string) before))
+      (should (equal (multi-cursor--session-fingerprint) before-state))
+      (should (= (multi-cursor--cursor-id
+                  (multi-cursor-tests--cursor id))
+                 id))
+      (should (= (marker-position (multi-cursor--cursor-point cursor))
+                 secondary)))))
+
+(ert-deftest multi-cursor-tab-elisp-restores-mutated-tab-and-abbrev-options ()
+  "Local and default TAB options cannot drift during a native transaction."
+  (dolist (mutation '(tab-local tab-default abbrev-local abbrev-default))
+    (let ((old-tab-default (default-value 'tab-always-indent))
+          (old-abbrev-default (default-value 'abbrev-mode)))
+      (unwind-protect
+          (with-temp-buffer
+            (emacs-lisp-mode)
+            (insert "(progn\n(foo)\n(bar))")
+            (goto-char (point-min))
+            (forward-line 1)
+            (let* ((secondary (save-excursion (forward-line 1) (point)))
+                   (id (multi-cursor-add-at-point secondary))
+                   (cursor (multi-cursor-tests--cursor id))
+                   (before (buffer-string))
+                   (before-state (multi-cursor--session-fingerprint))
+                   (mutated nil)
+                   (after-change-functions
+                    (list
+                     (lambda (&rest _)
+                       (unless mutated
+                         (setq mutated t)
+                         (pcase mutation
+                           ('tab-local (setq-local tab-always-indent nil))
+                           ('tab-default (setq-default tab-always-indent nil))
+                           ('abbrev-local (setq-local abbrev-mode t))
+                           ('abbrev-default (setq-default abbrev-mode t))))))))
+              (multi-cursor-tests--with-bounded-elisp-indent
+                (should-error (command-execute 'indent-for-tab-command)))
+              (should mutated)
+              (should (equal (buffer-string) before))
+              (should (equal (multi-cursor--session-fingerprint) before-state))
+              (should (= (marker-position (multi-cursor--cursor-point cursor))
+                         secondary))
+              (should (eq tab-always-indent t))
+              (should-not abbrev-mode)))
+        (setq-default tab-always-indent old-tab-default)
+        (setq-default abbrev-mode old-abbrev-default)))))
+
+(ert-deftest multi-cursor-tab-elisp-prefix-rewriting-hook-rolls-back ()
+  "A successful hook that changes planned indentation aborts the transaction."
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(progn\n(foo)\n(bar))")
+    (goto-char (point-min))
+    (forward-line 1)
+    (let* ((secondary (save-excursion (forward-line 1) (point)))
+           (id (multi-cursor-add-at-point secondary))
+           (cursor (multi-cursor-tests--cursor id))
+           (before (buffer-string))
+           (before-state (multi-cursor--session-fingerprint))
+           (rewritten nil)
+           (after-change-functions
+            (list
+             (lambda (beg end _old)
+               (unless rewritten
+                 (setq rewritten t)
+                 (save-excursion
+                   (goto-char beg)
+                   (delete-region beg end)
+                   (insert ">>")))))))
+      (multi-cursor-tests--with-bounded-elisp-indent
+        (should-error (command-execute 'indent-for-tab-command)))
+      (should rewritten)
+      (should (equal (buffer-string) before))
+      (should (equal (multi-cursor--session-fingerprint) before-state))
+      (should (= (marker-position (multi-cursor--cursor-point cursor))
+                 secondary)))))
+
+(ert-deftest multi-cursor-tab-elisp-field-boundary-in-prefix-rejects ()
+  "A field boundary in the replaced indentation is checked before editing."
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(progn\n (foo)\n (bar))")
+    (goto-char (point-min))
+    (forward-line 1)
+    (let* ((primary (point))
+           (secondary (save-excursion (forward-line 1) (point)))
+           (id (multi-cursor-add-at-point secondary))
+           (cursor (multi-cursor-tests--cursor id))
+           (before (buffer-string))
+           (before-state (multi-cursor--session-fingerprint))
+           (original-constrain (symbol-function 'constrain-to-field)))
+      ;; The leading space is the replacement range.  Model a field
+      ;; constraint that refuses to cross that range at either cursor.
+      (cl-letf (((symbol-function 'constrain-to-field)
+                 (lambda (new old &rest arguments)
+                   (if (memq old (list primary secondary))
+                       (1+ new)
+                     (apply original-constrain new old arguments)))))
+        (multi-cursor-tests--with-bounded-elisp-indent
+          (should-error (command-execute 'indent-for-tab-command)
+                        :type 'user-error)))
+      (should (equal (buffer-string) before))
+      (should (equal (multi-cursor--session-fingerprint) before-state))
+      (should (= (marker-position (multi-cursor--cursor-point cursor))
+                 secondary)))))
+
+(ert-deftest multi-cursor-tab-elisp-rejects-empty-active-regions ()
+  "Empty active regions retain region-TAB semantics and are never guessed."
+  (dolist (case '(primary secondary))
+    (with-temp-buffer
+      (emacs-lisp-mode)
+      (insert "(progn\n(foo)\n(bar))")
+      (goto-char (point-min))
+      (forward-line 1)
+      (let* ((primary (point))
+             (secondary (save-excursion (forward-line 1) (point)))
+             (id (if (eq case 'secondary)
+                     (multi-cursor-add-selection secondary secondary t)
+                   (multi-cursor-add-at-point secondary)))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string)))
+        (when (eq case 'primary)
+          (set-mark primary)
+          (activate-mark))
+        (let ((before-state (multi-cursor--session-fingerprint)))
+          (multi-cursor-tests--with-bounded-elisp-indent
+            (should-error (command-execute 'indent-for-tab-command)
+                          :type 'user-error))
+          (should (equal (buffer-string) before))
+          (should (equal (multi-cursor--session-fingerprint) before-state))
+          (should (= (marker-position (multi-cursor--cursor-point cursor))
+                     secondary)))))))
+
+(ert-deftest multi-cursor-tab-elisp-mixed-change-and-noop-is-one-generation ()
+  "Changed and already-correct lines share one exact undoable transaction."
+  (with-temp-buffer
+    (buffer-enable-undo)
+    (emacs-lisp-mode)
+    (insert "(progn\n(foo)\n  (bar))")
+    (undo-boundary)
+    (goto-char (point-min))
+    (forward-line 1)
+    (let* ((primary (point))
+           (secondary (save-excursion (forward-line 1) (point)))
+           (states (list (list primary nil nil)
+                         (list secondary nil nil)))
+           (expected
+            (multi-cursor-tests--stock-elisp-indent-oracle
+             (buffer-string) states))
+           (id (multi-cursor-add-at-point secondary))
+           (before-state (multi-cursor--session-fingerprint)))
+      (multi-cursor-tests--with-bounded-elisp-indent
+        (command-execute 'indent-for-tab-command))
+      (should (= (length multi-cursor--undo-generations) 1))
+      (should (equal (buffer-string) (nth 0 expected)))
+      (should (equal (multi-cursor-tests--session-edit-state-positions)
+                     (nth 1 expected)))
+      (let ((after-state (multi-cursor--session-fingerprint)))
+        (command-execute 'undo)
+        (should (equal (buffer-string) "(progn\n(foo)\n  (bar))"))
+        (should (equal (multi-cursor--session-fingerprint) before-state))
+        (command-execute 'undo-redo)
+        (should (equal (buffer-string) (nth 0 expected)))
+        (should (equal (multi-cursor--session-fingerprint) after-state))
+        (should (= (multi-cursor--cursor-id
+                    (multi-cursor-tests--cursor id))
+                   id))))))
+
 (provide 'multi-cursor-tests)
 
 ;;; multi-cursor-tests.el ends here

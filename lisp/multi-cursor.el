@@ -2295,8 +2295,241 @@ others."
        (- (* tab-width (1+ (/ column tab-width))) column)
        ?\s))))
 
+(defconst multi-cursor--elisp-indent-guarded-options
+  '(indent-tabs-mode tab-width tab-always-indent abbrev-mode
+    lisp-indent-offset lisp-body-indent
+    indent-line-function lisp-indent-function lisp-indent-local-overrides)
+  "Options which define the bounded Emacs Lisp indentation contract.")
+
+(defun multi-cursor--elisp-indent-option-state ()
+  "Capture effective, local, and default Lisp indentation option state."
+  (mapcar (lambda (variable)
+            (list variable (local-variable-p variable)
+                  (symbol-value variable) (default-value variable)))
+          multi-cursor--elisp-indent-guarded-options))
+
+(defun multi-cursor--elisp-indent-options-unchanged-p (state)
+  "Return non-nil when Lisp indentation option STATE is unchanged."
+  (cl-every
+   (lambda (entry)
+     (let ((variable (nth 0 entry)))
+       (and (eq (local-variable-p variable) (nth 1 entry))
+            (equal (symbol-value variable) (nth 2 entry))
+            (equal (default-value variable) (nth 3 entry)))))
+   state))
+
+(defun multi-cursor--restore-elisp-indent-option-state (state)
+  "Restore effective, local, and default Lisp indentation option STATE."
+  (dolist (entry state)
+    (let ((variable (nth 0 entry)))
+      (unless (equal (default-value variable) (nth 3 entry))
+        (set-default variable (nth 3 entry)))
+      (if (nth 1 entry)
+          (set (make-local-variable variable) (nth 2 entry))
+        (kill-local-variable variable)
+        (set variable (nth 2 entry))))))
+
+(defun multi-cursor--elisp-indent-line-info (state restriction)
+  "Return physical line information for STATE within RESTRICTION.
+
+The result is (BEG PREFIX-END).  Signal `user-error' if the cursor does not
+own a complete accessible physical line or the line needs semantics outside
+the bounded stock Lisp contract."
+  (let ((position (multi-cursor--edit-state-point state))
+        physical-beg physical-end prefix-end)
+    (unless (<= (car restriction) position (cdr restriction))
+      (user-error "Lisp indentation cursor is outside the accessible buffer"))
+    (save-restriction
+      (widen)
+      (save-excursion
+        (goto-char position)
+        (setq physical-beg (line-beginning-position)
+              physical-end (line-end-position))
+        (unless (and (<= (car restriction) physical-beg)
+                     (<= physical-end (cdr restriction)))
+          (user-error "Lisp indentation requires complete accessible lines"))
+        (goto-char physical-beg)
+        (skip-chars-forward " \t" physical-end)
+        (setq prefix-end (point))
+        (let ((ppss (syntax-ppss prefix-end)))
+          (when (or (nth 3 ppss) (nth 4 ppss)
+                    (eq (char-after prefix-end) ?\;)
+                    (eq (char-after prefix-end) ?\"))
+            (user-error
+             "Comment and string indentation is not multiple-cursor safe")))
+        (when (cl-some
+               (lambda (overlay)
+                 (or (overlay-get overlay 'read-only)
+                     (overlay-get overlay 'invisible)
+                     (overlay-get overlay 'display)))
+               (overlays-in physical-beg (max (1+ physical-beg) prefix-end)))
+          (user-error "Overlay-sensitive Lisp indentation is not supported"))))
+    (list physical-beg prefix-end)))
+
+(defun multi-cursor--elisp-indent-shadow-plan (states line-info)
+  "Return exact shadow-buffer indentation plan for STATES and LINE-INFO.
+
+The result is (PREFIXES PLANNED-STATES), where PREFIXES contains
+(ORIGINAL-BEG ORIGINAL-END STRING STATE) records in source order."
+  (let ((source-text
+         (save-restriction
+           (widen)
+           (buffer-substring (point-min) (point-max))))
+        (syntax (syntax-table))
+        (tabs indent-tabs-mode)
+        (width tab-width)
+        (offset lisp-indent-offset)
+        (body-indent lisp-body-indent)
+        records line-records)
+    (with-temp-buffer
+      (let ((emacs-lisp-mode-hook nil)
+            (change-major-mode-hook nil)
+            (after-change-major-mode-hook nil))
+        (emacs-lisp-mode))
+      (set-syntax-table syntax)
+      (insert source-text)
+      (setq-local indent-tabs-mode tabs
+                  tab-width width
+                  lisp-indent-offset offset
+                  lisp-body-indent body-indent
+                  indent-line-function #'lisp-indent-line
+                  lisp-indent-function #'lisp-indent-function
+                  lisp-indent-local-overrides nil
+                  before-change-functions nil
+                  after-change-functions nil)
+      (setq records
+            (cl-mapcar
+             (lambda (state info)
+               (list state (copy-marker (multi-cursor--edit-state-point state))
+                     (and (multi-cursor--edit-state-mark state)
+                          (copy-marker (multi-cursor--edit-state-mark state)))
+                     (copy-marker (car info))))
+             states line-info))
+      (setq line-records
+            (cl-mapcar
+             (lambda (state info)
+               (list (car info) (cadr info) state (copy-marker (car info))))
+             states line-info))
+      (unwind-protect
+          (progn
+            (dolist (record
+                     (sort (copy-sequence records)
+                           (lambda (left right)
+                             (< (marker-position (nth 1 left))
+                                (marker-position (nth 1 right))))))
+              (goto-char (marker-position (nth 1 record)))
+              (set-marker (mark-marker)
+                          (and (nth 2 record)
+                               (marker-position (nth 2 record))))
+              (setq mark-active (multi-cursor--edit-state-active (car record)))
+              (lisp-indent-line)
+              (set-marker (nth 1 record) (point)))
+            (let ((planned-states
+                   (mapcar
+                    (lambda (record)
+                      (let ((copy (copy-multi-cursor--edit-state (car record))))
+                        (setf (multi-cursor--edit-state-point copy)
+                              (marker-position (nth 1 record))
+                              (multi-cursor--edit-state-mark copy)
+                              (and (nth 2 record)
+                                   (marker-position (nth 2 record))))
+                        copy))
+                    records))
+                  prefixes)
+              (dolist (record line-records)
+                (goto-char (marker-position (nth 3 record)))
+                (let ((shadow-beg (point)))
+                  (skip-chars-forward " \t" (line-end-position))
+                  (push (list (nth 0 record) (nth 1 record)
+                              (buffer-substring shadow-beg (point))
+                              (nth 2 record))
+                        prefixes)))
+              (list (nreverse prefixes) planned-states (buffer-string))))
+        (dolist (record records)
+          (set-marker (nth 1 record) nil)
+          (when (nth 2 record) (set-marker (nth 2 record) nil)))
+        (dolist (record line-records)
+          (set-marker (nth 3 record) nil))))))
+
+(defun multi-cursor--elisp-indent (states record-flag)
+  "Indent stock Emacs Lisp cursor STATES as one native transaction.
+
+RECORD-FLAG controls the one command-history entry."
+  (unless (and (eq major-mode 'emacs-lisp-mode)
+               (eq indent-line-function #'lisp-indent-line)
+               (eq lisp-indent-function #'lisp-indent-function)
+               (null lisp-indent-local-overrides)
+               (integerp lisp-indent-offset)
+               (not (and (fboundp 'advice--p)
+                         (or (advice--p (symbol-function 'lisp-indent-line))
+                             (advice--p (symbol-function 'lisp-indent-function))))))
+    (user-error "This Lisp indentation configuration is not multiple-cursor safe"))
+  (let* ((restriction (cons (point-min) (point-max)))
+         (line-info (mapcar (lambda (state)
+                              (multi-cursor--elisp-indent-line-info
+                               state restriction))
+                            states))
+         (line-starts (mapcar #'car line-info)))
+    (unless (= (length line-starts)
+               (length (delete-dups (copy-sequence line-starts))))
+      (user-error "Multiple Lisp cursors on one physical line are unsupported"))
+    (let* ((option-state (multi-cursor--elisp-indent-option-state))
+           (original-cursors (copy-sequence multi-cursor--cursors))
+           (original-next-id multi-cursor--next-id)
+           (plan (multi-cursor--elisp-indent-shadow-plan states line-info))
+           (prefixes (car plan))
+           (planned-states (cadr plan))
+           (planned-text (nth 2 plan))
+           (edits
+            (delq
+             nil
+             (mapcar
+              (lambda (record)
+                (unless (equal (buffer-substring-no-properties
+                                (nth 0 record) (nth 1 record))
+                               (nth 2 record))
+                  (multi-cursor--preflight-edit-range
+                   (nth 0 record) (nth 1 record)
+                   (nth 0 record) (nth 1 record))
+                  (multi-cursor--edit-create
+                   :beg (nth 0 record) :end (nth 1 record)
+                   :string (nth 2 record) :survivor (nth 3 record)
+                   :members (list (nth 3 record)))))
+              prefixes)))
+           (groups (multi-cursor--merge-edits edits t))
+           completed)
+      (unwind-protect
+          (progn
+            (if groups
+                (multi-cursor--apply-edit-transaction
+                 states groups
+                 (lambda (_edits _positions _states)
+                   (unless (multi-cursor--elisp-indent-options-unchanged-p
+                            option-state)
+                     (error "Lisp indentation options changed during editing"))
+                   (unless (multi-cursor--same-cursor-objects-p
+                            original-cursors original-next-id)
+                     (error "Lisp indentation changed the cursor session"))
+                   (unless
+                       (equal
+                        (save-restriction (widen) (buffer-string))
+                        planned-text)
+                     (error "Lisp indentation hooks changed the planned text"))
+                   (multi-cursor--restore-edit-states
+                    planned-states original-cursors original-next-id)))
+              (unless (multi-cursor--elisp-indent-options-unchanged-p
+                       option-state)
+                (error "Lisp indentation options changed during planning"))
+              (multi-cursor--restore-edit-states
+               planned-states original-cursors original-next-id))
+            (setq completed t))
+        (unless completed
+          (multi-cursor--restore-elisp-indent-option-state option-state)))
+      (when record-flag
+        (add-to-history 'command-history '(indent-for-tab-command) nil t)))))
+
 (defun multi-cursor--literal-tab-handler
-    (command prefix _keys _record-flag _special)
+    (command prefix _keys record-flag _special)
   "Batch the literal insertion branch of `indent-for-tab-command'.
 
 This supports only cases in which every cursor takes Emacs's literal
@@ -2315,40 +2548,42 @@ single-cursor semantics instead of being guessed at for each native cursor."
               (and (integerp tab-width) (> tab-width 0)))
     (user-error "TAB width is not multiple-cursor safe"))
   (let* ((states (multi-cursor--snapshot-edit-states))
-         (option-state (multi-cursor--literal-tab-option-state))
-         (completed nil))
+         (literal-states (mapcar #'multi-cursor--literal-tab-state-p states)))
     (when (cl-some #'multi-cursor--literal-tab-selection-p states)
       (user-error "TAB with an active selection is not multiple-cursor safe"))
-    (unless (cl-every #'multi-cursor--literal-tab-state-p states)
-      (user-error "This TAB indentation branch is not multiple-cursor safe"))
-    (unwind-protect
-        (progn
-          (let ((groups
-                 (multi-cursor--merge-edits
-                  (mapcar
-                   (lambda (state)
-                     (let ((position (multi-cursor--edit-state-point state)))
-                       (multi-cursor--preflight-edit-range
-                        position position position position)
-                       (multi-cursor--edit-create
-                        :beg position :end position
-                        :string (multi-cursor--literal-tab-string state)
-                        :survivor state :members (list state))))
-                   states))))
-            (multi-cursor--apply-edit-transaction
-             states groups
-             (lambda (edits positions edit-states)
-               ;; An after-change hook can modify a TAB option between
-               ;; planning and installation.  Reject it while the central
-               ;; change group can still restore text and cursor state.
-               (unless
-                   (multi-cursor--literal-tab-options-unchanged-p option-state)
-                 (error "TAB options changed during multiple-cursor edit"))
-               (multi-cursor--install-edit-results
-                edits positions edit-states)))
-            (setq completed t)))
-      (unless completed
-        (multi-cursor--restore-literal-tab-option-state option-state)))))
+    (cond
+     ((cl-every #'identity literal-states)
+      (let ((option-state (multi-cursor--literal-tab-option-state))
+            completed)
+        (unwind-protect
+            (progn
+              (let ((groups
+                     (multi-cursor--merge-edits
+                      (mapcar
+                       (lambda (state)
+                         (let ((position (multi-cursor--edit-state-point state)))
+                           (multi-cursor--preflight-edit-range
+                            position position position position)
+                           (multi-cursor--edit-create
+                            :beg position :end position
+                            :string (multi-cursor--literal-tab-string state)
+                            :survivor state :members (list state))))
+                       states))))
+                (multi-cursor--apply-edit-transaction
+                 states groups
+                 (lambda (edits positions edit-states)
+                   (unless
+                       (multi-cursor--literal-tab-options-unchanged-p option-state)
+                     (error "TAB options changed during multiple-cursor edit"))
+                   (multi-cursor--install-edit-results
+                    edits positions edit-states)))
+                (setq completed t)))
+          (unless completed
+            (multi-cursor--restore-literal-tab-option-state option-state)))))
+     ((cl-some #'identity literal-states)
+      (user-error "Mixed literal and indentation TAB branches are unsupported"))
+     (t
+      (multi-cursor--elisp-indent states record-flag)))))
 
 (defun multi-cursor--newline-post-hook-safe-p (hook)
   "Return non-nil when HOOK contains only stock newline-inert entries."

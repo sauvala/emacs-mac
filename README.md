@@ -229,8 +229,11 @@ Fill prefixes, margins, hard newlines, translated input, active selections,
 and ambiguous property contexts remain fail-closed.
 `TAB` supports the literal `insert-tab` branch when every cursor would take
 that branch, including per-cursor tab-stop spacing when `indent-tabs-mode` is
-disabled. Region indentation, completion, abbrev expansion, prefixes, and
-mixed literal/indentation branches remain fail-closed.
+disabled. It also supports bounded Emacs Lisp line indentation with an integer
+`lisp-indent-offset`; targets are simulated in source order before their
+whitespace replacements are applied atomically. Region indentation,
+comments/strings, custom indentation callbacks, completion, abbrev expansion,
+prefixes, and mixed literal/indentation branches remain fail-closed.
 Arrow commands preserve
 per-cursor bidi and goal-column behavior, but visual-order horizontal arrows
 and display-line vertical arrows remain unsupported because they require live
