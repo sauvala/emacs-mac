@@ -2209,8 +2209,10 @@
     (should (eq (key-binding (kbd "TAB")) 'indent-for-tab-command))
     (should-not (gethash 'electric-newline-and-maybe-indent
                          multi-cursor--command-policies))
-    (should-not (gethash 'indent-for-tab-command
-                         multi-cursor--command-policies))
+    (let ((tab-entry (gethash 'indent-for-tab-command
+                              multi-cursor--command-policies)))
+      (should (eq (car tab-entry) 'custom-handler))
+      (should (functionp (cdr tab-entry))))
     (insert "ab\ncd")
     (goto-char 2)
     (let* ((id (multi-cursor-add-at-point 5))
@@ -2224,8 +2226,7 @@
                  7)))))
 
 (ert-deftest multi-cursor-edit-newline-unknown-keys-reject-atomically ()
-  (dolist (command '(electric-newline-and-maybe-indent
-                     indent-for-tab-command))
+  (dolist (command '(electric-newline-and-maybe-indent))
     (with-temp-buffer
       (insert "abcd")
       (goto-char 2)
@@ -4472,6 +4473,271 @@
       (should-error (command-execute 'yank-pop) :type 'user-error)
       (should (equal (buffer-string) before))
       (should (equal kill-ring '("new" "old"))))))
+
+;;;; Bounded literal TAB insertion
+
+(ert-deftest multi-cursor-tab-literal-inserts-tabs-at-mixed-columns ()
+  "TAB broadcasts literal tab insertion when every cursor takes that branch."
+  (with-temp-buffer
+    (insert "ab\ncdef")
+    (setq-local indent-tabs-mode t)
+    (setq-local tab-always-indent nil)
+    (setq-local indent-line-function #'indent-to-left-margin)
+    (goto-char 2)
+    (let* ((id (multi-cursor-add-at-point 7))
+           (cursor (multi-cursor-tests--cursor id)))
+      (command-execute 'indent-for-tab-command)
+      (should (equal (buffer-string) "a\tb\ncde\tf"))
+      (should (= (point) 3))
+      (should (= (marker-position (multi-cursor--cursor-point cursor)) 9)))))
+
+(ert-deftest multi-cursor-tab-literal-tabs-ignore-invalid-tab-width ()
+  "Literal tabs do not consult `tab-width', as vanilla `insert-tab' does."
+  (dolist (width '(0 not-an-integer))
+    ;; `tab-width' has an interactive custom setter which rejects symbols;
+    ;; dynamic binding deliberately exercises `insert-tab' itself, which does
+    ;; not consult the value when `indent-tabs-mode' is non-nil.
+    (let ((tab-width width))
+      (with-temp-buffer
+        (insert "ab\ncdef")
+        (setq-local indent-tabs-mode t)
+        (setq-local tab-always-indent nil)
+        (setq-local indent-line-function #'indent-to-left-margin)
+        (goto-char 2)
+        (let* ((id (multi-cursor-add-at-point 7))
+               (cursor (multi-cursor-tests--cursor id)))
+          (command-execute 'indent-for-tab-command)
+          (should (equal (buffer-string) "a\tb\ncde\tf"))
+          (should (= (point) 3))
+          (should (= (marker-position (multi-cursor--cursor-point cursor))
+                     9)))))))
+
+(ert-deftest multi-cursor-tab-literal-inserts-spaces-at-mixed-columns ()
+  "Space TAB mode advances each cursor to its own next tab stop."
+  (with-temp-buffer
+    (insert "ab\ncdef")
+    (setq-local indent-tabs-mode nil)
+    (setq-local tab-always-indent nil)
+    (setq-local tab-width 4)
+    (setq-local indent-line-function #'indent-to-left-margin)
+    (goto-char 2)
+    (let* ((id (multi-cursor-add-at-point 7))
+           (cursor (multi-cursor-tests--cursor id)))
+      (command-execute 'indent-for-tab-command)
+      (should (equal (buffer-string) "a   b\ncde f"))
+      (should (= (point) 5))
+      (should (= (marker-position (multi-cursor--cursor-point cursor)) 11)))))
+
+(ert-deftest multi-cursor-tab-literal-after-indentation-uses-indent-relative ()
+  "TAB inserts literally after indentation without calling `indent-relative'."
+  (with-temp-buffer
+    ;; These are ordinary indented lines, not the special
+    ;; `indent-to-left-margin' case.  Both points are strictly after their
+    ;; line indentation, which selects `insert-tab' with
+    ;; `tab-always-indent' nil.
+    (insert "  alpha\n    beta")
+    (setq-local indent-tabs-mode nil)
+    (setq-local tab-always-indent nil)
+    (setq-local tab-width 4)
+    (setq-local indent-line-function #'indent-relative)
+    (goto-char 5)
+    (let* ((id (multi-cursor-add-at-point 15))
+           (cursor (multi-cursor-tests--cursor id)))
+      (command-execute 'indent-for-tab-command)
+      (should (equal (buffer-string) "  al    pha\n    be  ta"))
+      (should (= (point) 9))
+      (should (= (marker-position (multi-cursor--cursor-point cursor)) 21)))))
+
+(ert-deftest multi-cursor-tab-literal-rejects-mixed-indentation-contexts ()
+  "TAB rejects atomically when any cursor would indent rather than insert."
+  (with-temp-buffer
+    (insert "  alpha\n    beta")
+    (setq-local indent-tabs-mode nil)
+    (setq-local tab-always-indent nil)
+    (setq-local tab-width 4)
+    (setq-local indent-line-function #'indent-relative)
+    ;; The primary point is after indentation, but the secondary point is
+    ;; within its line's indentation.  Native batching must not guess how to
+    ;; combine literal insertion with `indent-relative'.
+    (goto-char 5)
+    (let* ((id (multi-cursor-add-at-point 11))
+           (cursor (multi-cursor-tests--cursor id))
+           (before (buffer-string))
+           (before-state (multi-cursor--session-fingerprint))
+           ;; `command-execute' is below the ordinary command loop, so bind
+           ;; its command-loop state explicitly rather than inherit a prior
+           ;; ERT command's `last-command'.
+           (this-command 'indent-for-tab-command)
+           (last-command 'other-window))
+      (should-error (command-execute 'indent-for-tab-command) :type 'user-error)
+      (should (equal (buffer-string) before))
+      (should (equal (multi-cursor--session-fingerprint) before-state))
+      (should (= (point) 5))
+      (should (= (marker-position (multi-cursor--cursor-point cursor)) 11)))))
+
+(ert-deftest multi-cursor-tab-literal-consecutive-tab-allows-indent-relative ()
+  "A consecutive TAB uses the literal branch even within indentation."
+  (with-temp-buffer
+    (insert "    alpha\n  beta")
+    (setq-local indent-tabs-mode nil)
+    (setq-local tab-always-indent nil)
+    (setq-local tab-width 4)
+    (setq-local indent-line-function #'indent-relative)
+    ;; Both points are within their line indentation.  `last-command' makes
+    ;; this command the second TAB, selecting the explicit consecutive-TAB
+    ;; `insert-tab' arm in `indent-for-tab-command'.
+    (goto-char 2)
+    (let* ((id (multi-cursor-add-at-point 12))
+           (cursor (multi-cursor-tests--cursor id))
+           (this-command 'indent-for-tab-command)
+           (last-command 'indent-for-tab-command))
+      (command-execute 'indent-for-tab-command)
+      (should (equal (buffer-string) "       alpha\n     beta"))
+      (should (= (point) 5))
+      (should (= (marker-position (multi-cursor--cursor-point cursor)) 18)))))
+
+(ert-deftest multi-cursor-tab-literal-rejects-unsafe-contexts-atomically ()
+  "TAB refuses branches with semantics that cannot be modeled natively."
+  (dolist (condition '(prefix primary-selection secondary-selection abbrev
+                               completion custom-indent))
+    (with-temp-buffer
+      (insert "ab\ncdef")
+      (setq-local indent-tabs-mode nil)
+      (setq-local tab-always-indent nil)
+      (setq-local indent-line-function #'indent-to-left-margin)
+      (goto-char 2)
+      (let* ((id (multi-cursor-add-at-point 7))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string))
+             (prefix-arg (and (eq condition 'prefix) 1))
+             (abbrev-mode (eq condition 'abbrev)))
+        (pcase condition
+          ('primary-selection
+           (set-mark 1)
+           (activate-mark))
+          ('secondary-selection
+           (setf (multi-cursor--cursor-mark cursor) (copy-marker 5))
+           (setf (multi-cursor--cursor-mark-active cursor) t))
+          ('completion
+           (setq-local tab-always-indent 'complete))
+          ('custom-indent
+           (setq-local indent-line-function #'ignore)
+           (setq-local tab-always-indent t)))
+        (let ((before-state (multi-cursor--session-fingerprint)))
+          (should-error (command-execute 'indent-for-tab-command) :type 'user-error)
+          (should (equal (buffer-string) before))
+          (should (equal (multi-cursor--session-fingerprint) before-state)))))))
+
+(ert-deftest multi-cursor-tab-literal-rejects-minibuffer-atomically ()
+  "TAB is never broadcast from a minibuffer session."
+  (let ((minibuffer (window-buffer (minibuffer-window))))
+    (with-current-buffer minibuffer
+      (erase-buffer)
+      (insert "abcd")
+      (goto-char 2)
+      (multi-cursor-add-at-point 4)
+      (let ((before (buffer-string))
+            (before-state (multi-cursor--session-fingerprint)))
+        (should (minibufferp))
+        (should-error (command-execute 'indent-for-tab-command) :type 'user-error)
+        (should (equal (buffer-string) before))
+        (should (equal (multi-cursor--session-fingerprint) before-state))))))
+
+(ert-deftest multi-cursor-tab-literal-preflight-rejects-unsafe-insertions ()
+  "Read-only buffers and inaccessible cursors abort TAB before any edit."
+  (dolist (gate '(buffer-read-only inaccessible-secondary))
+    (with-temp-buffer
+      (insert "alpha beta gamma")
+      (setq-local indent-tabs-mode t)
+      (setq-local tab-always-indent nil)
+      (setq-local indent-line-function #'indent-to-left-margin)
+      (goto-char 2)
+      (let* ((id (multi-cursor-add-at-point 12))
+             (cursor (multi-cursor-tests--cursor id)))
+        (pcase gate
+          ('buffer-read-only
+           (setq buffer-read-only t))
+          ('inaccessible-secondary
+           ;; The session's post-command cleanup would release this cursor
+           ;; after a completed narrowing command.  Invoke TAB immediately
+           ;; so the central range preflight must reject its inaccessible
+           ;; insertion point without changing either cursor.
+           (narrow-to-region 1 8)))
+        (let ((before (buffer-string))
+              (before-state (multi-cursor--session-fingerprint)))
+          (should-error (command-execute 'indent-for-tab-command))
+          (should (equal (buffer-string) before))
+          (should (equal (multi-cursor--session-fingerprint) before-state))
+          (should (= (point) 2))
+          (should (= (marker-position (multi-cursor--cursor-point cursor))
+                     12)))))))
+
+(ert-deftest multi-cursor-tab-literal-option-drift-rolls-back-atomically ()
+  "Changing TAB options during the transaction leaves text and cursors intact."
+  (with-temp-buffer
+    (insert "ab\ncdef")
+    (setq-local indent-tabs-mode nil)
+    (setq-local tab-always-indent nil)
+    (setq-local tab-width 4)
+    (setq-local indent-line-function #'indent-to-left-margin)
+    (goto-char 2)
+    (let* ((id (multi-cursor-add-at-point 7))
+           (cursor (multi-cursor-tests--cursor id))
+           (before (buffer-string))
+           (before-state (multi-cursor--session-fingerprint))
+           (after-change-functions
+            (list (lambda (&rest _)
+                    (setq-local tab-width 8)))))
+      (should-error (command-execute 'indent-for-tab-command))
+      (should (equal (buffer-string) before))
+      (should (equal (multi-cursor--session-fingerprint) before-state))
+      (should (= (marker-position (multi-cursor--cursor-point cursor)) 7)))))
+
+(ert-deftest multi-cursor-tab-literal-default-drift-rolls-back-atomically ()
+  "A failed TAB transaction restores guarded process-wide defaults."
+  (let ((original-default (default-value 'tab-width)))
+    (unwind-protect
+        (with-temp-buffer
+          (insert "ab\ncdef")
+          (setq-local indent-tabs-mode nil)
+          (setq-local tab-always-indent nil)
+          (setq-local tab-width 4)
+          (setq-local indent-line-function #'indent-to-left-margin)
+          (goto-char 2)
+          (multi-cursor-add-at-point 7)
+          (let ((before (buffer-string))
+                (before-state (multi-cursor--session-fingerprint))
+                (after-change-functions
+                 (list (lambda (&rest _)
+                         (setq-default tab-width (1+ original-default))))))
+            (should-error (command-execute 'indent-for-tab-command))
+            (should (equal (buffer-string) before))
+            (should (equal (multi-cursor--session-fingerprint) before-state))
+            (should (equal (default-value 'tab-width) original-default))))
+      (setq-default tab-width original-default))))
+
+(ert-deftest multi-cursor-tab-literal-uses-one-apply-and-undo-generation ()
+  "A literal TAB command is one native transaction and session generation."
+  (with-temp-buffer
+    (buffer-enable-undo)
+    (insert "ab\ncdef")
+    (undo-boundary)
+    (setq-local indent-tabs-mode nil)
+    (setq-local tab-always-indent nil)
+    (setq-local tab-width 4)
+    (setq-local indent-line-function #'indent-to-left-margin)
+    (goto-char 2)
+    (multi-cursor-add-at-point 7)
+    (let ((apply-count 0)
+          (original-apply (symbol-function 'multi-cursor--apply-edits)))
+      (cl-letf (((symbol-function 'multi-cursor--apply-edits)
+                 (lambda (edits)
+                   (cl-incf apply-count)
+                   (funcall original-apply edits))))
+        (command-execute 'indent-for-tab-command))
+      (should (= apply-count 1))
+      (should (= (length multi-cursor--undo-generations) 1))
+      (should (equal (buffer-string) "a   b\ncde f")))))
 
 (ert-deftest multi-cursor-undo-multiple-generations-are-lifo-and-redo-fifo ()
   "Two active-session edits undo and redo one generation at a time."

@@ -222,6 +222,10 @@ unsupported. Plain `RET` is supported when newline side effects such as
 electric indentation, auto-fill, abbrevs, hard newlines, left margins, custom
 insertion hooks, input translation, adjacent text properties, overwrite mode,
 prefixes, and active selections are absent.
+`TAB` supports the literal `insert-tab` branch when every cursor would take
+that branch, including per-cursor tab-stop spacing when `indent-tabs-mode` is
+disabled. Region indentation, completion, abbrev expansion, prefixes, and
+mixed literal/indentation branches remain fail-closed.
 Arrow commands preserve
 per-cursor bidi and goal-column behavior, but visual-order horizontal arrows
 and display-line vertical arrows remain unsupported because they require live

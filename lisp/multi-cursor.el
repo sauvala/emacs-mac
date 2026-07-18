@@ -2083,6 +2083,135 @@ history."
          (list command argument))
        nil t))))
 
+(defconst multi-cursor--literal-tab-guarded-options
+  '(indent-tabs-mode tab-width tab-always-indent indent-line-function
+    abbrev-mode)
+  "Options which select the literal branch of `indent-for-tab-command'.")
+
+(defun multi-cursor--literal-tab-option-state ()
+  "Return the buffer-local values which make literal TAB safe to batch.
+
+The locality bit matters: an after-change hook that makes an option local can
+silently change later TAB behavior even when its value currently agrees with
+the global default.  Keep that default too, since a hook may change it while
+this buffer has no local binding."
+  (mapcar (lambda (variable)
+            (list variable
+                  (local-variable-p variable)
+                  (symbol-value variable)
+                  (default-value variable)))
+          multi-cursor--literal-tab-guarded-options))
+
+(defun multi-cursor--literal-tab-options-unchanged-p (state)
+  "Return non-nil when literal TAB option STATE still matches this buffer."
+  (cl-every
+   (lambda (entry)
+     (and (eq (local-variable-p (nth 0 entry)) (nth 1 entry))
+          (equal (symbol-value (nth 0 entry)) (nth 2 entry))
+          (equal (default-value (nth 0 entry)) (nth 3 entry))))
+   state))
+
+(defun multi-cursor--restore-literal-tab-option-state (state)
+  "Restore literal TAB option STATE after an aborted native transaction."
+  (dolist (entry state)
+    (let ((variable (nth 0 entry))
+          (localp (nth 1 entry))
+          (value (nth 2 entry))
+          (default (nth 3 entry)))
+      (set-default variable default)
+      (if localp
+          (set (make-local-variable variable) value)
+        (kill-local-variable variable)))))
+
+(defun multi-cursor--literal-tab-selection-p (state)
+  "Return non-nil if STATE has an active selection.
+
+The bounded literal TAB handler deliberately does not model region
+indentation, even for an empty active region."
+  (and (multi-cursor--edit-state-active state)
+       (multi-cursor--edit-state-mark state)))
+
+(defun multi-cursor--literal-tab-state-p (state)
+  "Return non-nil when ordinary TAB takes its literal branch for STATE.
+
+This is the branch predicate from `indent-for-tab-command'.  Evaluate it at
+every saved cursor position before starting the transaction: accepting a
+literal TAB at only some cursors would incorrectly run indentation at the
+others."
+  (or (eq indent-line-function #'indent-to-left-margin)
+      (and (null tab-always-indent)
+           (or (eq this-command last-command)
+               (save-excursion
+                 (goto-char (multi-cursor--edit-state-point state))
+                 (> (current-column) (current-indentation)))))))
+
+(defun multi-cursor--literal-tab-string (state)
+  "Return the exact `insert-tab' text for STATE with no prefix argument."
+  (if indent-tabs-mode
+      "\t"
+    (let ((column
+           (save-excursion
+             (goto-char (multi-cursor--edit-state-point state))
+             (current-column))))
+      (make-string
+       (- (* tab-width (1+ (/ column tab-width))) column)
+       ?\s))))
+
+(defun multi-cursor--literal-tab-handler
+    (command prefix _keys _record-flag _special)
+  "Batch the literal insertion branch of `indent-for-tab-command'.
+
+This supports only cases in which every cursor takes Emacs's literal
+insertion branch.  Prefix indentation, regions, abbrev expansion, completion,
+and any cursor which would run an indentation function retain their ordinary
+single-cursor semantics instead of being guessed at for each native cursor."
+  (unless (eq command 'indent-for-tab-command)
+    (error "Invalid multiple-cursor literal TAB command: %S" command))
+  (when prefix
+    (user-error "Prefix TAB is not multiple-cursor safe"))
+  (when (minibufferp (current-buffer))
+    (user-error "TAB is not multiple-cursor safe in the minibuffer"))
+  (when (or abbrev-mode (eq tab-always-indent 'complete))
+    (user-error "This TAB completion or abbrev branch is not multiple-cursor safe"))
+  (unless (or indent-tabs-mode
+              (and (integerp tab-width) (> tab-width 0)))
+    (user-error "TAB width is not multiple-cursor safe"))
+  (let* ((states (multi-cursor--snapshot-edit-states))
+         (option-state (multi-cursor--literal-tab-option-state))
+         (completed nil))
+    (when (cl-some #'multi-cursor--literal-tab-selection-p states)
+      (user-error "TAB with an active selection is not multiple-cursor safe"))
+    (unless (cl-every #'multi-cursor--literal-tab-state-p states)
+      (user-error "This TAB indentation branch is not multiple-cursor safe"))
+    (unwind-protect
+        (progn
+          (let ((groups
+                 (multi-cursor--merge-edits
+                  (mapcar
+                   (lambda (state)
+                     (let ((position (multi-cursor--edit-state-point state)))
+                       (multi-cursor--preflight-edit-range
+                        position position position position)
+                       (multi-cursor--edit-create
+                        :beg position :end position
+                        :string (multi-cursor--literal-tab-string state)
+                        :survivor state :members (list state))))
+                   states))))
+            (multi-cursor--apply-edit-transaction
+             states groups
+             (lambda (edits positions edit-states)
+               ;; An after-change hook can modify a TAB option between
+               ;; planning and installation.  Reject it while the central
+               ;; change group can still restore text and cursor state.
+               (unless
+                   (multi-cursor--literal-tab-options-unchanged-p option-state)
+                 (error "TAB options changed during multiple-cursor edit"))
+               (multi-cursor--install-edit-results
+                edits positions edit-states)))
+            (setq completed t)))
+      (unless completed
+        (multi-cursor--restore-literal-tab-option-state option-state)))))
+
 (defun multi-cursor--newline-post-hook-safe-p (hook)
   "Return non-nil when HOOK contains only stock newline-inert entries."
   (and (proper-list-p hook)
@@ -3161,6 +3290,9 @@ created.  This mode refuses to start while the external
   (multi-cursor-register-command command 'batch-edit #'multi-cursor--batch-edit))
 
 (multi-cursor-register-command 'newline 'batch-edit #'multi-cursor--newline)
+
+(multi-cursor-register-command
+ 'indent-for-tab-command 'custom-handler #'multi-cursor--literal-tab-handler)
 
 (dolist (command '(delete-backward-char delete-forward-char))
   (multi-cursor-register-command

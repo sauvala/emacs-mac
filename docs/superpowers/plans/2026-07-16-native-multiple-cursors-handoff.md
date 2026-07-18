@@ -19,8 +19,8 @@ enable a planned feature or remove measured overhead.
   `/Users/janne/Projects/emacs-mac/.worktrees/native-multiple-cursors`
 - Branch: `codex/native-multiple-cursors`
 - Remote tracking branch: `fork/codex/native-multiple-cursors`
-- Latest completed commit at handoff: `ee8038954d2`
-  (`Preserve nested electric option references`)
+- Latest completed commit before the current TAB slice: `8d0eebf8081`
+  (`Support undo during multiple-cursor sessions`)
 - Expected starting state: clean and synchronized with the fork branch.
 - Publish with:
 
@@ -57,6 +57,10 @@ slices:
   `backward-delete-char-untabify` modes;
 - transactional kill, copy, and yank;
 - transactional raw and bounded stock-relative electric `newline`/RET paths;
+- active-session undo/redo with exact cursor-state restoration and stale-history
+  rejection;
+- bounded `indent-for-tab-command` support whenever every cursor takes Emacs's
+  literal `insert-tab` branch;
 - immutable redisplay snapshots, native Mac caret painting, active secondary
   selections, and overlay fallback on non-native displays;
 - threshold-free scalability benchmarks, manual fixtures, user/Elisp
@@ -79,10 +83,12 @@ The latest compatibility and Return commits are:
 - `0787be52ba8` single after-change/composition signaling in rope buffers;
 - `c70182d7d19` through `ee8038954d2` exact guarded-option, mark, binding,
   alias, and dead-buffer restoration.
+- `8d0eebf8081` active-session transactional undo and redo.
 
-At handoff, the combined Lisp/C ERT command passed **212/213** tests on the
-non-rope build; the one guarded rope test skipped because
-`buffer-enable-rope` was unavailable.  Source invariants passed **25/25**.
+After the undo slice, the combined Lisp/C ERT command passed **222/222** tests
+on the rope-enabled build. Source invariants passed **31/31**. The TAB slice
+adds its own focused regression matrix; rerun the combined counts rather than
+assuming these reference numbers remain current.
 Treat those counts as useful references, not permanent assertions; new tests
 should increase them.
 
@@ -299,11 +305,11 @@ bounded native handlers.  Likely candidates include `open-line`,
 `newline-and-indent`, word deletion, case conversion, transpose operations,
 and comment commands, but prioritize by usefulness and implementation risk.
 
-Separately design undo/redo during an active session.  Decide and test how a
-transaction restores cursor positions, selections, direction, goal columns,
-and yank metadata.  Do not merely allow ordinary `undo` while cursor records
-silently drift.  Preserve one undo unit per broadcast edit and test undo/redo
-across overlapping selections, killed cursors, narrowing, and failed hooks.
+Active-session undo/redo now restores cursor positions, selections, direction,
+goal columns, and yank metadata one session generation at a time. Remaining
+undo work is compatibility hardening: exercise narrowing changes, more command
+types, long sessions, and interactive command-loop use without weakening the
+stale-history boundary.
 
 ### 4. Run and record GUI performance baselines
 
