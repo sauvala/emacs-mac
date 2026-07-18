@@ -215,7 +215,8 @@ for example:
 Creation commands enable `multi-cursor-mode` automatically. Typing, raw
 `delete-char`, ordinary Backspace, grapheme-aware forward Delete without
 prefix arguments, the vetted logical movement commands, ordinary arrow and
-directional word movement, kill/copy, and yank are supported. Backspace also
+directional word movement, kill/copy, syntax-aware forward and backward word
+killing, and yank are supported. Backspace also
 supports the ordinary `backward-delete-char-untabify` modes (`nil`,
 `untabify`, `hungry`, and `all`). Prefix and overwrite-mode Backspace remain
 unsupported. Plain `RET` is supported when newline side effects such as

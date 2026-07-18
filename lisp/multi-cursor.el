@@ -1754,6 +1754,144 @@ preflight; the returned edit groups merge overlaps for a single deletion."
          (groups (multi-cursor--merge-edits edits)))
     (cons groups text)))
 
+(defun multi-cursor--original-edit-payload (edits)
+  "Return the stable, pre-transaction kill payload for EDITS.
+
+Every original cursor range contributes its filtered text, including a range
+which overlaps another cursor's range.  The batch primitive must instead see
+the merged ranges, but the kill ring must not depend on which overlapping
+cursor happened to survive that merge."
+  (mapconcat
+   (lambda (edit)
+     (or (filter-buffer-substring
+          (multi-cursor--edit-beg edit)
+          (multi-cursor--edit-end edit))
+         ""))
+   (sort
+    (copy-sequence edits)
+    (lambda (left right)
+      (let ((left-beg (multi-cursor--edit-beg left))
+            (right-beg (multi-cursor--edit-beg right))
+            (left-end (multi-cursor--edit-end left))
+            (right-end (multi-cursor--edit-end right))
+            (left-id
+             (multi-cursor--edit-state-id
+              (multi-cursor--edit-survivor left)))
+            (right-id
+             (multi-cursor--edit-state-id
+              (multi-cursor--edit-survivor right))))
+        (or (< left-beg right-beg)
+            (and (= left-beg right-beg)
+                 (or (< left-id right-id)
+                     (and (= left-id right-id)
+                          (< left-end right-end))))))))
+   ""))
+
+(defun multi-cursor--word-kill-state-edit (state argument)
+  "Return the `forward-word' deletion planned for STATE and ARGUMENT.
+
+The ordinary word movement is evaluated only while planning, with STATE's
+point restored afterwards.  This lets every cursor derive its range from the
+same original buffer rather than from an earlier cursor's deletion."
+  (let* ((point (multi-cursor--edit-state-point state))
+         (target
+          (save-excursion
+            (goto-char point)
+            (forward-word argument)
+            (point)))
+         (beg (min point target))
+         (end (max point target)))
+    (multi-cursor--preflight-edit-range beg end point target)
+    (multi-cursor--edit-create
+     :beg beg :end end :string "" :survivor state :members (list state))))
+
+(defun multi-cursor--word-kill
+    (command prefix _keys record-flag _special)
+  "Kill a snapshotted word range for every native cursor.
+
+COMMAND is `kill-word' or `backward-kill-word'.  All `forward-word' ranges
+are planned from the original cursor snapshots, then overlapping deletions
+are merged for one native edit transaction.  Kill-ring and clipboard effects
+are deferred until that transaction has committed."
+  (unless (memq command '(kill-word backward-kill-word))
+    (error "Invalid multiple-cursor word kill: %S" command))
+  ;; The ordinary `kill-region' calls its filter with DELETE non-nil.
+  ;; A custom filter can therefore own deletion as well as transformation;
+  ;; extracting it first and deleting later would either diverge or delete
+  ;; twice.  Emacs's normal default is `buffer-substring--filter' (rather
+  ;; than nil), so admit just that stock implementation and the nil path.
+  (unless (memq filter-buffer-substring-function
+                '(nil buffer-substring--filter))
+    (user-error
+     "Custom filter-buffer-substring is not multiple-cursor safe"))
+  (let* ((argument (prefix-numeric-value prefix))
+         (word-argument
+          (if (eq command 'backward-kill-word) (- argument) argument))
+         (states (multi-cursor--snapshot-edit-states))
+         (original-cursors (copy-sequence multi-cursor--cursors))
+         (original-next-id multi-cursor--next-id)
+         (ring-state (multi-cursor--kill-ring-state))
+         before-p edits groups payload export completed)
+    (unwind-protect
+        (progn
+          ;; `forward-word' may invoke syntax-propertization or mode Lisp.
+          ;; Keep its effects inside an abortable change group and refuse any
+          ;; callback that changes text, narrowing, or cursor session state.
+          (save-current-buffer
+            (save-restriction
+              (atomic-change-group
+                (let ((context (multi-cursor--callback-context)))
+                  (setq edits
+                        (mapcar
+                         (lambda (state)
+                           (save-excursion
+                             (multi-cursor--word-kill-state-edit
+                              state word-argument)))
+                         states)
+                        payload (multi-cursor--original-edit-payload edits)
+                        ;; `kill-region' decides append direction from its
+                        ;; actual primary endpoints, not merely the prefix
+                        ;; sign.  At an accessible boundary a negative word
+                        ;; movement is a zero-length kill and has no backward
+                        ;; endpoint to prepend.
+                        before-p
+                        (< (multi-cursor--edit-beg (car edits))
+                           (multi-cursor--edit-state-point (car states))))
+                  (multi-cursor--validate-callback-state context)
+                  (setq groups (multi-cursor--merge-edits edits))))))
+          (multi-cursor--apply-edit-transaction
+           states groups
+           (lambda (edit-groups positions edit-states)
+             ;; A kill transform may run arbitrary Lisp.  Store the payload
+             ;; while the central change group can still cancel the text edit;
+             ;; postpone the irreversible clipboard callback until afterward.
+             (let ((context (multi-cursor--callback-context)))
+               (setq export
+                     (multi-cursor--store-kill payload before-p))
+               (multi-cursor--validate-callback-state context)
+               (multi-cursor--install-edit-results
+                edit-groups positions edit-states))))
+          (setq completed t))
+      (unless completed
+        (multi-cursor--restore-kill-ring-state ring-state)
+        (multi-cursor--restore-edit-states
+         states original-cursors original-next-id)
+        (unless multi-cursor-mode
+          (setq multi-cursor-mode t)
+          (multi-cursor--start))))
+    ;; This is intentionally `kill-region', matching the ordinary helper
+    ;; called by both word-kill commands.  Consecutive word kills therefore
+    ;; append to a single kill-ring entry regardless of their key binding.
+    (setq this-command 'kill-region
+          deactivate-mark t)
+    (when record-flag
+      (add-to-history 'command-history (list command argument) nil t))
+    ;; External effects must happen only after text, cursor, and kill-ring
+    ;; state are known to be committed successfully.
+    (when (car export)
+      (funcall (car export) (cadr export)))
+    nil))
+
 (defun multi-cursor--store-kill (string before-p)
   "Store STRING once, appending before the last kill when BEFORE-P.
 
@@ -3304,6 +3442,10 @@ created.  This mode refuses to start while the external
 (dolist (command '(kill-region copy-region-as-kill kill-ring-save))
   (multi-cursor-register-command
    command 'custom-handler #'multi-cursor--kill-or-copy))
+
+(dolist (command '(kill-word backward-kill-word))
+  (multi-cursor-register-command
+   command 'custom-handler #'multi-cursor--word-kill))
 
 (multi-cursor-register-command 'yank 'batch-edit #'multi-cursor--yank)
 

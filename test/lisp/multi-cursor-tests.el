@@ -4274,6 +4274,306 @@
       (should (multi-cursor--cursor-mark-active
                (car multi-cursor--cursors))))))
 
+(ert-deftest multi-cursor-word-kill-policy-and-stock-bindings ()
+  "Word-kill commands are dispatched by bounded native handlers."
+  (dolist (command '(kill-word backward-kill-word))
+    (should (eq (car (gethash command multi-cursor--command-policies))
+                'custom-handler)))
+  ;; These ordinary bindings are the entry points users exercise.  The
+  ;; dispatcher must recognize their commands rather than replaying them.
+  (should (eq (key-binding (kbd "M-d")) 'kill-word))
+  (should (eq (key-binding (kbd "M-DEL")) 'backward-kill-word)))
+
+(ert-deftest multi-cursor-word-kill-forward-and-backward-use-word-ranges ()
+  "Forward and backward commands delete their individual word ranges once."
+  (dolist (command-and-positions
+           '((kill-word 1 6)
+             (backward-kill-word 4 9)))
+    (pcase-let ((`(,command ,primary ,secondary) command-and-positions))
+      (with-temp-buffer
+        (insert "one--two  three")
+        (goto-char primary)
+        (multi-cursor-add-at-point secondary)
+        (let ((kill-ring nil)
+              (kill-ring-yank-pointer nil)
+              (last-command 'unrelated)
+              (interprogram-cut-function nil))
+          (command-execute command)
+          (should (equal (buffer-string) "--  three"))
+          ;; Payload order follows original buffer order, not cursor order or
+          ;; the direction in which individual ranges were traversed.
+          (should (equal kill-ring '("onetwo"))))))))
+
+(ert-deftest multi-cursor-word-kill-honors-signed-and-zero-prefixes ()
+  "Word-kill accepts numeric prefix arguments, including zero."
+  (dolist (case '((kill-word 2 1 7 " " "aa bbcc dd")
+                  (kill-word -1 6 12 "aa  cc " "bbdd")
+                  (backward-kill-word -1 1 7 " bb  dd" "aacc")
+                  (backward-kill-word 1 6 12 "aa  cc " "bbdd")))
+    (pcase-let ((`(,command ,argument ,primary ,secondary ,expected ,killed)
+                 case))
+      (with-temp-buffer
+        (insert "aa bb cc dd")
+        (goto-char primary)
+        (multi-cursor-add-at-point secondary)
+        (let ((kill-ring nil)
+              (kill-ring-yank-pointer nil)
+              (last-command 'unrelated)
+              (interprogram-cut-function nil))
+          (let ((prefix-arg argument))
+            (command-execute command))
+          (should (equal (buffer-string) expected))
+          (should (equal kill-ring (list killed)))))))
+  (with-temp-buffer
+    (insert "aa bb cc")
+    (goto-char 1)
+    (multi-cursor-add-at-point 7)
+    (let ((before (buffer-string))
+          (kill-ring '("old"))
+          (kill-ring-yank-pointer nil)
+          (command-history nil)
+          (cut-calls 0))
+      (let ((interprogram-cut-function
+             (lambda (text &optional _push)
+               (should (equal text ""))
+               (cl-incf cut-calls))))
+        (let ((prefix-arg 0))
+          (command-execute 'kill-word t)))
+      (should (equal (buffer-string) before))
+      ;; Stock `kill-word' delegates zero to `kill-region', which publishes
+      ;; one empty kill.  It is observable to the kill ring and clipboard.
+      (should (equal kill-ring '("" "old")))
+      (should (eq this-command 'kill-region))
+      ;; It is still a real interactive command even though every planned
+      ;; range is empty, so replay history retains its explicit zero prefix.
+      (should (equal command-history '((kill-word 0))))
+      (should (= cut-calls 1)))))
+
+(ert-deftest multi-cursor-word-kill-all-boundary-publishes-one-empty-kill ()
+  "An all-empty stock word kill updates the kill ring and clipboard once."
+  (with-temp-buffer
+    (insert "alpha")
+    (goto-char (point-max))
+    ;; An enabled session with its primary at EOB has only empty planned
+    ;; ranges; no duplicate secondary cursor is necessary.
+    (multi-cursor-mode 1)
+    (let ((kill-ring '("old"))
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (cut-calls 0))
+      (let ((interprogram-cut-function
+             (lambda (text &optional _push)
+               (should (equal text ""))
+               (cl-incf cut-calls))))
+        (command-execute 'kill-word))
+      (should (equal (buffer-string) "alpha"))
+      (should (equal kill-ring '("" "old")))
+      (should (eq this-command 'kill-region))
+      (should (= cut-calls 1)))))
+
+(ert-deftest multi-cursor-word-kill-mixed-boundary-is-a-per-cursor-no-op ()
+  "A cursor at a word-motion boundary does not prevent the other kills."
+  (with-temp-buffer
+    (insert "alpha beta")
+    (goto-char 1)
+    (multi-cursor-add-at-point (point-max))
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (interprogram-cut-function nil))
+      (command-execute 'kill-word)
+      (should (equal (buffer-string) " beta"))
+      (should (equal kill-ring '("alpha"))))))
+
+(ert-deftest multi-cursor-word-kill-ignores-and-deactivates-regions ()
+  "Word killing starts at point even when every cursor has an active region."
+  (with-temp-buffer
+    (insert "alpha beta gamma delta")
+    (goto-char 1)
+    (set-mark 11)
+    (activate-mark)
+    (multi-cursor-add-selection 18 12 t)
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (interprogram-cut-function nil))
+      (command-execute 'kill-word)
+      (should (equal (buffer-string) " beta gamma "))
+      (should (equal kill-ring '("alphadelta")))
+      (should-not mark-active)
+      (should-not (multi-cursor--cursor-mark-active
+                   (car multi-cursor--cursors))))))
+
+(ert-deftest multi-cursor-word-kill-respects-subword-boundaries ()
+  "The bounded handler uses ordinary `forward-word' semantics, including subword."
+  (skip-unless (fboundp 'subword-mode))
+  (with-temp-buffer
+    (insert "camelCase otherThing")
+    (goto-char 1)
+    (multi-cursor-add-at-point 11)
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (interprogram-cut-function nil))
+      (subword-mode 1)
+      (command-execute 'kill-word)
+      (should (equal (buffer-string) "Case Thing"))
+      (should (equal kill-ring '("camelother"))))))
+
+(ert-deftest multi-cursor-word-kill-preserves-overlap-payload-in-buffer-order ()
+  "Overlapping word ranges contribute original payloads but delete their union."
+  (with-temp-buffer
+    (insert "alphabet")
+    (goto-char 3)
+    ;; Add the earlier point afterwards to ensure sorting is by source range.
+    (multi-cursor-add-at-point 1)
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (interprogram-cut-function nil))
+      (command-execute 'kill-word)
+      (should (equal (buffer-string) ""))
+      (should (equal kill-ring '("alphabetphabet"))))))
+
+(ert-deftest multi-cursor-word-kill-overlap-appends-by-primary-direction ()
+  "An earlier overlapping secondary cursor cannot reverse a forward append."
+  (with-temp-buffer
+    (insert "alphabet")
+    ;; The primary range starts later, but it is still a forward `kill-word'.
+    (goto-char 3)
+    (multi-cursor-add-at-point 1)
+    (let ((kill-ring (list (copy-sequence "OLD")))
+          (kill-ring-yank-pointer nil)
+          (last-command 'kill-region)
+          (interprogram-cut-function nil))
+      (command-execute 'kill-word)
+      (should (equal (buffer-string) ""))
+      (should (equal kill-ring '("OLDalphabetphabet"))))))
+
+(ert-deftest multi-cursor-word-kill-rejects-custom-filter-atomically ()
+  "A custom substring filter is rejected before it can affect kill payloads."
+  (with-temp-buffer
+    (insert "alpha beta gamma")
+    (goto-char 1)
+    (let* ((id (multi-cursor-add-at-point 12))
+           (cursor (multi-cursor-tests--cursor id))
+           (before (buffer-string))
+           (old-entry (copy-sequence "old"))
+           (kill-ring (list old-entry))
+           (kill-ring-yank-pointer kill-ring)
+           (old-pointer kill-ring-yank-pointer)
+           (filter-calls 0)
+           (cut-calls 0)
+           (last-command 'unrelated)
+           (filter-buffer-substring-function
+            (lambda (&rest _arguments)
+              (cl-incf filter-calls)
+              "filtered"))
+           (interprogram-cut-function
+            (lambda (&rest _arguments)
+              (cl-incf cut-calls))))
+      (should-error (command-execute 'kill-word) :type 'user-error)
+      (should (equal (buffer-string) before))
+      (should (equal kill-ring (list old-entry)))
+      (should (eq kill-ring-yank-pointer old-pointer))
+      (should (= filter-calls 0))
+      (should (= cut-calls 0))
+      (should multi-cursor-mode)
+      (should (= (point) 1))
+      (should (= (marker-position (multi-cursor--cursor-point cursor)) 12)))))
+
+(ert-deftest multi-cursor-word-kill-appends-and-prepends-by-primary-direction ()
+  "Successive word kills follow the ordinary `kill-region' merge direction."
+  (dolist (case '((kill-word 1 4 "OLDaabb")
+                  (backward-kill-word 6 12 "bbddOLD")))
+    (pcase-let ((`(,command ,primary ,secondary ,expected) case))
+      (with-temp-buffer
+        (insert "aa bb cc dd")
+        (goto-char primary)
+        (multi-cursor-add-at-point secondary)
+        (let ((kill-ring (list (copy-sequence "OLD")))
+              (kill-ring-yank-pointer nil)
+              ;; A following ordinary kill observes this exact command tag.
+              (last-command 'kill-region)
+              (interprogram-cut-function nil))
+          (command-execute command)
+          (should (equal kill-ring (list expected))))))))
+
+(ert-deftest multi-cursor-word-kill-failures-are-atomic-before-publication ()
+  "Preflight, hook, and kill-transform failures leave all native state intact."
+  (dolist (failure '(read-only hook transform))
+    (with-temp-buffer
+      (insert "alpha beta gamma")
+      (goto-char 1)
+      (let* ((id (multi-cursor-add-at-point 12))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string))
+             (kill-ring '("old"))
+             (kill-ring-yank-pointer kill-ring)
+             (cut-calls 0)
+             (last-command 'unrelated)
+             (before-change-functions
+              (when (eq failure 'hook)
+                (list (lambda (_beg _end) (error "word-kill hook failed")))))
+             (kill-transform-function
+              (when (eq failure 'transform)
+                (lambda (_text) (error "word-kill transform failed"))))
+             (interprogram-cut-function
+              (lambda (&rest _) (cl-incf cut-calls))))
+        (when (eq failure 'read-only)
+          (put-text-property 12 17 'read-only t))
+        (should-error (command-execute 'kill-word))
+        (should (equal (buffer-string) before))
+        (should (equal kill-ring '("old")))
+        (should (= cut-calls 0))
+        (should (= (point) 1))
+        (should (= (marker-position (multi-cursor--cursor-point cursor)) 12))))))
+
+(ert-deftest multi-cursor-word-kill-exports-once-after-commit ()
+  "The clipboard is notified once, only after the central transaction succeeds."
+  (with-temp-buffer
+    (insert "alpha beta gamma")
+    (goto-char 1)
+    (multi-cursor-add-at-point 12)
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (observed nil))
+      (let ((interprogram-cut-function
+             (lambda (text &optional _push)
+               (push (cons text (buffer-string)) observed))))
+        (command-execute 'kill-word))
+      (should (equal kill-ring '("alphagamma")))
+      (should (equal observed '(("alphagamma" . " beta ")))))))
+
+(ert-deftest multi-cursor-word-kill-one-apply-history-undo-and-redo ()
+  "One word-kill invocation is one transaction, history entry, and generation."
+  (with-temp-buffer
+    (buffer-enable-undo)
+    (insert "alpha beta gamma")
+    (undo-boundary)
+    (goto-char 1)
+    (multi-cursor-add-at-point 12)
+    (let ((command-history nil)
+          (kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (interprogram-cut-function nil)
+          (apply-count 0)
+          (original-apply (symbol-function 'multi-cursor--apply-edits)))
+      (cl-letf (((symbol-function 'multi-cursor--apply-edits)
+                 (lambda (edits)
+                   (cl-incf apply-count)
+                   (funcall original-apply edits))))
+        (command-execute 'kill-word t))
+      (should (= apply-count 1))
+      (should (equal command-history '((kill-word 1))))
+      (should (equal (buffer-string) " beta "))
+      (command-execute 'undo)
+      (should (equal (buffer-string) "alpha beta gamma"))
+      (command-execute 'undo-redo)
+      (should (equal (buffer-string) " beta ")))))
+
 (ert-deftest multi-cursor-region-bounds-callback-mutation-rolls-back ()
   (dolist (mutation '(primary secondary buffer))
     (with-temp-buffer
