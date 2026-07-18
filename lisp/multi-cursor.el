@@ -72,11 +72,29 @@ operation before changing the buffer or cursor session."
                (:constructor multi-cursor--edit-create))
   beg end string survivor members)
 
+(cl-defstruct (multi-cursor--undo-generation
+               (:constructor multi-cursor--undo-generation-create))
+  "One session-owned ordinary undo generation.
+
+The text change itself remains entirely in `buffer-undo-list'.  This record
+only associates its two ordinary undo states with the corresponding native
+cursor snapshots and the invariants needed to reject stale history."
+  before-states before-cursors before-next-id before-restriction
+  before-tick before-undo-list
+  after-states after-cursors after-next-id after-restriction
+  after-tick after-undo-list)
+
 (defvar-local multi-cursor--cursors nil
   "Secondary cursor records owned by the current buffer.")
 
 (defvar-local multi-cursor--next-id 0
   "Next secondary cursor identifier in the current buffer.")
+
+(defvar-local multi-cursor--undo-generations nil
+  "Session-owned edit generations which may be undone.")
+
+(defvar-local multi-cursor--redo-generations nil
+  "Session-owned edit generations which may be redone.")
 
 (defvar-local multi-cursor--redisplay-snapshot nil
   "Last immutable snapshot built for redisplay in the current buffer.")
@@ -1014,6 +1032,210 @@ command has no global binding by default."
             (multi-cursor--cursor-last-yank cursor)
             (multi-cursor--edit-state-last-yank state)))))
 
+(defun multi-cursor--same-cursor-objects-p (cursors next-id)
+  "Return non-nil when the current session owns CURSORS and NEXT-ID.
+
+This deliberately compares object identity rather than cursor positions.  A
+normal movement between an edit and undo is harmless: undo still restores the
+recorded generation.  Adding, removing, or replacing a cursor, however,
+makes the generation unsafe to replay."
+  (and (= multi-cursor--next-id next-id)
+       (= (length multi-cursor--cursors) (length cursors))
+       (cl-every #'eq multi-cursor--cursors cursors)))
+
+(defun multi-cursor--undo-list-head (undo-list)
+  "Return UNDO-LIST after harmless leading ordinary undo boundaries."
+  (while (and (consp undo-list) (null (car undo-list)))
+    (setq undo-list (cdr undo-list)))
+  undo-list)
+
+(defun multi-cursor--generation-current-p (generation side)
+  "Return non-nil when GENERATION's SIDE is safe to replay.
+
+SIDE is `before' or `after'.  The character-change tick, restriction, cursor
+ownership, and undo-list head together prevent a session undo from consuming
+ordinary edits or history that did not originate in this session."
+  (let ((before-p (eq side 'before)))
+    (and (= (buffer-chars-modified-tick)
+            (if before-p
+                (multi-cursor--undo-generation-before-tick generation)
+              (multi-cursor--undo-generation-after-tick generation)))
+         (equal (cons (point-min) (point-max))
+                (if before-p
+                    (multi-cursor--undo-generation-before-restriction
+                     generation)
+                  (multi-cursor--undo-generation-after-restriction
+                   generation)))
+         (eq (multi-cursor--undo-list-head buffer-undo-list)
+             (multi-cursor--undo-list-head
+              (if before-p
+                  (multi-cursor--undo-generation-before-undo-list generation)
+                (multi-cursor--undo-generation-after-undo-list generation))))
+         (multi-cursor--same-cursor-objects-p
+          (if before-p
+              (multi-cursor--undo-generation-before-cursors generation)
+            (multi-cursor--undo-generation-after-cursors generation))
+          (if before-p
+              (multi-cursor--undo-generation-before-next-id generation)
+            (multi-cursor--undo-generation-after-next-id generation))))))
+
+(defun multi-cursor--record-undo-generation
+    (states cursors next-id restriction before-tick)
+  "Record a completed text transaction for active-session undo.
+
+STATES, CURSORS, NEXT-ID, RESTRICTION, and BEFORE-TICK describe the state
+before the transaction.  This function is called only after the transaction's
+change group has been accepted.  A transaction which made no text change has
+no ordinary undo generation and is intentionally not recorded."
+  (let ((after-tick (buffer-chars-modified-tick)))
+    (when (/= before-tick after-tick)
+      (push
+       (multi-cursor--undo-generation-create
+        :before-states states
+        :before-cursors cursors
+        :before-next-id next-id
+        :before-restriction restriction
+        :before-tick before-tick
+        :before-undo-list nil
+        :after-states (multi-cursor--snapshot-edit-states)
+        :after-cursors (copy-sequence multi-cursor--cursors)
+        :after-next-id multi-cursor--next-id
+        :after-restriction (cons (point-min) (point-max))
+        :after-tick after-tick
+        :after-undo-list buffer-undo-list)
+       multi-cursor--undo-generations)
+      ;; A new ordinary edit makes every previous redo branch invalid.
+      (setq multi-cursor--redo-generations nil))))
+
+(defun multi-cursor--refresh-generation-side (generation side)
+  "Refresh GENERATION's SIDE anchors from the current ordinary undo state."
+  (if (eq side 'before)
+      (setf (multi-cursor--undo-generation-before-tick generation)
+            (buffer-chars-modified-tick)
+            (multi-cursor--undo-generation-before-undo-list generation)
+            buffer-undo-list)
+    (setf (multi-cursor--undo-generation-after-tick generation)
+          (buffer-chars-modified-tick)
+          (multi-cursor--undo-generation-after-undo-list generation)
+          buffer-undo-list)))
+
+(defun multi-cursor--restore-generation-side (generation side)
+  "Restore GENERATION's cursor snapshot for SIDE after ordinary undo work."
+  (if (eq side 'before)
+      (multi-cursor--restore-edit-states
+       (multi-cursor--undo-generation-before-states generation)
+       (multi-cursor--undo-generation-before-cursors generation)
+       (multi-cursor--undo-generation-before-next-id generation))
+    (multi-cursor--restore-edit-states
+     (multi-cursor--undo-generation-after-states generation)
+     (multi-cursor--undo-generation-after-cursors generation)
+     (multi-cursor--undo-generation-after-next-id generation))))
+
+(defun multi-cursor--generation-replay-safe-p (generation side)
+  "Signal `user-error' unless GENERATION's SIDE is the current session state."
+  (unless (multi-cursor--generation-current-p generation side)
+    (user-error
+     "Multiple-cursor undo history is stale after text, narrowing, or cursor changes")))
+
+(defun multi-cursor--run-ordinary-session-history-command (redo-p)
+  "Run one ordinary session undo or redo, selected by REDO-P.
+
+The `undo' command is deliberately dispatched through `undo-only' here.
+Within a multiple-cursor session, the command must always travel toward the
+older session generation rather than opportunistically toggling into redo.
+Leading undo boundaries are ordinary command-loop bookkeeping and are handled
+  by `multi-cursor--generation-current-p'."
+  (let ((mark-active nil)
+        (last-command
+         (if (and (not redo-p) multi-cursor--redo-generations)
+             'undo
+           last-command)))
+    (funcall (if redo-p #'undo-redo #'undo-only) 1)
+    ;; Ordinary undo records its inverse edits without a boundary.  Keep each
+    ;; session generation distinct for a later `undo-redo'.
+    (unless redo-p
+      (undo-boundary))))
+
+(defun multi-cursor--session-undo
+    (command prefix _keys _record-flag _special)
+  "Run session-owned COMMAND undo or redo without cursor-state drift.
+
+PREFIX accepts only one generation, because each invocation must first let
+the ordinary undo machinery apply precisely one recorded transaction."
+  (unless (memq command '(undo undo-only undo-redo))
+    (error "Invalid multiple-cursor undo command: %S" command))
+  (unless (or (null prefix) (equal prefix 1))
+    (user-error "Multiple-cursor undo accepts one generation at a time"))
+  (let* ((redo-p (eq command 'undo-redo))
+         (stack (if redo-p multi-cursor--redo-generations
+                  multi-cursor--undo-generations))
+         (generation (car stack))
+         (from-side (if redo-p 'before 'after))
+         (to-side (if redo-p 'after 'before)))
+    (unless generation
+      (user-error "No session-owned multiple-cursor %s history"
+                  (if redo-p "redo" "undo")))
+    (multi-cursor--generation-replay-safe-p generation from-side)
+    ;; Do not let an active primary region turn this into ordinary
+    ;; undo-in-region: a session generation must always be all-or-nothing.
+    (let (ordinary-completed completed)
+      (unwind-protect
+          (progn
+            ;; The standard command remains the authority for text and undo
+            ;; bookkeeping.  Cursor records are restored only after it wins.
+            ;; `command-execute' is also used directly by tests and Lisp
+            ;; callers, where it does not advance `last-command'.
+            (multi-cursor--run-ordinary-session-history-command redo-p)
+            (setq ordinary-completed t)
+            (unless (equal (cons (point-min) (point-max))
+                           (if (eq to-side 'before)
+                               (multi-cursor--undo-generation-before-restriction
+                                generation)
+                             (multi-cursor--undo-generation-after-restriction
+                              generation)))
+              (error "Ordinary undo changed the buffer restriction"))
+            (unless
+                (multi-cursor--same-cursor-objects-p
+                 (if (eq from-side 'before)
+                     (multi-cursor--undo-generation-before-cursors generation)
+                   (multi-cursor--undo-generation-after-cursors generation))
+                 (if (eq from-side 'before)
+                     (multi-cursor--undo-generation-before-next-id generation)
+                   (multi-cursor--undo-generation-after-next-id generation)))
+              (error "Ordinary undo changed the cursor session"))
+            (multi-cursor--restore-generation-side generation to-side)
+            (multi-cursor--refresh-generation-side generation to-side)
+            (if redo-p
+                (progn
+                  (setq multi-cursor--redo-generations (cdr stack))
+                  (push generation multi-cursor--undo-generations)
+                  ;; The next redo starts where this one ended.
+                  (when multi-cursor--redo-generations
+                    (multi-cursor--refresh-generation-side
+                     (car multi-cursor--redo-generations) 'before)))
+              (setq multi-cursor--undo-generations (cdr stack))
+              (push generation multi-cursor--redo-generations)
+              ;; The next undo starts where this one ended.
+              (when multi-cursor--undo-generations
+                (multi-cursor--refresh-generation-side
+                 (car multi-cursor--undo-generations) 'after)))
+            (setq completed t))
+        ;; If an unexpected post-undo check fails, reverse the ordinary text
+        ;; operation before leaving the generation stacks untouched.  Thus a
+        ;; failure cannot strand changed text beside stale session history.
+        (unless completed
+          (when ordinary-completed
+            (condition-case rollback-error
+                (progn
+                  (multi-cursor--run-ordinary-session-history-command
+                   (not redo-p))
+                  (multi-cursor--restore-generation-side generation from-side)
+                  (multi-cursor--refresh-generation-side generation from-side))
+              (error
+               (error "Multiple-cursor undo rollback failed: %S"
+                      rollback-error))))
+          (setq multi-cursor--redisplay-snapshot-dirty-p t))))))
+
 (defun multi-cursor--detach-edit-markers (states)
   "Detach the markers represented by edit STATES before changing text."
   (set-marker (mark-marker) nil)
@@ -1391,6 +1613,7 @@ vector."
          (original-next-id multi-cursor--next-id)
          (buffer (current-buffer))
          (restriction (cons (point-min) (point-max)))
+         (before-tick (buffer-chars-modified-tick))
          (vector
           (vconcat
            (mapcar (lambda (edit)
@@ -1448,6 +1671,14 @@ vector."
             (set-buffer buffer)
             (multi-cursor--restore-edit-states
              states original-cursors original-next-id)))))
+    (when (and completed
+               (/= before-tick (buffer-chars-modified-tick)))
+      ;; `accept-change-group' keeps the transaction atomic but does not add
+      ;; a following boundary.  Add the ordinary boundary here so one session
+      ;; undo never falls through into edits that predate the session.
+      (undo-boundary)
+      (multi-cursor--record-undo-generation
+       states original-cursors original-next-id restriction before-tick))
     positions))
 
 (defun multi-cursor--kill-ring-state ()
@@ -2840,6 +3071,8 @@ session."
   (mapc #'multi-cursor--release-cursor multi-cursor--cursors)
   (setq multi-cursor--cursors nil
         multi-cursor--next-id 0
+        multi-cursor--undo-generations nil
+        multi-cursor--redo-generations nil
         multi-cursor--redisplay-snapshot nil
         multi-cursor--redisplay-snapshot-tick nil
         multi-cursor--redisplay-snapshot-dirty-p t)
@@ -2856,6 +3089,10 @@ session."
     (setq-local multi-cursor--cursors nil))
   (unless (local-variable-p 'multi-cursor--next-id)
     (setq-local multi-cursor--next-id 0))
+  (unless (local-variable-p 'multi-cursor--undo-generations)
+    (setq-local multi-cursor--undo-generations nil))
+  (unless (local-variable-p 'multi-cursor--redo-generations)
+    (setq-local multi-cursor--redo-generations nil))
   (setq multi-cursor--redisplay-snapshot-dirty-p t)
   (add-hook 'kill-buffer-hook #'multi-cursor--end-session nil t)
   (add-hook 'before-revert-hook #'multi-cursor--end-session nil t)
@@ -2938,14 +3175,18 @@ created.  This mode refuses to start while the external
 
 (multi-cursor-register-command 'yank 'batch-edit #'multi-cursor--yank)
 
-(dolist (command '(undo undo-only undo-redo
-                   execute-extended-command execute-kbd-macro
+(dolist (command '(execute-extended-command execute-kbd-macro
                    isearch-forward isearch-backward
                    query-replace query-replace-regexp
                    beginning-of-visual-line end-of-visual-line
                    yank-pop))
   (when (commandp command)
     (multi-cursor-register-command command 'unsupported)))
+
+(dolist (command '(undo undo-only undo-redo))
+  (when (commandp command)
+    (multi-cursor-register-command command 'custom-handler
+                                   #'multi-cursor--session-undo)))
 
 (multi-cursor-register-command
  'keyboard-quit 'custom-handler #'multi-cursor--keyboard-quit)

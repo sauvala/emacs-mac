@@ -229,8 +229,12 @@ glyph geometry for every cursor.
 Text edits use one atomic transaction, movements stage all cursor states
 before committing them, and copy publishes its combined text once. Commands
 are fail-closed: unsupported or unregistered commands signal before editing.
+Undo and redo operate one session-owned edit generation at a time and restore
+the corresponding primary and secondary cursor state.  They fail closed rather
+than crossing edits made outside the session or history predating the session;
+prefix arguments other than one are not yet supported.
 Current limitations include
-undo/redo during a session, keyboard macros, isearch, query replace,
+keyboard macros, isearch, query replace,
 visual-line movement, nonlinear regions, custom yank handlers, and `yank-pop`.
 The mode refuses to start while the external `multiple-cursors` package's
 `multiple-cursors-mode` is active; do not enable both modes in one buffer.
