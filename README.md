@@ -240,6 +240,12 @@ indents every resulting line in source order before applying the complete
 plan atomically. Active selections, multiple cursors on one line, comments or
 strings, custom indentation, auto-fill, abbrevs, margins, protected text, and
 partial-line narrowing remain fail-closed.
+`yank-pop` can replace every range produced by the immediately preceding
+native yank or yank-pop. The kill ring rotates once for the whole cursor set,
+positive and negative numeric arguments follow stock Emacs semantics, and the
+replacement is one transaction and undo generation. A changed buffer,
+restriction, cursor topology, protected range, custom yank handler, or unsafe
+property callback rejects the pop atomically.
 Arrow commands preserve
 per-cursor bidi and goal-column behavior, but visual-order horizontal arrows
 and display-line vertical arrows remain unsupported because they require live
@@ -253,7 +259,7 @@ than crossing edits made outside the session or history predating the session;
 prefix arguments other than one are not yet supported.
 Current limitations include
 keyboard macros, isearch, query replace,
-visual-line movement, nonlinear regions, custom yank handlers, and `yank-pop`.
+visual-line movement, nonlinear regions, and custom yank handlers.
 The mode refuses to start while the external `multiple-cursors` package's
 `multiple-cursors-mode` is active; do not enable both modes in one buffer.
 `C-g` deactivates selections when any are active and otherwise ends the

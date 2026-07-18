@@ -92,6 +92,34 @@ assuming these reference numbers remain current.
 Treat those counts as useful references, not permanent assertions; new tests
 should increase them.
 
+### 2026-07-19 daily-editing checkpoint
+
+The prioritized daily-editing expansion is complete.  The branch now also
+contains transactional syntax-aware `kill-word` and `backward-kill-word`, a
+bounded literal `open-line`, literal and bounded stock Emacs Lisp TAB paths,
+bounded stock Emacs Lisp `newline-and-indent`, and transactional `yank-pop`.
+The completed commits before the yank-pop slice are:
+
+- `376e6332b5e` word killing;
+- `047a3beec59` open line;
+- `832d7980d9b` Emacs Lisp TAB indentation;
+- `fe523655a02` newline and indent.
+
+`yank-pop` is deliberately bounded to the immediately preceding native yank
+or yank-pop.  It records the exact merged ranges, restriction, modification
+tick, cursor object identities, and orientation; rotates the ordinary kill
+ring once; applies all replacements in one transaction; defers external
+selection publication until commit; and fails closed after text, narrowing,
+or cursor-topology drift.  Failed transactions restore the kill-ring pointer
+and remain retryable.  Custom `yank-handler` behavior remains unsupported.
+
+At this checkpoint the complete Lisp ERT suite passes **274/274**, native
+redisplay source invariants pass **31/31**, byte compilation reports no new
+yank/newline errors, and `git diff --check` is clean.  The remaining sections
+below are a longer-term backlog rather than unfinished work in this
+daily-editing slice; TAB, open-line, newline-and-indent, word killing,
+session undo/redo, and bounded yank-pop should not be reimplemented.
+
 ## Architectural invariants to preserve
 
 1. Lisp owns the session, command classification, cursor snapshots, planning,

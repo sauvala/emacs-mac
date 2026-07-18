@@ -4760,19 +4760,235 @@
                      '(4)))
       (should (equal-including-properties (car kill-ring) payload)))))
 
-(ert-deftest multi-cursor-yank-pop-remains-unsupported ()
+(ert-deftest multi-cursor-yank-pop-replaces-every-last-yank ()
+  "Yank-pop replaces the recorded yank at every cursor as one operation."
   (with-temp-buffer
-    (insert "abcd")
+    (insert "ab--cd")
     (goto-char 2)
-    (multi-cursor-add-at-point 4)
-    (let ((before (buffer-string))
-          (kill-ring '("new" "old"))
-          (kill-ring-yank-pointer nil))
-      (should (eq (car (gethash 'yank-pop multi-cursor--command-policies))
-                  'unsupported))
-      (should-error (command-execute 'yank-pop) :type 'user-error)
-      (should (equal (buffer-string) before))
-      (should (equal kill-ring '("new" "old"))))))
+    (let* ((id (multi-cursor-add-at-point 5))
+           (cursor (multi-cursor-tests--cursor id))
+           (kill-ring '("N" "OLD"))
+           (kill-ring-yank-pointer nil)
+           (interprogram-paste-function nil))
+      (command-execute 'yank)
+      (let ((last-command 'yank))
+        (command-execute 'yank-pop))
+      (should (equal (buffer-string) "aOLDb--OLDcd"))
+      (should (= (point) 5))
+      (should (= (mark) 2))
+      (should-not mark-active)
+      (should (= (marker-position (multi-cursor--cursor-point cursor)) 11))
+      (should (= (marker-position (multi-cursor--cursor-mark cursor)) 8))
+      (should-not (multi-cursor--cursor-mark-active cursor))
+      (should (equal (car kill-ring-yank-pointer) "OLD"))
+      (should (eq this-command 'yank)))))
+
+(ert-deftest multi-cursor-yank-pop-rotates-and-wraps-the-shared-ring ()
+  "Successive pops share one ordinary kill-ring rotation across all cursors."
+  (with-temp-buffer
+    (insert "ab--cd")
+    (goto-char 2)
+    (multi-cursor-add-at-point 5)
+    (let ((kill-ring '("new" "old" "oldest"))
+          (kill-ring-yank-pointer nil)
+          (interprogram-paste-function nil))
+      (command-execute 'yank)
+      (dolist (expected '("old" "oldest" "new"))
+        ;; `command-execute' bypasses the command loop, which normally
+        ;; propagates `this-command' to `last-command' between invocations.
+        (let ((last-command 'yank))
+          (command-execute 'yank-pop))
+        (should (equal (car kill-ring-yank-pointer) expected))
+        (should (equal (buffer-string)
+                       (format "a%sb--%scd" expected expected)))))))
+
+(ert-deftest multi-cursor-yank-pop-prefix-honors-stock-ring-direction ()
+  "A negative yank-pop argument moves toward more recent kills."
+  (with-temp-buffer
+    (insert "ab--cd")
+    (goto-char 2)
+    (multi-cursor-add-at-point 5)
+    (let ((kill-ring '("new" "old" "oldest"))
+          (kill-ring-yank-pointer nil)
+          (interprogram-paste-function nil))
+      (command-execute 'yank)
+      (let ((last-command 'yank)
+            (prefix-arg 2))
+        (command-execute 'yank-pop))
+      ;; Two previous entries from "new" selects "oldest".
+      (should (equal (car kill-ring-yank-pointer) "oldest"))
+      (let ((last-command 'yank)
+            (prefix-arg -1))
+        (command-execute 'yank-pop))
+      (should (equal (car kill-ring-yank-pointer) "old"))
+      (should (equal (buffer-string) "aoldb--oldcd")))))
+
+(ert-deftest multi-cursor-yank-pop-is-one-undoable-transaction ()
+  "One broadcast pop is undone as one generation, without undoing its yank."
+  (with-temp-buffer
+    (buffer-enable-undo)
+    (insert "ab--cd")
+    (undo-boundary)
+    (goto-char 2)
+    (multi-cursor-add-at-point 5)
+    (let ((kill-ring '("N" "OLD"))
+          (kill-ring-yank-pointer nil)
+          (interprogram-paste-function nil))
+      (command-execute 'yank)
+      (let ((last-command 'yank))
+        (command-execute 'yank-pop))
+      (should (equal (buffer-string) "aOLDb--OLDcd"))
+      (multi-cursor-mode -1)
+      (undo 1)
+      (should (equal (buffer-string) "aNb--Ncd")))))
+
+(ert-deftest multi-cursor-yank-pop-property-handler-failure-rolls-back ()
+  "A failing replacement leaves text, cursor state, and ring rotation intact."
+  (with-temp-buffer
+    (insert "ab--cd")
+    (goto-char 2)
+    (let* ((id (multi-cursor-add-at-point 5))
+           (cursor (multi-cursor-tests--cursor id))
+           (replacement (propertize "OLD" 'multi-cursor-test-property t))
+           (kill-ring (list "N" replacement))
+           (kill-ring-yank-pointer nil)
+           (interprogram-paste-function nil)
+           (handler-ran nil)
+           (yank-handled-properties
+            (list
+             (cons 'multi-cursor-test-property
+                   (lambda (value beg end)
+                     (when value
+                       (setq handler-ran t)
+                       (delete-region beg end)
+                       (insert "MUTATED")
+                       (error "Yank property handler failed")))))))
+      (command-execute 'yank)
+      (let ((before (buffer-string))
+            (point-before (point))
+            (mark-before (mark))
+            (cursor-point-before
+             (marker-position (multi-cursor--cursor-point cursor)))
+            (cursor-mark-before
+             (marker-position (multi-cursor--cursor-mark cursor)))
+            (last-command 'yank))
+        (should-error (command-execute 'yank-pop) :type 'error)
+        (should handler-ran)
+        (should (equal (buffer-string) before))
+        (should (= (point) point-before))
+        (should (= (mark) mark-before))
+        (should (= (marker-position (multi-cursor--cursor-point cursor))
+                   cursor-point-before))
+        (should (= (marker-position (multi-cursor--cursor-mark cursor))
+                   cursor-mark-before))
+        (should (eq kill-ring-yank-pointer kill-ring))))))
+
+(ert-deftest multi-cursor-yank-pop-requires-an-unchanged-native-yank ()
+  "Stale command, text, restriction, and cursor topology fail before rotation."
+  (dolist (mutation '(command text restriction topology))
+    (with-temp-buffer
+      (insert "ab--cd")
+      (goto-char 2)
+      (multi-cursor-add-at-point 5)
+      (let ((kill-ring '("new" "old"))
+            (kill-ring-yank-pointer nil)
+            (interprogram-paste-function nil))
+        (command-execute 'yank)
+        (pcase mutation
+          ('text (insert "!"))
+          ('restriction (narrow-to-region 2 (point-max)))
+          ('topology (multi-cursor-add-at-point (point-max))))
+        (let ((before (buffer-string))
+              (pointer kill-ring-yank-pointer)
+              (last-command (unless (eq mutation 'command) 'yank)))
+          (should-error (command-execute 'yank-pop) :type 'user-error)
+          (should (equal (buffer-string) before))
+          (should (eq kill-ring-yank-pointer pointer)))))))
+
+(ert-deftest multi-cursor-yank-pop-prefix-orientation-and-history ()
+  "A reversed yank stays reversed and one replayable pop is recorded."
+  (with-temp-buffer
+    (insert "ab--cd")
+    (goto-char 2)
+    (let ((id (multi-cursor-add-at-point 5))
+          (kill-ring '("N" "OLD"))
+          (kill-ring-yank-pointer nil)
+          (interprogram-paste-function nil)
+          (prefix-arg '(4)))
+      (command-execute 'yank)
+      (let ((last-command 'yank)
+            (prefix-arg 1)
+            (command-history nil))
+        (command-execute 'yank-pop t)
+        (should (equal command-history '((yank-pop 1)))))
+      (should (= (point) 2))
+      (should (= (mark) 5))
+      (let ((cursor (multi-cursor-tests--cursor id)))
+        (should (= (marker-position (multi-cursor--cursor-point cursor)) 8))
+        (should (= (marker-position (multi-cursor--cursor-mark cursor)) 11))
+        (should (eq (multi-cursor--cursor-direction cursor) 'backward))))))
+
+(ert-deftest multi-cursor-yank-pop-defers-selection-publication-until-commit ()
+  "The shared selection callback runs once on success and never on rollback."
+  (dolist (failure '(nil hook))
+    (with-temp-buffer
+      (insert "ab--cd")
+      (goto-char 2)
+      (multi-cursor-add-at-point 5)
+      (let ((kill-ring '("N" "OLD"))
+            (kill-ring-yank-pointer nil)
+            (interprogram-paste-function nil)
+            (yank-pop-change-selection t)
+            (calls nil))
+        (command-execute 'yank)
+        (let ((last-command 'yank)
+              (interprogram-cut-function
+               (lambda (value &optional _push) (push value calls)))
+              (before-change-functions
+               (when failure
+                 (list (lambda (_beg _end) (error "pop hook failed"))))))
+          (if failure
+              (should-error (command-execute 'yank-pop))
+            (command-execute 'yank-pop)))
+        (should (equal calls (unless failure '("OLD"))))))))
+
+(ert-deftest multi-cursor-yank-pop-failed-transaction-can-be-retried ()
+  "A cancelled change group does not invalidate the preceding yank target."
+  (with-temp-buffer
+    (insert "ab--cd")
+    (goto-char 2)
+    (multi-cursor-add-at-point 5)
+    (let ((kill-ring '("N" "OLD"))
+          (kill-ring-yank-pointer nil)
+          (interprogram-paste-function nil)
+          (fail t))
+      (command-execute 'yank)
+      (let ((last-command 'yank)
+            (before-change-functions
+             (list (lambda (_beg _end)
+                     (when fail (error "fail once"))))))
+        (should-error (command-execute 'yank-pop)))
+      (setq fail nil)
+      (let ((last-command 'yank))
+        (command-execute 'yank-pop))
+      (should (equal (buffer-string) "aOLDb--OLDcd")))))
+
+(ert-deftest multi-cursor-yank-pop-requires-identical-cursor-records ()
+  "Structurally equal replacement records cannot claim a stale yank target."
+  (with-temp-buffer
+    (insert "ab--cd")
+    (goto-char 2)
+    (multi-cursor-add-at-point 5)
+    (let ((kill-ring '("N" "OLD"))
+          (kill-ring-yank-pointer nil)
+          (interprogram-paste-function nil))
+      (command-execute 'yank)
+      (setq multi-cursor--cursors
+            (mapcar #'copy-multi-cursor--cursor multi-cursor--cursors))
+      (let ((pointer kill-ring-yank-pointer)
+            (last-command 'yank))
+        (should-error (command-execute 'yank-pop) :type 'user-error)
+        (should (eq kill-ring-yank-pointer pointer))))))
 
 ;;;; Bounded literal TAB insertion
 

@@ -72,6 +72,10 @@ operation before changing the buffer or cursor session."
                (:constructor multi-cursor--edit-create))
   beg end string survivor members)
 
+(cl-defstruct (multi-cursor--yank-pop-state
+               (:constructor multi-cursor--yank-pop-state-create))
+  tick restriction cursors next-id ranges before-p window-start)
+
 (cl-defstruct (multi-cursor--undo-generation
                (:constructor multi-cursor--undo-generation-create))
   "One session-owned ordinary undo generation.
@@ -95,6 +99,9 @@ cursor snapshots and the invariants needed to reject stale history."
 
 (defvar-local multi-cursor--redo-generations nil
   "Session-owned edit generations which may be redone.")
+
+(defvar-local multi-cursor--yank-pop-state nil
+  "Validated ranges produced by the latest native `yank' or `yank-pop'.")
 
 (defvar-local multi-cursor--redisplay-snapshot nil
   "Last immutable snapshot built for redisplay in the current buffer.")
@@ -1176,6 +1183,9 @@ the ordinary undo machinery apply precisely one recorded transaction."
       (user-error "No session-owned multiple-cursor %s history"
                   (if redo-p "redo" "undo")))
     (multi-cursor--generation-replay-safe-p generation from-side)
+    ;; Yank-pop targets are not part of the ordinary undo generation record.
+    ;; Drop their live markers before replay rather than leave stale state.
+    (multi-cursor--discard-yank-pop-state)
     ;; Do not let an active primary region turn this into ordinary
     ;; undo-in-region: a session generation must always be all-or-nothing.
     (let (ordinary-completed completed)
@@ -2110,6 +2120,80 @@ move point, or install command-specific undo functions at each cursor."
            (multi-cursor--set-record-state cursor point mark nil nil)))))
    groups (append positions nil)))
 
+(defun multi-cursor--discard-yank-pop-state ()
+  "Detach markers and forget the current native `yank-pop' target."
+  (when multi-cursor--yank-pop-state
+    (dolist (range (multi-cursor--yank-pop-state-ranges
+                    multi-cursor--yank-pop-state))
+      (set-marker (nth 0 range) nil)
+      (set-marker (nth 1 range) nil))
+    (setq multi-cursor--yank-pop-state nil)))
+
+(defun multi-cursor--record-yank-pop-state (groups positions before-p)
+  "Record final yank GROUPS at POSITIONS with orientation BEFORE-P."
+  (multi-cursor--discard-yank-pop-state)
+  (let (ranges)
+    (cl-mapc
+     (lambda (group final-end)
+       (let* ((final-beg (- final-end
+                            (length (multi-cursor--edit-string group))))
+              (state (multi-cursor--edit-survivor group)))
+         (push (list (copy-marker final-beg)
+                     (copy-marker final-end t)
+                     (buffer-substring final-beg final-end)
+                     (multi-cursor--edit-state-primary state)
+                     (multi-cursor--edit-state-id state))
+               ranges)))
+     groups (append positions nil))
+    (setq multi-cursor--yank-pop-state
+          (multi-cursor--yank-pop-state-create
+           :tick (buffer-chars-modified-tick)
+           :restriction (cons (point-min) (point-max))
+           :cursors (copy-sequence multi-cursor--cursors)
+           :next-id multi-cursor--next-id
+           :ranges (nreverse ranges)
+           :before-p before-p
+           :window-start yank-window-start))))
+
+(defun multi-cursor--yank-pop-state-edit (range states insertion)
+  "Replace recorded yank RANGE in STATES with INSERTION in a new edit."
+  (let* ((primary-p (nth 3 range))
+         (id (nth 4 range))
+         (state
+          (cl-find-if
+           (lambda (candidate)
+             (if primary-p
+                 (multi-cursor--edit-state-primary candidate)
+               (and (not (multi-cursor--edit-state-primary candidate))
+                    (= (multi-cursor--edit-state-id candidate) id))))
+           states))
+         (beg (marker-position (nth 0 range)))
+         (end (marker-position (nth 1 range))))
+    (unless (and state beg end)
+      (user-error "The previous multiple-cursor yank is no longer live"))
+    (unless (equal-including-properties
+             (buffer-substring beg end) (nth 2 range))
+      (user-error "The previous multiple-cursor yank text has changed"))
+    (multi-cursor--preflight-edit-range beg end beg end)
+    (multi-cursor--edit-create
+     :beg beg :end end :string insertion :survivor state
+     :members (list state))))
+
+(defun multi-cursor--validate-yank-pop-state ()
+  "Return the current `yank-pop' state, or reject it before editing."
+  (let ((state multi-cursor--yank-pop-state))
+    (unless (and state (eq last-command 'yank))
+      (user-error "Yank-pop must immediately follow a native yank or yank-pop"))
+    (unless (and (= (multi-cursor--yank-pop-state-tick state)
+                    (buffer-chars-modified-tick))
+                 (equal (multi-cursor--yank-pop-state-restriction state)
+                        (cons (point-min) (point-max)))
+                 (multi-cursor--same-cursor-objects-p
+                  (multi-cursor--yank-pop-state-cursors state)
+                  (multi-cursor--yank-pop-state-next-id state)))
+      (user-error "The previous multiple-cursor yank state has changed"))
+    state))
+
 (defun multi-cursor--yank
     (command prefix _keys record-flag _special)
   "Broadcast one snapshotted `kill-ring' string for yank COMMAND.
@@ -2128,8 +2212,9 @@ non-nil records that single command invocation."
                  (before-p 0)
                  ((eq prefix '-) -2)
                  (t (1- (prefix-numeric-value prefix)))))
-         states insertion groups completed)
+         states insertion groups positions completed)
     ;; Mark an incomplete yank exactly as the ordinary command does.
+    (multi-cursor--discard-yank-pop-state)
     (setq yank-window-start (window-start)
           this-command t)
     (unwind-protect
@@ -2148,14 +2233,16 @@ non-nil records that single command invocation."
                            (multi-cursor--state-edit
                             state 'yank 1 insertion))
                          states)))
-          (multi-cursor--apply-edit-transaction
-           states groups
-           (lambda (edits positions edit-states)
-             (let ((context (multi-cursor--callback-context)))
-               (multi-cursor--process-yank-spans edits positions)
-               (multi-cursor--validate-callback-state context)
-               (multi-cursor--install-yank-results
-                edits positions edit-states before-p))))
+          (setq positions
+                (multi-cursor--apply-edit-transaction
+                 states groups
+                 (lambda (edits final-positions edit-states)
+                   (let ((context (multi-cursor--callback-context)))
+                     (multi-cursor--process-yank-spans edits final-positions)
+                     (multi-cursor--validate-callback-state context)
+                     (multi-cursor--install-yank-results
+                      edits final-positions edit-states before-p)))))
+          (multi-cursor--record-yank-pop-state groups positions before-p)
           (setq completed t))
       (unless completed
         (multi-cursor--restore-kill-ring-state ring-state)
@@ -2171,6 +2258,81 @@ non-nil records that single command invocation."
                  (list 'quote prefix)
                prefix))
        nil t))
+    nil))
+
+(defun multi-cursor--yank-pop
+    (command prefix _keys record-flag _special)
+  "Run COMMAND after native yank, replacing every range selected by PREFIX."
+  (unless (eq command 'yank-pop)
+    (error "Invalid multiple-cursor yank-pop command: %S" command))
+  (let* ((target-state (multi-cursor--validate-yank-pop-state))
+         (argument (prefix-numeric-value prefix))
+         (ring-state (multi-cursor--kill-ring-state))
+         (initial-states (multi-cursor--snapshot-edit-states))
+         (initial-cursors (copy-sequence multi-cursor--cursors))
+         (initial-next-id multi-cursor--next-id)
+         (callback-context (multi-cursor--callback-context))
+         (before-p (multi-cursor--yank-pop-state-before-p target-state))
+         (external-cut interprogram-cut-function)
+         external-value external-called
+         insertion edits groups positions completed)
+    (unless (integerp argument)
+      (signal 'wrong-type-argument (list 'integerp argument)))
+    (unwind-protect
+        (progn
+          ;; Rotate the shared ring once, then broadcast that exact value.
+          (save-current-buffer
+            (atomic-change-group
+              (let ((interprogram-cut-function
+                     (lambda (value &rest _arguments)
+                       (setq external-value value
+                             external-called t))))
+                (setq insertion
+                      (multi-cursor--prepare-yank-string
+                       (current-kill argument))))
+              (multi-cursor--validate-callback-state callback-context)))
+          (setq edits
+                (mapcar
+                 (lambda (range)
+                   (multi-cursor--yank-pop-state-edit
+                    range initial-states insertion))
+                 (multi-cursor--yank-pop-state-ranges target-state))
+                groups (multi-cursor--merge-edits edits t)
+                positions
+                (multi-cursor--apply-edit-transaction
+                 initial-states groups
+                 (lambda (replacement-groups final-positions edit-states)
+                   (let ((context (multi-cursor--callback-context)))
+                     (multi-cursor--process-yank-spans
+                      replacement-groups final-positions)
+                     (multi-cursor--validate-callback-state context)
+                     (multi-cursor--install-yank-results
+                      replacement-groups final-positions edit-states
+                      before-p)))))
+          (multi-cursor--record-yank-pop-state groups positions before-p)
+          (setq completed t))
+      (unless completed
+        (multi-cursor--restore-kill-ring-state ring-state)
+        (multi-cursor--restore-edit-states
+         initial-states initial-cursors initial-next-id)
+        ;; Cancelling a change group advances the modification tick even when
+        ;; it restores the exact text.  Keep the still-valid preceding yank
+        ;; retryable after an atomic failure.
+        (when (eq multi-cursor--yank-pop-state target-state)
+          (setf (multi-cursor--yank-pop-state-tick target-state)
+                (buffer-chars-modified-tick)))))
+    (setq this-command 'yank
+          yank-undo-function nil)
+    (when (window-live-p (selected-window))
+      (set-window-start
+       (selected-window)
+       (multi-cursor--yank-pop-state-window-start target-state) t))
+    (when record-flag
+      (add-to-history 'command-history (list command argument) nil t))
+    ;; Selection ownership is an irreversible external effect, so publish it
+    ;; only after the buffer transaction and native cursor state have committed.
+    (when (and external-called external-cut)
+      (funcall external-cut external-value))
     nil))
 
 (defun multi-cursor--batch-edit
@@ -3883,6 +4045,7 @@ session."
     (multi-cursor--set-redisplay-snapshot
      multi-cursor--presentation-window nil))
   (multi-cursor--clear-presentation)
+  (multi-cursor--discard-yank-pop-state)
   (mapc #'multi-cursor--release-cursor multi-cursor--cursors)
   (setq multi-cursor--cursors nil
         multi-cursor--next-id 0
@@ -4003,11 +4166,13 @@ created.  This mode refuses to start while the external
 
 (multi-cursor-register-command 'yank 'batch-edit #'multi-cursor--yank)
 
+(multi-cursor-register-command
+ 'yank-pop 'custom-handler #'multi-cursor--yank-pop)
+
 (dolist (command '(execute-extended-command execute-kbd-macro
                    isearch-forward isearch-backward
                    query-replace query-replace-regexp
-                   beginning-of-visual-line end-of-visual-line
-                   yank-pop))
+                   beginning-of-visual-line end-of-visual-line))
   (when (commandp command)
     (multi-cursor-register-command command 'unsupported)))
 
