@@ -5155,6 +5155,274 @@
       (should (equal (buffer-string) "abcd"))
       (should (> multi-cursor-tests--undo-change-count 0)))))
 
+;;; Bounded native `open-line' (C-o).
+
+(ert-deftest multi-cursor-edit-open-line-policy-and-real-c-o ()
+  "C-o is a separately planned native edit, not ordinary replay."
+  (let ((entry (gethash 'open-line multi-cursor--command-policies)))
+    (should (eq (car entry) 'custom-handler))
+    (should (functionp (cdr entry))))
+  (ert-with-test-buffer (:selected t)
+    (should (eq (key-binding (kbd "C-o")) 'open-line))
+    (insert "ab\ncd")
+    (goto-char 2)
+    (let* ((id (multi-cursor-add-at-point 5))
+           (cursor (multi-cursor-tests--cursor id)))
+      (ert-play-keys (kbd "C-o"))
+      (should (equal (buffer-string) "a\nb\nc\nd"))
+      ;; `open-line' leaves both cursors before their newly inserted newline.
+      (should (= (point) 2))
+      (should (= (marker-position (multi-cursor--cursor-point cursor)) 6)))))
+
+(ert-deftest multi-cursor-edit-open-line-mixed-points-and-inactive-marks ()
+  "Open line preserves inactive marks while remapping their positions."
+  (with-temp-buffer
+    (insert "abc\n  def")
+    ;; The primary is mid-line and has an inactive backward mark.  The
+    ;; secondary is at BOL and has an inactive forward mark.
+    (goto-char 2)
+    (set-mark 1)
+    ;; There is no command-loop turn between these setup forms, so make the
+    ;; inactive state explicit rather than relying on `deactivate-mark'.
+    (setq mark-active nil)
+    (let* ((id (multi-cursor-add-selection 5 7 nil))
+           (cursor (multi-cursor-tests--cursor id)))
+      (command-execute 'open-line)
+      (should (equal (buffer-string) "a\nbc\n\n  def"))
+      (should (= (point) 2))
+      (should (= (mark t) 1))
+      (should-not mark-active)
+      (should (= (marker-position (multi-cursor--cursor-point cursor)) 6))
+      (should (= (marker-position (multi-cursor--cursor-mark cursor)) 9))
+      (should-not (multi-cursor--cursor-mark-active cursor)))))
+
+(ert-deftest multi-cursor-edit-open-line-prefix-selection-and-effect-policy ()
+  "Contexts whose ordinary C-o has nonlocal semantics fail closed."
+  (dolist (case '(prefix selection minibuffer fill-prefix left-margin
+                         hard-newline translation))
+    (with-temp-buffer
+      (insert "ab\ncd")
+      (goto-char 2)
+      (let* ((id (multi-cursor-add-at-point 5))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string))
+             (prefix-arg (and (eq case 'prefix) 2))
+             (fill-prefix (and (eq case 'fill-prefix) "> "))
+             (use-hard-newlines (eq case 'hard-newline))
+             (translation-table-for-input
+              (and (eq case 'translation)
+                   (make-char-table 'translation-table))))
+        (pcase case
+          ('selection
+           (set-mark 1)
+           (activate-mark))
+          ('left-margin
+           ;; This is a line-local display property, so only the secondary
+           ;; cursor has a margin.  The planner must inspect each position.
+           (put-text-property 4 6 'left-margin 2)))
+        (if (eq case 'minibuffer)
+            (cl-letf (((symbol-function 'minibufferp)
+                       (lambda (&optional _buffer) t)))
+              (should-error (command-execute 'open-line) :type 'user-error))
+          (should-error (command-execute 'open-line) :type 'user-error))
+        (should (equal (buffer-string) before))
+        (should (= (point) 2))
+        (should (= (marker-position (multi-cursor--cursor-point cursor)) 5))))))
+
+(ert-deftest multi-cursor-edit-open-line-properties-and-narrowing-reject ()
+  "Text-property and accessibility boundaries are checked before edits."
+  (dolist (case '(primary-before primary-after
+                  secondary-before secondary-after
+                  inaccessible-secondary))
+    (with-temp-buffer
+      (insert "abcdef")
+      (goto-char 2)
+      (let* ((id (multi-cursor-add-at-point 5))
+             (cursor (multi-cursor-tests--cursor id))
+             before)
+        (pcase case
+          ('primary-before
+           (put-text-property 1 2 'multi-cursor-test-property t))
+          ('primary-after
+           (put-text-property 2 3 'multi-cursor-test-property t))
+          ('secondary-before
+           (put-text-property 4 5 'multi-cursor-test-property t))
+          ('secondary-after
+           (put-text-property 5 6 'multi-cursor-test-property t))
+          ('inaccessible-secondary
+           ;; Keep the session record deliberately stale to ensure the
+           ;; handler refuses to edit only the accessible primary cursor.
+           (narrow-to-region 1 4)))
+        (setq before
+              (save-restriction
+                (widen)
+                (buffer-substring (point-min) (point-max))))
+        (should-error (command-execute 'open-line) :type 'user-error)
+        (should
+         (equal-including-properties
+          (save-restriction
+            (widen)
+            (buffer-substring (point-min) (point-max)))
+          before))
+        (should (= (point) 2))
+        (should (= (marker-position (multi-cursor--cursor-point cursor)) 5))))))
+
+(ert-deftest multi-cursor-edit-open-line-does-not-run-insertion-side-effects ()
+  "C-o remains literal even when ordinary insertion features are enabled."
+  (dolist (effect '(abbrev auto-fill electric post-self-insert overwrite))
+    (with-temp-buffer
+      (insert "ab\ncd")
+      (goto-char 2)
+      (let* ((id (multi-cursor-add-at-point 5))
+             (cursor (multi-cursor-tests--cursor id))
+             (called nil)
+             (side-effect (lambda (&rest _args)
+                            (setq called t)
+                            (error "C-o ran an insertion side effect"))))
+        (pcase effect
+          ('abbrev
+           (setq abbrev-mode t)
+           ;; `expand-abbrev' must not be reached by the bounded handler.
+           (cl-letf (((symbol-function 'expand-abbrev) side-effect))
+             (command-execute 'open-line)))
+          ('auto-fill
+           (let ((auto-fill-function side-effect))
+             (command-execute 'open-line)))
+          ('electric
+           (let ((electric-indent-mode t)
+                 (electric-indent-functions (list side-effect)))
+             (command-execute 'open-line)))
+          ('post-self-insert
+           (let ((post-self-insert-hook (list side-effect)))
+             (command-execute 'open-line)))
+          ('overwrite
+           (let ((overwrite-mode 'overwrite-mode-textual))
+             (command-execute 'open-line))))
+        (should-not called)
+        (should (equal (buffer-string) "a\nb\nc\nd"))
+        (should (= (point) 2))
+        (should (= (marker-position (multi-cursor--cursor-point cursor)) 6))))))
+
+(ert-deftest multi-cursor-edit-open-line-preflight-and-hook-rollback ()
+  "Read-only, field, and hook failures leave a complete C-o session intact."
+  (dolist (failure '(read-only field hook))
+    (with-temp-buffer
+      (insert "abcdef")
+      (goto-char 2)
+      (let* ((id (multi-cursor-add-at-point 5))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string))
+             (before-change-functions
+              (when (eq failure 'hook)
+                (list (lambda (beg _end)
+                        (when (= beg 2)
+                          (error "Open-line hook failed")))))))
+        (when (eq failure 'read-only)
+          (setq buffer-read-only t))
+        (if (eq failure 'field)
+            (cl-letf (((symbol-function 'constrain-to-field)
+                       (lambda (new old &rest _)
+                         (if (= old 5) (1+ new) new))))
+              (should-error (command-execute 'open-line) :type 'user-error))
+          (should-error (command-execute 'open-line)))
+        (should (equal (buffer-substring-no-properties 1 (point-max)) before))
+        (should (= (point) 2))
+        (should (= (marker-position (multi-cursor--cursor-point cursor)) 5))))))
+
+(ert-deftest multi-cursor-edit-open-line-one-apply-history-undo-and-redo ()
+  "A successful C-o is one atomic editable session generation."
+  (with-temp-buffer
+    (buffer-enable-undo)
+    (insert "abcd")
+    (undo-boundary)
+    (goto-char 2)
+    (let* ((id (multi-cursor-add-at-point 4))
+           (cursor (multi-cursor-tests--cursor id))
+           (before-state (multi-cursor--session-fingerprint))
+           (command-history nil)
+           (apply-count 0)
+           (original-apply (symbol-function 'multi-cursor--apply-edits)))
+      (cl-letf (((symbol-function 'multi-cursor--apply-edits)
+                 (lambda (edits)
+                   (cl-incf apply-count)
+                   (funcall original-apply edits))))
+        (command-execute 'open-line t))
+      (should (= apply-count 1))
+      (should (equal command-history '((open-line 1))))
+      (should (equal (buffer-string) "a\nbc\nd"))
+      (should (= (point) 2))
+      (should (= (marker-position (multi-cursor--cursor-point cursor)) 5))
+      (let ((after-state (multi-cursor--session-fingerprint)))
+        (command-execute 'undo)
+        (should (equal (buffer-string) "abcd"))
+        (should (equal (multi-cursor--session-fingerprint) before-state))
+        (command-execute 'undo-redo)
+        (should (equal (buffer-string) "a\nbc\nd"))
+        (should (equal (multi-cursor--session-fingerprint) after-state))))))
+
+(ert-deftest multi-cursor-edit-open-line-same-point-distinct-marks-reject ()
+  "Do not silently discard a cursor when two insertions share a point.
+
+The cursor records are deliberately distinct only by their inactive marks.
+Choosing either cursor as the merged-edit survivor would lose observable
+session state, so the bounded operation must reject before modification."
+  (with-temp-buffer
+    (insert "abcdefgh")
+    (goto-char 2)
+    (let* ((first-id (multi-cursor-add-selection 5 4 nil))
+           (second-id (multi-cursor-add-selection 5 7 nil))
+           (first (multi-cursor-tests--cursor first-id))
+           (second (multi-cursor-tests--cursor second-id))
+           (before-text (buffer-string))
+           (before-state (multi-cursor--session-fingerprint)))
+      (should (= (multi-cursor-count) 3))
+      (should-error (command-execute 'open-line) :type 'user-error)
+      (should (equal (buffer-string) before-text))
+      (should (equal (multi-cursor--session-fingerprint) before-state))
+      (should (= (marker-position (multi-cursor--cursor-point first)) 5))
+      (should (= (marker-position (multi-cursor--cursor-mark first)) 4))
+      (should (= (marker-position (multi-cursor--cursor-point second)) 5))
+      (should (= (marker-position (multi-cursor--cursor-mark second)) 7)))))
+
+(ert-deftest multi-cursor-edit-open-line-adjacent-cursors-stay-distinct ()
+  "Touching insertion points each own a newline, including across a line end."
+  (dolist (case '(("abcd" 2 3 1 4 "a\nb\ncd" 2 4 1 6)
+                  ;; The two points straddle the existing newline: neither
+                  ;; insertion may be coalesced with that boundary or the
+                  ;; other cursor's adjacent insertion.
+                  ("ab\ncd" 3 4 1 5 "ab\n\n\ncd" 3 5 1 7)))
+    (pcase-let ((`(,initial ,primary-point ,secondary-point
+                           ,primary-mark ,secondary-mark
+                           ,result ,expected-primary ,expected-secondary
+                           ,expected-primary-mark ,expected-secondary-mark)
+                 case))
+      (with-temp-buffer
+        (buffer-enable-undo)
+        (insert initial)
+        (undo-boundary)
+        (goto-char primary-point)
+        (set-mark primary-mark)
+        (setq mark-active nil)
+        (let* ((id (multi-cursor-add-selection
+                    secondary-point secondary-mark nil))
+               (cursor (multi-cursor-tests--cursor id))
+               (before-state (multi-cursor--session-fingerprint)))
+          (command-execute 'open-line)
+          (should (equal (buffer-string) result))
+          (should (= (point) expected-primary))
+          (should (= (mark t) expected-primary-mark))
+          (should (= (marker-position (multi-cursor--cursor-point cursor))
+                     expected-secondary))
+          (should (= (marker-position (multi-cursor--cursor-mark cursor))
+                     expected-secondary-mark))
+          (let ((after-state (multi-cursor--session-fingerprint)))
+            (command-execute 'undo)
+            (should (equal (buffer-string) initial))
+            (should (equal (multi-cursor--session-fingerprint) before-state))
+            (command-execute 'undo-redo)
+            (should (equal (buffer-string) result))
+            (should (equal (multi-cursor--session-fingerprint) after-state))))))))
+
 (provide 'multi-cursor-tests)
 
 ;;; multi-cursor-tests.el ends here

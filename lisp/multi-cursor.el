@@ -2962,6 +2962,131 @@ PREFIX is rejected.  RECORD-FLAG controls recording in the variable
     (when record-flag
       (add-to-history 'command-history '(newline nil 1) nil t))))))
 
+(defun multi-cursor--open-line-reject-properties (position)
+  "Reject unsafe insertion properties immediately around POSITION.
+
+`open-line' must preserve the ordinary boundary behavior of an insertion,
+but this bounded implementation deliberately does not emulate arbitrary text
+property stickiness.  Check both sides in the physical buffer, including
+read-only overlay properties, before planning the literal newline."
+  (save-restriction
+    (widen)
+    (dolist (boundary (list (1- position) position))
+      (when (and (<= (point-min) boundary)
+                 (< boundary (point-max))
+                 (or (text-properties-at boundary)
+                     (multi-cursor--read-only-value-blocks-p
+                      (get-char-property boundary 'read-only))))
+        (user-error
+         "Open line next to text properties is not multiple-cursor safe")))))
+
+(defun multi-cursor--open-line-state-edit (state)
+  "Plan one literal `open-line' insertion for detached cursor STATE."
+  (let ((position (multi-cursor--edit-state-point state)))
+    (save-excursion
+      (goto-char position)
+      (unless (zerop (current-left-margin))
+        (user-error
+         "Open line with a left margin is not multiple-cursor safe")))
+    (multi-cursor--open-line-reject-properties position)
+    (multi-cursor--preflight-edit-range position position position position)
+    (multi-cursor--edit-create
+     :beg position :end position :string "\n" :survivor state
+     :members (list state))))
+
+(defun multi-cursor--install-open-line-results (groups positions states)
+  "Install GROUPS and STATES after `open-line', leaving points before newlines.
+
+POSITIONS are deliberately passed unchanged to the ordinary installer first:
+inactive marks must be remapped against each edit's *final end*, not against
+the point-before-newline locations used by this command.  Once mark remapping
+is complete, move every surviving cursor back over its inserted newline."
+  (multi-cursor--install-edit-results groups positions states)
+  (cl-mapc
+   (lambda (group position)
+     (let* ((survivor (multi-cursor--edit-survivor group))
+            (point (- position
+                      (length (multi-cursor--edit-string group)))))
+       (if (multi-cursor--edit-state-primary survivor)
+           (goto-char point)
+         (set-marker
+          (multi-cursor--cursor-point
+           (multi-cursor--edit-state-cursor survivor))
+          point (current-buffer)))))
+   groups positions)
+  ;; Moving the marker-only points can change their buffer order.
+  (setq multi-cursor--redisplay-snapshot-dirty-p t)
+  (multi-cursor--normalize))
+
+(defun multi-cursor--open-line-reject-duplicate-positions (edits)
+  "Reject EDITS which would insert more than one newline at a position.
+
+Native cursor records may differ only in inactive mark state while sharing a
+point.  The batched primitive intentionally rejects two replacements with the
+same start, so detect that shape during planning and leave the buffer and the
+session unchanged."
+  (let ((positions (make-hash-table :test #'eql)))
+    (dolist (edit edits)
+      (let ((position (multi-cursor--edit-beg edit)))
+        (when (gethash position positions)
+          (user-error
+           "Open line at duplicate cursor positions is not supported yet"))
+        (puthash position t positions)))))
+
+(defun multi-cursor--open-line
+    (command prefix _keys record-flag _special)
+  "Open one bounded literal line at every native cursor.
+
+Only the stock, one-newline behavior is implemented.  COMMAND must be
+`open-line'.  PREFIX is the raw
+interactive prefix and RECORD-FLAG controls the single `command-history' entry.
+This is bounded literal C-o behavior: it intentionally bypasses abbreviation,
+electric-indent, auto-fill, and overwrite-mode postprocessing rather than
+replaying the full `open-line' command independently at every cursor."
+  (unless (eq command 'open-line)
+    (error "Invalid multiple-cursor open-line command: %S" command))
+  (unless (or (null prefix) (equal prefix 1))
+    (user-error "Open line accepts only one newline in a multiple-cursor session"))
+  (when (minibufferp)
+    (user-error "Open line is not multiple-cursor safe in a minibuffer"))
+  (when (or mark-active
+            (cl-some #'multi-cursor--cursor-mark-active
+                     multi-cursor--cursors))
+    (user-error "Open line with active selections is not supported yet"))
+  (when fill-prefix
+    (user-error "Open line with a fill prefix is not multiple-cursor safe"))
+  (when use-hard-newlines
+    (user-error "Hard open-line insertion is not multiple-cursor safe"))
+  (when translation-table-for-input
+    (user-error "Translated open-line input is not multiple-cursor safe"))
+  (let* ((states (multi-cursor--snapshot-edit-states))
+         (original-cursors (copy-sequence multi-cursor--cursors))
+         (original-next-id multi-cursor--next-id)
+         edits groups planned)
+    (unwind-protect
+        (save-current-buffer
+          (save-restriction
+            (atomic-change-group
+              (let ((context (multi-cursor--callback-context)))
+                (setq edits
+                      (mapcar #'multi-cursor--open-line-state-edit states))
+                (multi-cursor--validate-callback-state context)
+                ;; Keep adjacent insertions distinct.  Identical starts are
+                ;; rejected explicitly: the batch primitive forbids them.
+                (multi-cursor--open-line-reject-duplicate-positions edits)
+                (setq groups (multi-cursor--merge-edits edits t)
+                      planned t)))))
+      (unless planned
+        (multi-cursor--restore-edit-states
+         states original-cursors original-next-id)
+        (unless multi-cursor-mode
+          (setq multi-cursor-mode t)
+          (multi-cursor--start))))
+    (multi-cursor--apply-edit-transaction
+     states groups #'multi-cursor--install-open-line-results))
+  (when record-flag
+    (add-to-history 'command-history '(open-line 1) nil t)))
+
 (defun multi-cursor--character-delete
     (command prefix _keys record-flag _special)
   "Safely apply an ordinary no-prefix character deletion COMMAND.
@@ -3428,6 +3553,9 @@ created.  This mode refuses to start while the external
   (multi-cursor-register-command command 'batch-edit #'multi-cursor--batch-edit))
 
 (multi-cursor-register-command 'newline 'batch-edit #'multi-cursor--newline)
+
+(multi-cursor-register-command
+ 'open-line 'custom-handler #'multi-cursor--open-line)
 
 (multi-cursor-register-command
  'indent-for-tab-command 'custom-handler #'multi-cursor--literal-tab-handler)

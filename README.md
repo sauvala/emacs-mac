@@ -223,6 +223,10 @@ unsupported. Plain `RET` is supported when newline side effects such as
 electric indentation, auto-fill, abbrevs, hard newlines, left margins, custom
 insertion hooks, input translation, adjacent text properties, overwrite mode,
 prefixes, and active selections are absent.
+Plain `C-o` supports a bounded literal `open-line`: one newline is inserted
+per distinct cursor position while every cursor remains before its newline.
+Fill prefixes, margins, hard newlines, translated input, active selections,
+and ambiguous property contexts remain fail-closed.
 `TAB` supports the literal `insert-tab` branch when every cursor would take
 that branch, including per-cursor tab-stop spacing when `indent-tabs-mode` is
 disabled. Region indentation, completion, abbrev expansion, prefixes, and
