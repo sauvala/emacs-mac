@@ -5423,6 +5423,374 @@ session state, so the bounded operation must reject before modification."
             (should (equal (buffer-string) result))
             (should (equal (multi-cursor--session-fingerprint) after-state))))))))
 
+;;;; Bounded native `newline-and-indent'.
+
+(defmacro multi-cursor-tests--with-bounded-elisp-newline-and-indent (&rest body)
+  "Run BODY with the supported stock Emacs Lisp newline contract."
+  (declare (indent 0) (debug t))
+  `(progn
+     ;; Keep this deliberately narrower than ordinary `newline-and-indent'.
+     ;; Its `newline' call is interactive and can otherwise run arbitrary
+     ;; abbrev, fill, input-translation, and post-self-insert behavior.
+     (setq-local abbrev-mode nil
+                 auto-fill-function nil
+                 electric-indent-mode nil
+                 indent-tabs-mode nil
+                 indent-line-function #'lisp-indent-line
+                 lisp-indent-function #'lisp-indent-function
+                 lisp-indent-local-overrides nil
+                 lisp-indent-offset 2
+                 left-margin 0
+                 post-self-insert-hook nil
+                 translation-table-for-input nil
+                 use-hard-newlines nil)
+     ,@body))
+
+(defun multi-cursor-tests--stock-elisp-newline-and-indent-oracle (text states)
+  "Return stock ascending `newline-and-indent' result for TEXT and STATES.
+
+STATES is primary-first (POINT MARK ACTIVE) data.  The oracle keeps marker
+records alive while it invokes the public command in source order; later
+cursors therefore observe the parent-line split and indentation done by an
+earlier cursor.  The native command must produce this result in one
+transaction, not replay live session commands one cursor at a time."
+  (with-temp-buffer
+    (insert text)
+    (emacs-lisp-mode)
+    (multi-cursor-tests--with-bounded-elisp-newline-and-indent
+      (let ((records
+             (mapcar
+              (lambda (state)
+                (list (copy-marker (nth 0 state))
+                      (and (nth 1 state) (copy-marker (nth 1 state)))
+                      (nth 2 state)))
+              states)))
+        (unwind-protect
+            (progn
+              (dolist (record
+                       (sort (copy-sequence records)
+                             (lambda (left right)
+                               (< (marker-position (car left))
+                                  (marker-position (car right))))))
+                (goto-char (marker-position (car record)))
+                (set-marker (mark-marker)
+                            (and (nth 1 record)
+                                 (marker-position (nth 1 record))))
+                (setq mark-active (nth 2 record))
+                (let ((this-command 'newline-and-indent)
+                      (last-command 'other-command)
+                      (current-prefix-arg nil))
+                  (newline-and-indent 1))
+                (set-marker (car record) (point)))
+              (list (buffer-string)
+                    (mapcar
+                     (lambda (record)
+                       (list (marker-position (car record))
+                             (and (nth 1 record)
+                                  (marker-position (nth 1 record)))
+                             (nth 2 record)))
+                     records)))
+          (dolist (record records)
+            (set-marker (car record) nil)
+            (when (nth 1 record)
+              (set-marker (nth 1 record) nil))))))))
+
+(ert-deftest multi-cursor-newline-and-indent-policy-and-shadow-oracle ()
+  "Native newline-and-indent matches the public ascending Lisp oracle."
+  (let ((entry (gethash 'newline-and-indent multi-cursor--command-policies)))
+    (should (eq (car entry) 'custom-handler))
+    (should (functionp (cdr entry))))
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(defun sample (a b)\n  (message a b)\n  (when a\n    (message b)))")
+    (goto-char (point-min))
+    (forward-line 1)
+    (search-forward "message")
+    (let* ((primary (point))
+           (primary-mark (point-min))
+           (secondary (save-excursion
+                        (forward-line 2)
+                        (search-forward "message")
+                        (point)))
+           (secondary-mark primary)
+           (states (list (list primary primary-mark nil)
+                         (list secondary secondary-mark nil)))
+           (expected
+            (multi-cursor-tests--stock-elisp-newline-and-indent-oracle
+             (buffer-string) states)))
+      (goto-char primary)
+      (set-mark primary-mark)
+      (setq mark-active nil)
+      (let* ((id (multi-cursor-add-selection
+                  secondary secondary-mark nil))
+             (cursor (multi-cursor-tests--cursor id)))
+        (multi-cursor-tests--with-bounded-elisp-newline-and-indent
+          (command-execute 'newline-and-indent))
+        (should (equal (buffer-string) (car expected)))
+        (should (equal (multi-cursor-tests--session-edit-state-positions)
+                       (cadr expected)))
+        (should (= (multi-cursor--cursor-id cursor) id))))))
+
+(ert-deftest multi-cursor-newline-and-indent-deletes-horizontal-space ()
+  "Horizontal space on both sides of every split matches stock exactly."
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(progn\n  (foo    )\n  (bar    ))")
+    (goto-char (point-min))
+    (forward-line 1)
+    (search-forward "    ")
+    (let* ((primary (point))
+           (secondary (save-excursion
+                        (forward-line 1)
+                        (search-forward "    ")
+                        (point)))
+           (states (list (list primary (point-min) nil)
+                         (list secondary primary nil)))
+           (expected
+            (multi-cursor-tests--stock-elisp-newline-and-indent-oracle
+             (buffer-string) states)))
+      (goto-char primary)
+      (set-mark (point-min))
+      (setq mark-active nil)
+      (multi-cursor-add-selection secondary primary nil)
+      (multi-cursor-tests--with-bounded-elisp-newline-and-indent
+        (command-execute 'newline-and-indent))
+      (should (equal (buffer-string) (car expected)))
+      (should (equal (multi-cursor-tests--session-edit-state-positions)
+                     (cadr expected))))))
+
+(ert-deftest multi-cursor-newline-and-indent-parent-child-is-ascending ()
+  "A child split is planned after the selected parent split changes context."
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(defun sample ()\n(when t\n(message \"x\")))")
+    (goto-char (point-min))
+    (forward-line 1)
+    (end-of-line)
+    (let* ((parent (point))
+           (child (save-excursion
+                    (forward-line 1)
+                    (search-forward "message")
+                    (point)))
+           (states (list (list parent (point-min) nil)
+                         (list child parent nil)))
+           (expected
+            (multi-cursor-tests--stock-elisp-newline-and-indent-oracle
+             (buffer-string) states)))
+      (goto-char parent)
+      (set-mark (point-min))
+      (setq mark-active nil)
+      (multi-cursor-add-selection child parent nil)
+      (multi-cursor-tests--with-bounded-elisp-newline-and-indent
+        (command-execute 'newline-and-indent))
+      (should (equal (buffer-string) (car expected)))
+      (should (equal (multi-cursor-tests--session-edit-state-positions)
+                     (cadr expected))))))
+
+(ert-deftest multi-cursor-newline-and-indent-rejects-prefix-regions-and-line-collisions ()
+  "Prefix, active regions, and two splits on one line fail before editing."
+  (dolist (case '(prefix primary-region secondary-region same-line))
+    (with-temp-buffer
+      (emacs-lisp-mode)
+      (insert "(progn\n  (foo bar)\n  (baz quux))")
+      (goto-char (point-min))
+      (forward-line 1)
+      (search-forward "foo")
+      (let* ((primary (point))
+             (secondary (if (eq case 'same-line)
+                            (+ primary 2)
+                          (save-excursion
+                            (forward-line 1)
+                            (search-forward "baz")
+                            (point))))
+             (id (if (eq case 'secondary-region)
+                     (multi-cursor-add-selection secondary secondary t)
+                   (multi-cursor-add-at-point secondary)))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string))
+             before-state
+             (prefix-arg (and (eq case 'prefix) 2)))
+        (when (eq case 'primary-region)
+          (set-mark primary)
+          (activate-mark))
+        (setq before-state (multi-cursor--session-fingerprint))
+        (multi-cursor-tests--with-bounded-elisp-newline-and-indent
+          (should-error (command-execute 'newline-and-indent) :type 'user-error))
+        (should (equal (buffer-string) before))
+        (should (equal (multi-cursor--session-fingerprint) before-state))
+        (should (= (multi-cursor--cursor-id cursor) id))))))
+
+(ert-deftest multi-cursor-newline-and-indent-rejects-comments-strings-properties-read-only-and-partial-narrowing ()
+  "Only ordinary complete Lisp lines without protected text are supported."
+  (dolist (case '(comment string property buffer-read-only text-read-only
+                         overlay-read-only partial-narrowing))
+    (with-temp-buffer
+      (emacs-lisp-mode)
+      (insert (if (eq case 'comment)
+                  "(progn\n;; comment\n(foo))"
+                (if (eq case 'string)
+                    "(progn\n\"string\"\n(foo))"
+                  "(progn\n(foo)\n(bar))")))
+      (goto-char (point-min))
+      (forward-line 1)
+      (let* ((primary (point))
+             (secondary (save-excursion (forward-line 1) (point)))
+             (id (multi-cursor-add-at-point secondary))
+             (cursor (multi-cursor-tests--cursor id))
+             overlay)
+        (pcase case
+          ('property (put-text-property primary (1+ primary) 'face 'bold))
+          ('buffer-read-only (setq buffer-read-only t))
+          ('text-read-only
+           (put-text-property primary (1+ primary) 'read-only t))
+          ('overlay-read-only
+           (setq overlay (make-overlay primary (1+ primary)))
+           (overlay-put overlay 'read-only t))
+          ('partial-narrowing
+           (narrow-to-region primary (1+ secondary))))
+        (let ((before (save-restriction (widen) (buffer-string)))
+              (before-state (multi-cursor--session-fingerprint)))
+          (multi-cursor-tests--with-bounded-elisp-newline-and-indent
+            (should-error (command-execute 'newline-and-indent)))
+          (should (equal (save-restriction (widen) (buffer-string)) before))
+          (should (equal (multi-cursor--session-fingerprint) before-state))
+          (should (= (multi-cursor--cursor-id cursor) id)))
+        (when overlay (delete-overlay overlay))))))
+
+(ert-deftest multi-cursor-newline-and-indent-rejects-nonstock-indent-contract ()
+  "The bounded implementation accepts only stock Lisp and integer offsets."
+  (dolist (case '(wrong-mode custom-indent functional-indent noninteger-offset))
+    (with-temp-buffer
+      (if (eq case 'wrong-mode) (fundamental-mode) (emacs-lisp-mode))
+      (insert "(progn\n(foo)\n(bar))")
+      (goto-char (point-min))
+      (forward-line 1)
+      (let* ((secondary (save-excursion (forward-line 1) (point)))
+             (id (multi-cursor-add-at-point secondary))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string))
+             (before-state (multi-cursor--session-fingerprint)))
+        (pcase case
+          ('custom-indent (setq-local indent-line-function #'ignore))
+          ('functional-indent
+           (setq-local lisp-indent-function (lambda (&rest _) 0)))
+          ('noninteger-offset (setq-local lisp-indent-offset 2.5)))
+        (multi-cursor-tests--with-bounded-elisp-newline-and-indent
+          ;; Reapply the negative value after the ordinary supported defaults.
+          (pcase case
+            ('custom-indent (setq-local indent-line-function #'ignore))
+            ('functional-indent
+             (setq-local lisp-indent-function (lambda (&rest _) 0)))
+            ('noninteger-offset (setq-local lisp-indent-offset 2.5)))
+          (should-error (command-execute 'newline-and-indent) :type 'user-error))
+        (should (equal (buffer-string) before))
+        (should (equal (multi-cursor--session-fingerprint) before-state))
+        (should (= (multi-cursor--cursor-id cursor) id))))))
+
+(ert-deftest multi-cursor-newline-and-indent-option-hook-and-topology-drift-roll-back ()
+  "A transaction rejects and restores option, text, and cursor mutations."
+  (dolist (failure '(option text topology))
+    (with-temp-buffer
+      (emacs-lisp-mode)
+      (insert "(progn\n(foo)\n(bar))")
+      (goto-char (point-min))
+      (forward-line 1)
+      (let* ((secondary (save-excursion (forward-line 1) (point)))
+             (id (multi-cursor-add-at-point secondary))
+             (cursor (multi-cursor-tests--cursor id))
+             (before (buffer-string))
+             (before-state (multi-cursor--session-fingerprint))
+             (mutated nil)
+             (after-change-functions
+              (list
+               (lambda (beg end _old)
+                 (unless mutated
+                   (setq mutated t)
+                   (pcase failure
+                     ('option (setq-local lisp-indent-offset 4))
+                     ('text
+                      (save-excursion
+                        (goto-char beg)
+                        (delete-region beg end)
+                        (insert ">>")))
+                     ('topology (multi-cursor-add-at-point (point-max)))))))))
+        (multi-cursor-tests--with-bounded-elisp-newline-and-indent
+          (should-error (command-execute 'newline-and-indent)))
+        (should mutated)
+        (should (equal (buffer-string) before))
+        (should (equal (multi-cursor--session-fingerprint) before-state))
+        (should (= (multi-cursor--cursor-id cursor) id))
+        (should (= lisp-indent-offset 2))))))
+
+(ert-deftest multi-cursor-newline-and-indent-is-one-apply-and-undoable ()
+  "A successful command has one apply, history entry, undo, and redo state."
+  (with-temp-buffer
+    (buffer-enable-undo)
+    (emacs-lisp-mode)
+    (insert "(progn\n(foo)\n(bar))")
+    (undo-boundary)
+    (goto-char (point-min))
+    (forward-line 1)
+    (let* ((secondary (save-excursion (forward-line 1) (point)))
+           (id (multi-cursor-add-at-point secondary))
+           (before-state (multi-cursor--session-fingerprint))
+           (command-history nil)
+           (apply-count 0)
+           (original-apply (symbol-function 'multi-cursor--apply-edits)))
+      (multi-cursor-tests--with-bounded-elisp-newline-and-indent
+        (cl-letf (((symbol-function 'multi-cursor--apply-edits)
+                   (lambda (edits)
+                     (cl-incf apply-count)
+                     (funcall original-apply edits))))
+          (command-execute 'newline-and-indent t)))
+      (should (= apply-count 1))
+      (should (equal command-history '((newline-and-indent))))
+      (should (= (length multi-cursor--undo-generations) 1))
+      (should (= (multi-cursor--cursor-id (multi-cursor-tests--cursor id)) id))
+      (let ((after-text (buffer-string))
+            (after-state (multi-cursor--session-fingerprint)))
+        (command-execute 'undo)
+        (should (equal (buffer-string) "(progn\n(foo)\n(bar))"))
+        (should (equal (multi-cursor--session-fingerprint) before-state))
+        (command-execute 'undo-redo)
+        (should (equal (buffer-string) after-text))
+        (should (equal (multi-cursor--session-fingerprint) after-state))))))
+
+(ert-deftest multi-cursor-newline-and-indent-disables-electric-and-rejects-auto-fill ()
+  "Stock's electric suppression is preserved; arbitrary fill is rejected."
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(progn\n(foo)\n(bar))")
+    (goto-char (point-min))
+    (forward-line 1)
+    (let ((secondary (save-excursion (forward-line 1) (point)))
+          (electric-called nil))
+      (multi-cursor-add-at-point secondary)
+      (multi-cursor-tests--with-bounded-elisp-newline-and-indent
+        (let ((electric-indent-mode t)
+              (post-self-insert-hook
+               (list (lambda () (setq electric-called t)))))
+          (command-execute 'newline-and-indent)))
+      (should-not electric-called)))
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(progn\n(foo)\n(bar))")
+    (goto-char (point-min))
+    (forward-line 1)
+    (let* ((secondary (save-excursion (forward-line 1) (point)))
+           (id (multi-cursor-add-at-point secondary))
+           (before (buffer-string))
+           (called nil)
+           (fill-function (lambda (&rest _) (setq called t))))
+      (multi-cursor-tests--with-bounded-elisp-newline-and-indent
+        ;; The local dynamic value models ordinary fill behavior, which the
+        ;; bounded transaction must not replay inconsistently.
+        (setq-local auto-fill-function fill-function)
+        (should-error (command-execute 'newline-and-indent) :type 'user-error))
+      (should-not called)
+      (should (equal (buffer-string) before))
+      (should (= (multi-cursor--cursor-id (multi-cursor-tests--cursor id)) id)))))
+
 ;;;; Bounded stock Emacs Lisp TAB indentation
 
 (defmacro multi-cursor-tests--with-bounded-elisp-indent (&rest body)

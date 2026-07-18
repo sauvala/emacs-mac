@@ -234,6 +234,12 @@ disabled. It also supports bounded Emacs Lisp line indentation with an integer
 whitespace replacements are applied atomically. Region indentation,
 comments/strings, custom indentation callbacks, completion, abbrev expansion,
 prefixes, and mixed literal/indentation branches remain fail-closed.
+`newline-and-indent` supports the same bounded stock Emacs Lisp indentation
+contract. It deletes adjacent horizontal space, inserts one newline, and
+indents every resulting line in source order before applying the complete
+plan atomically. Active selections, multiple cursors on one line, comments or
+strings, custom indentation, auto-fill, abbrevs, margins, protected text, and
+partial-line narrowing remain fail-closed.
 Arrow commands preserve
 per-cursor bidi and goal-column behavior, but visual-order horizontal arrows
 and display-line vertical arrows remain unsupported because they require live

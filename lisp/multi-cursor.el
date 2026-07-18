@@ -2298,7 +2298,10 @@ others."
 (defconst multi-cursor--elisp-indent-guarded-options
   '(indent-tabs-mode tab-width tab-always-indent abbrev-mode
     lisp-indent-offset lisp-body-indent
-    indent-line-function lisp-indent-function lisp-indent-local-overrides)
+    indent-line-function lisp-indent-function lisp-indent-local-overrides
+    overwrite-mode auto-fill-function use-hard-newlines
+    translation-table-for-input left-margin post-self-insert-hook
+    electric-indent-mode)
   "Options which define the bounded Emacs Lisp indentation contract.")
 
 (defun multi-cursor--elisp-indent-option-state ()
@@ -2527,6 +2530,191 @@ RECORD-FLAG controls the one command-history entry."
           (multi-cursor--restore-elisp-indent-option-state option-state)))
       (when record-flag
         (add-to-history 'command-history '(indent-for-tab-command) nil t)))))
+
+(defun multi-cursor--newline-indent-shadow-plan (states line-info)
+  "Return a stock shadow plan for bounded `newline-and-indent' STATES.
+
+LINE-INFO is the complete-line data already validated in the live buffer.
+The result is (REPLACEMENTS PLANNED-STATES PLANNED-TEXT)."
+  (let ((source-text
+         (save-restriction
+           (widen)
+           (buffer-substring (point-min) (point-max))))
+        (syntax (syntax-table))
+        (tabs indent-tabs-mode)
+        (width tab-width)
+        (offset lisp-indent-offset)
+        (body-indent lisp-body-indent)
+        records)
+    (with-temp-buffer
+      (let ((emacs-lisp-mode-hook nil)
+            (change-major-mode-hook nil)
+            (after-change-major-mode-hook nil))
+        (emacs-lisp-mode))
+      (set-syntax-table syntax)
+      (insert source-text)
+      (setq-local indent-tabs-mode tabs
+                  tab-width width
+                  lisp-indent-offset offset
+                  lisp-body-indent body-indent
+                  indent-line-function #'lisp-indent-line
+                  lisp-indent-function #'lisp-indent-function
+                  lisp-indent-local-overrides nil
+                  abbrev-mode nil
+                  auto-fill-function nil
+                  use-hard-newlines nil
+                  translation-table-for-input nil
+                  post-self-insert-hook nil
+                  before-change-functions nil
+                  after-change-functions nil)
+      (setq records
+            (cl-mapcar
+             (lambda (state info)
+               (let ((point (multi-cursor--edit-state-point state)))
+                 (list state (copy-marker point)
+                       (and (multi-cursor--edit-state-mark state)
+                            (copy-marker (multi-cursor--edit-state-mark state)))
+                       (copy-marker (car info))
+                       (save-excursion
+                         (goto-char point)
+                         (skip-chars-backward " \t" (car info))
+                         (point))
+                       (save-excursion
+                         (goto-char point)
+                         (skip-chars-forward " \t" (line-end-position))
+                         (point))
+                       nil)))
+             states line-info))
+      (unwind-protect
+          (progn
+            (dolist (record
+                     (sort (copy-sequence records)
+                           (lambda (left right)
+                             (< (marker-position (nth 1 left))
+                                (marker-position (nth 1 right))))))
+              (goto-char (marker-position (nth 1 record)))
+              (set-marker (mark-marker)
+                          (and (nth 2 record)
+                               (marker-position (nth 2 record))))
+              (setq mark-active (multi-cursor--edit-state-active (car record)))
+              (delete-horizontal-space t)
+              (let ((beg-marker (copy-marker (point))))
+                (setf (nth 6 record) beg-marker)
+                (let ((electric-indent-mode nil))
+                  (newline nil t)
+                  (indent-according-to-mode))
+                (set-marker (nth 1 record) (point))))
+            (let ((planned-states
+                   (mapcar
+                    (lambda (record)
+                      (let ((copy (copy-multi-cursor--edit-state (car record))))
+                        (setf (multi-cursor--edit-state-point copy)
+                              (marker-position (nth 1 record))
+                              (multi-cursor--edit-state-mark copy)
+                              (and (nth 2 record)
+                                   (marker-position (nth 2 record))))
+                        copy))
+                    records))
+                  replacements)
+              (dolist (record records)
+                (push (list (nth 4 record) (nth 5 record)
+                            (buffer-substring
+                             (marker-position (nth 6 record))
+                             (marker-position (nth 1 record)))
+                            (car record))
+                      replacements))
+              (list (nreverse replacements) planned-states (buffer-string))))
+        (dolist (record records)
+          (set-marker (nth 1 record) nil)
+          (when (nth 2 record) (set-marker (nth 2 record) nil))
+          (set-marker (nth 3 record) nil)
+          (when (nth 6 record) (set-marker (nth 6 record) nil)))))))
+
+(defun multi-cursor--newline-and-indent
+    (command prefix _keys record-flag _special)
+  "Handle COMMAND by inserting and indenting one Lisp newline per cursor."
+  (unless (eq command 'newline-and-indent)
+    (error "Invalid multiple-cursor newline-and-indent command: %S" command))
+  (unless (or (null prefix) (equal prefix 1))
+    (user-error "Multiple-cursor newline-and-indent accepts one newline"))
+  (when (minibufferp)
+    (user-error "Newline-and-indent is unsafe in a minibuffer"))
+  (unless (and (eq major-mode 'emacs-lisp-mode)
+               (eq indent-line-function #'lisp-indent-line)
+               (eq lisp-indent-function #'lisp-indent-function)
+               (null lisp-indent-local-overrides)
+               (integerp lisp-indent-offset)
+               (not (and (fboundp 'advice--p)
+                         (or (advice--p (symbol-function 'lisp-indent-line))
+                             (advice--p (symbol-function 'lisp-indent-function))))))
+    (user-error "This newline indentation configuration is not multiple-cursor safe"))
+  (when (or abbrev-mode auto-fill-function overwrite-mode use-hard-newlines
+            translation-table-for-input)
+    (user-error "This newline insertion context is not multiple-cursor safe"))
+  (let* ((states (multi-cursor--snapshot-edit-states))
+         (restriction (cons (point-min) (point-max))))
+    (when (cl-some #'multi-cursor--literal-tab-selection-p states)
+      (user-error "Newline-and-indent with active selections is unsupported"))
+    (let* ((line-info
+            (mapcar
+             (lambda (state)
+               (let ((info (multi-cursor--elisp-indent-line-info
+                            state restriction)))
+                 (save-excursion
+                   (goto-char (multi-cursor--edit-state-point state))
+                   (unless (zerop (current-left-margin))
+                     (user-error "Newline-and-indent with margins is unsupported"))
+                   (when (or (text-properties-at (point))
+                             (and (> (point) (line-beginning-position))
+                                  (text-properties-at (1- (point)))))
+                     (user-error "Property-sensitive newline is unsupported")))
+                 info))
+             states))
+           (line-starts (mapcar #'car line-info)))
+      (unless (= (length line-starts)
+                 (length (delete-dups (copy-sequence line-starts))))
+        (user-error "Multiple newline cursors on one physical line are unsupported"))
+      (let* ((option-state (multi-cursor--elisp-indent-option-state))
+             (original-cursors (copy-sequence multi-cursor--cursors))
+             (original-next-id multi-cursor--next-id)
+             (plan (multi-cursor--newline-indent-shadow-plan states line-info))
+             (replacements (car plan))
+             (planned-states (cadr plan))
+             (planned-text (nth 2 plan))
+             (edits
+              (mapcar
+               (lambda (record)
+                 (multi-cursor--preflight-edit-range
+                  (nth 0 record) (nth 1 record) (nth 0 record) (nth 1 record))
+                 (multi-cursor--edit-create
+                  :beg (nth 0 record) :end (nth 1 record)
+                  :string (nth 2 record) :survivor (nth 3 record)
+                  :members (list (nth 3 record))))
+               replacements))
+             (groups (multi-cursor--merge-edits edits t))
+             completed)
+        (unwind-protect
+            (progn
+              (multi-cursor--apply-edit-transaction
+               states groups
+               (lambda (_edits _positions _states)
+                 (unless (multi-cursor--elisp-indent-options-unchanged-p
+                          option-state)
+                   (error "Newline indentation options changed during editing"))
+                 (unless (multi-cursor--same-cursor-objects-p
+                          original-cursors original-next-id)
+                   (error "Newline indentation changed the cursor session"))
+                 (unless
+                     (equal (save-restriction (widen) (buffer-string))
+                            planned-text)
+                   (error "Newline hooks changed the planned text"))
+                 (multi-cursor--restore-edit-states
+                  planned-states original-cursors original-next-id)))
+              (setq completed t))
+          (unless completed
+            (multi-cursor--restore-elisp-indent-option-state option-state)))
+        (when record-flag
+          (add-to-history 'command-history '(newline-and-indent) nil t))))))
 
 (defun multi-cursor--literal-tab-handler
     (command prefix _keys record-flag _special)
@@ -3794,6 +3982,9 @@ created.  This mode refuses to start while the external
 
 (multi-cursor-register-command
  'indent-for-tab-command 'custom-handler #'multi-cursor--literal-tab-handler)
+
+(multi-cursor-register-command
+ 'newline-and-indent 'custom-handler #'multi-cursor--newline-and-indent)
 
 (dolist (command '(delete-backward-char delete-forward-char))
   (multi-cursor-register-command
