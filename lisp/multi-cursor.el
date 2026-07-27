@@ -130,12 +130,40 @@ cursor snapshots and the invariants needed to reject stale history."
 (defvar multi-cursor--redisplay-window nil
   "Window which most recently received a secondary-cursor snapshot.")
 
+(defconst multi-cursor--scan-motion-commands
+  '(forward-sexp backward-sexp forward-list backward-list
+    down-list up-list backward-up-list)
+  "Movement commands which report an unreachable target with `scan-error'.
+
+For these commands a `scan-error' is the local boundary condition, exactly
+as `beginning-of-buffer' is for `forward-char': the affected cursor stays
+put while the others move.")
+
+(defconst multi-cursor--argumentless-movement-commands
+  '(back-to-indentation)
+  "Vetted movement commands which accept no argument at all.")
+
 (defconst multi-cursor--movement-commands
-  '(forward-char backward-char left-char right-char
-    forward-word backward-word left-word right-word
-    move-beginning-of-line move-end-of-line
-    next-line previous-line next-logical-line previous-logical-line)
-  "Commands implemented by the native multiple-cursor movement broadcaster.")
+  (append
+   ;; Character, word, and line motion.
+   '(forward-char backward-char left-char right-char
+     forward-word backward-word left-word right-word
+     move-beginning-of-line move-end-of-line
+     beginning-of-line end-of-line
+     next-line previous-line next-logical-line previous-logical-line)
+   multi-cursor--argumentless-movement-commands
+   ;; Balanced-expression motion.  Mode hooks reach these through
+   ;; `forward-sexp-function', which is pure point motion by contract.
+   multi-cursor--scan-motion-commands
+   ;; Larger textual units.  Each clamps at the accessible boundary.
+   '(forward-paragraph backward-paragraph
+     forward-sentence backward-sentence
+     beginning-of-defun end-of-defun))
+  "Commands implemented by the native multiple-cursor movement broadcaster.
+
+Every command here moves point without editing text, prompting, pushing the
+mark, or switching buffers, so its result can be staged independently for
+each cursor.")
 
 (defconst multi-cursor--valid-policies
   '(broadcast-movement batch-edit run-once custom-handler unsupported)
@@ -3827,15 +3855,23 @@ semantics.  RECORD-FLAG controls recording in the variable
   "Invoke vetted movement COMMAND once, accepting boundary clamping.
 
 ARGUMENT is the prefix converted once for the whole broadcast.
-CANONICAL-LAST-COMMAND controls vertical goal-column continuity."
+CANONICAL-LAST-COMMAND controls vertical goal-column continuity.
+Boundary conditions are local to one cursor: that cursor keeps its clamped
+result while the rest of the broadcast proceeds.  Every other signal
+propagates so the caller can restore the whole cursor set."
   (let ((last-command
          (if (memq command '(next-line previous-line
                              next-logical-line previous-logical-line))
              (and temporary-goal-column canonical-last-command)
            last-command)))
-    (condition-case nil
-        (funcall command argument)
-      ((beginning-of-buffer end-of-buffer) nil))))
+    (condition-case err
+        (if (memq command multi-cursor--argumentless-movement-commands)
+            (funcall command)
+          (funcall command argument))
+      ((beginning-of-buffer end-of-buffer) nil)
+      (scan-error
+       (unless (memq command multi-cursor--scan-motion-commands)
+         (signal (car err) (cdr err)))))))
 
 (defun multi-cursor--movement-handler
     (command prefix _keys record-flag _special)

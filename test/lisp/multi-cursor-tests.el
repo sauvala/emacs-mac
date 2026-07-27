@@ -1538,6 +1538,83 @@ point rather than a bindable command."
                    (multi-cursor-tests--cursor cursor-id)))
                  2)))))
 
+(ert-deftest multi-cursor-movement-extended-commands-are-registered ()
+  "Every vetted movement command must carry the broadcast-movement policy."
+  (dolist (command multi-cursor--movement-commands)
+    (should (commandp command))
+    (should (eq (car (gethash command multi-cursor--command-policies))
+                'broadcast-movement))))
+
+(ert-deftest multi-cursor-movement-back-to-indentation-is-broadcast ()
+  "An argumentless movement command must reach every cursor."
+  (with-temp-buffer
+    (insert "  aa\n    bb\n")
+    (goto-char 4)
+    (let ((cursor-id (multi-cursor-add-at-point 11)))
+      (command-execute 'back-to-indentation)
+      (should (= (point) 3))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point
+                   (multi-cursor-tests--cursor cursor-id)))
+                 10)))))
+
+(ert-deftest multi-cursor-movement-sexp-motion-is-broadcast ()
+  "Balanced-expression motion must stage a result for every cursor."
+  (with-temp-buffer
+    (insert "(aa) (bb) (cc)")
+    (goto-char 1)
+    (let ((cursor-id (multi-cursor-add-at-point 6)))
+      (command-execute 'forward-sexp)
+      (should (= (point) 5))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point
+                   (multi-cursor-tests--cursor cursor-id)))
+                 10)))))
+
+(ert-deftest multi-cursor-movement-sexp-scan-error-is-local ()
+  "An unbalanced expression clamps one cursor without aborting the rest."
+  (with-temp-buffer
+    (insert "(aa) (bb")
+    (goto-char 1)
+    (let ((cursor-id (multi-cursor-add-at-point 6)))
+      (command-execute 'forward-sexp)
+      (should (= (point) 5))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point
+                   (multi-cursor-tests--cursor cursor-id)))
+                 6)))))
+
+(ert-deftest multi-cursor-movement-scan-error-still-aborts-other-commands ()
+  "A `scan-error' outside the scan-motion set must restore every cursor."
+  (with-temp-buffer
+    (insert "abcdef")
+    (goto-char 2)
+    (let* ((cursor-id (multi-cursor-add-at-point 4))
+           (advice (lambda (&rest _)
+                     (signal 'scan-error (list "Unbalanced" 1 1)))))
+      (advice-add 'forward-char :override advice)
+      (unwind-protect
+          (should-error (command-execute 'forward-char) :type 'scan-error)
+        (advice-remove 'forward-char advice))
+      (should (= (point) 2))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point
+                   (multi-cursor-tests--cursor cursor-id)))
+                 4)))))
+
+(ert-deftest multi-cursor-movement-paragraph-motion-is-broadcast ()
+  "Paragraph motion must stage a result for every cursor."
+  (with-temp-buffer
+    (insert "one\n\ntwo\n\nthree\n")
+    (goto-char 1)
+    (let ((cursor-id (multi-cursor-add-at-point 7)))
+      (command-execute 'forward-paragraph)
+      (should (= (point) 5))
+      (should (= (marker-position
+                  (multi-cursor--cursor-point
+                   (multi-cursor-tests--cursor cursor-id)))
+                 10)))))
+
 (ert-deftest multi-cursor-movement-right-char-error-restores-arrow-state ()
   (with-temp-buffer
     (insert "abcdefghijkl")
