@@ -11,6 +11,21 @@
 ;; latency distributions and operation counts; they do not encode machine-
 ;; dependent pass/fail timing limits.
 ;;
+;; Byte-compile every implementation under measurement FIRST, and never pass
+;; `load-prefer-newer' to a benchmark run.  Editing `multi-cursor.el' makes the
+;; source newer than its `.elc', so that option silently measures interpreted
+;; Lisp.  This is not a uniform penalty: the native implementation runs far
+;; more Lisp per cursor than `multiple-cursors.el' does, so interpretation
+;; slows it by roughly 10x against the package's 1.6x and inverts the
+;; comparison.  A 2026-07-27 run made exactly this mistake.
+;;
+;;   src/emacs -Q --batch -L ./lisp/ \
+;;     --eval '(byte-compile-file "lisp/multi-cursor.el")'
+;;
+;; Verify before trusting any number:
+;;
+;;   (byte-code-function-p (symbol-function 'multi-cursor--snapshot-edit-states))
+;;
 ;; Run the default matrix from the source tree with:
 ;;
 ;;   src/emacs -Q --batch -L ./lisp/ -L test/benchmarks \

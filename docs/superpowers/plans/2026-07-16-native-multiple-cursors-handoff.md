@@ -171,11 +171,86 @@ invariants **31/31**, `makeinfo` reports no `mark.texi` diagnostics,
 `check-parens` passes, `checkdoc` reports **13** warnings both before and
 after the change (no new ones), and `git diff --check` is clean.
 
-### 2026-07-27 package comparison: acceptance requirement 2 fails for editing
+### 2026-07-27 package comparison: acceptance requirement 2 passes
+
+**Read this before the superseded section below it.**  The first comparison
+run was invalid and its conclusion was the opposite of the truth.
+
+`multiple-cursors.el` was cloned, **both implementations were byte-compiled**,
+and the full matrix ran.  Ratios are medians over 12 cells: ascii, combining,
+and bidi content, 10 KiB and 1 MiB buffers, and four distributions.  The
+ratio is package median over native median, so above 1.0 means native is
+faster:
+
+| operation | 2 cursors | 10 | 100 | 1000 |
+| --------- | --------- | -- | --- | ---- |
+| insert    | 1.29x     | 1.50x | 1.57x | 2.23x |
+| delete    | 1.14x     | 1.26x | 1.40x | 2.06x |
+| horizontal motion | 3.40x | 3.89x | 4.17x | 6.98x |
+| vertical motion   | 2.07x | 2.36x | 2.61x | 3.71x |
+
+p95 ratios agree.  **Native is faster than the package for every operation at
+every cursor count**, and the margin grows with cursor count for editing as
+well as movement (1.29x to 2.23x), which is the scaling advantage the batch
+design predicted.  Acceptance requirement 2 is met.
+
+Absolute native latencies: insert at 100 cursors is 0.59 ms, at 1000 cursors
+7.9 ms.  Both are comfortably interactive.
+
+#### The methodology error, so it is not repeated
+
+The first run passed `--eval '(setq load-prefer-newer t)'` — carried over
+from the ERT invocation, where it is needed so tests pick up edited source.
+For the benchmark it made Emacs load `lisp/multi-cursor.el` **as source**
+instead of the byte-compiled `.elc`.  The freshly cloned package had no
+`.elc` at all, so both sides ran interpreted.  That looks symmetric and is
+not: the native implementation executes far more Lisp per cursor than the
+package does, so interpretation penalizes it disproportionately.
+
+Byte-compiling changed native insert at 100 cursors from 6.007 ms to
+0.591 ms — **10.2x** — while the package moved only from 1.52 ms to
+0.931 ms, about 1.6x.  That asymmetry inverted the entire comparison.
+
+**Always byte-compile both sides before running this benchmark, and never
+pass `load-prefer-newer` to it.**  Confirm with:
+
+```elisp
+(byte-code-function-p (symbol-function 'multi-cursor--snapshot-edit-states))
+```
+
+#### Where native per-cursor time actually goes
+
+An `elp` profile of `self-insert-command` at 100 cursors attributes the
+command almost entirely to `multi-cursor--batch-edit`, and within it:
+
+- `multi-cursor--snapshot-edit-states` dominates, and runs **twice** per
+  command — once before the edit, for rollback and the undo generation's
+  "before" side, and once inside `multi-cursor--record-undo-generation` for
+  its "after" side.  Each pass allocates one `multi-cursor--edit-state` per
+  cursor and re-normalizes (sorts) the cursor list.
+- Edit-record construction allocates another struct per cursor, plus the
+  merge pass.
+- Marker detach and reattach bracket the transaction.
+
+This is the price of the guarantees: atomic rollback, one undo unit, and
+exact cursor restoration on undo.  The package buys none of them — it pops
+each fake cursor's state from an overlay, runs the command inside
+`ignore-errors`, and recreates the cursor.
+
+Native still wins, so none of this is urgent.  If it is ever optimized, the
+one structural saving available is that the two snapshots per command are
+near-identical work; the "after" snapshot could likely be derived from the
+"before" snapshot plus the applied edit deltas rather than rebuilt from
+every cursor.  Profile before attempting it.
+
+### Superseded: the invalid interpreted-mode comparison
+
+**This section is retained only as a record of the error.  Its numbers are
+wrong: both implementations ran interpreted.  See the corrected section
+above.**
 
 `multiple-cursors.el` was cloned and put on `load-path`, and the full
-benchmark matrix ran against it for the first time.  The result splits
-cleanly, and it is not the result the design assumed.
+benchmark matrix ran against it for the first time.
 
 Ratios are medians over 12 cells each: ascii, combining, and bidi content,
 10 KiB and 1 MiB buffers, and clustered/even/coincident/overlapping
@@ -223,20 +298,8 @@ Two fairness notes, neither of which explains a 2.7x per-cursor gap:
   correctness properties with that time.  Acceptance requirement 2 as
   written is nonetheless unconditional on latency, and it fails.
 
-What to do with this:
-
-1. Do not publish a comparative editing-performance claim.  The movement
-   claim is real and can be stated with these numbers.
-2. Profile the batch-edit path before optimizing it.  The suspects are
-   per-cursor allocation in edit-record and edit-state construction,
-   marker detach/reattach, and position remapping — but this has not been
-   profiled yet, and the 2x allocation figure is the only direct evidence.
-3. Treat absolute latency as a separate usability question from the ratio.
-   At 100 cursors native insert is about 6 ms per keystroke, which is
-   usable; at 1000 cursors it is about 70 ms, which is not.
-
-Raw results are reproducible with the command in section 4; the package was
-cloned from `https://github.com/magnars/multiple-cursors.el`.
+Every conclusion drawn above is void.  The package was cloned from
+`https://github.com/magnars/multiple-cursors.el`.
 
 ## Architectural invariants to preserve
 
@@ -517,8 +580,10 @@ The headless harness exists at
 so native painter counters are populated, and compare against
 `multiple-cursors.el` when that package is available on `load-path`.
 
-**The package comparison has now been run, and acceptance requirement 2
-fails for editing.**  See the checkpoint below.
+**The package comparison has now been run byte-compiled, and acceptance
+requirement 2 passes: native is faster at every operation and every cursor
+count.**  See the 2026-07-27 checkpoint above, including the byte-compilation
+requirement — an interpreted run inverts the result.
 
 Capture reproducible results for 1, 10, 100, and 1,000 cursors across editing,
 movement, normalization, and redisplay.  Record median/p95 time, allocation,
