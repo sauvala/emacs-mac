@@ -171,6 +171,73 @@ invariants **31/31**, `makeinfo` reports no `mark.texi` diagnostics,
 `check-parens` passes, `checkdoc` reports **13** warnings both before and
 after the change (no new ones), and `git diff --check` is clean.
 
+### 2026-07-27 package comparison: acceptance requirement 2 fails for editing
+
+`multiple-cursors.el` was cloned and put on `load-path`, and the full
+benchmark matrix ran against it for the first time.  The result splits
+cleanly, and it is not the result the design assumed.
+
+Ratios are medians over 12 cells each: ascii, combining, and bidi content,
+10 KiB and 1 MiB buffers, and clustered/even/coincident/overlapping
+distributions.  The ratio is package median over native median, so above
+1.0 means native is faster:
+
+| operation | 2 cursors | 10 | 100 | 1000 |
+| --------- | --------- | -- | --- | ---- |
+| insert    | 0.18x     | 0.23x | 0.25x | 0.37x |
+| delete    | 0.16x     | 0.20x | 0.23x | 0.37x |
+| horizontal motion | 2.91x | 2.69x | 2.66x | 3.73x |
+| vertical motion   | 2.23x | 2.23x | 2.29x | 3.41x |
+
+p95 ratios track the medians closely, so this is not tail noise.
+
+**Movement passes and editing fails.**  Native movement is 2.2-3.7x faster
+and its margin *grows* with cursor count, which is the scaling advantage the
+batch design predicted.  Native editing is 2.7-6x *slower* than the package
+at every count from 2 to 1000.
+
+Fitting the editing curves between 100 and 1000 cursors, native costs
+0.069 ms per cursor against the package's 0.025 ms — about 2.7x more
+per-cursor work.  The gap narrows as the count rises (0.16x to 0.37x), so
+native does scale better and would cross over somewhere well above 1000
+cursors, but no tested configuration reaches it.  This is a per-cursor cost
+problem in the batch-edit path, not a fixed setup cost that could be
+amortized away.
+
+Allocation is consistent with that on small buffers: at 100 cursors in a
+10 KiB buffer native allocates about 2x the package (95502 against 46938
+units, and the same ratio for bidi and combining content).  At 1 MiB the
+fixture's own allocation dominates and the ratio falls to 1.04x, so
+allocation alone does not explain the time gap — do not treat it as the
+diagnosis.  Both providers produce identical before/after change hook
+counts, and native's undo list is *tighter* (201 entries against 298).
+
+Two fairness notes, neither of which explains a 2.7x per-cursor gap:
+
+- The benchmark drives the package through
+  `mc/execute-command-for-all-cursors` without enabling
+  `multiple-cursors-mode`, so it skips that mode's `post-command-hook`
+  dispatch.  That overhead is per command, not per cursor.
+- The package wraps each cursor in `ignore-errors` and offers no atomicity,
+  no preflight, and no single-undo-unit guarantee.  Native buys real
+  correctness properties with that time.  Acceptance requirement 2 as
+  written is nonetheless unconditional on latency, and it fails.
+
+What to do with this:
+
+1. Do not publish a comparative editing-performance claim.  The movement
+   claim is real and can be stated with these numbers.
+2. Profile the batch-edit path before optimizing it.  The suspects are
+   per-cursor allocation in edit-record and edit-state construction,
+   marker detach/reattach, and position remapping — but this has not been
+   profiled yet, and the 2x allocation figure is the only direct evidence.
+3. Treat absolute latency as a separate usability question from the ratio.
+   At 100 cursors native insert is about 6 ms per keystroke, which is
+   usable; at 1000 cursors it is about 70 ms, which is not.
+
+Raw results are reproducible with the command in section 4; the package was
+cloned from `https://github.com/magnars/multiple-cursors.el`.
+
 ## Architectural invariants to preserve
 
 1. Lisp owns the session, command classification, cursor snapshots, planning,
@@ -384,13 +451,16 @@ bounded native handlers.  `open-line`, `newline-and-indent`, and word
 deletion are done.  The remaining high-value candidates, in rough order of
 usefulness against implementation risk:
 
-1. `set-mark-command` and `exchange-point-and-mark`.  The cursor records
-   already carry an independent mark, direction, and active flag, and
-   secondary selections already render, but there is no interactive way to
-   reach any of it.  This is the largest capability currently sitting unused
-   behind a missing handler.
+1. ~~`set-mark-command` and `exchange-point-and-mark`~~ — done in
+   `bbf75ff7337` and `20154206f8c`.  Both are bounded to the branches which
+   act on the current position; every prefixed branch is rejected because it
+   navigates the buffer-global mark ring.  The primary keeps stock behavior
+   through `push-mark-command`, so exactly one mark-ring push happens per
+   command and secondary marks never reach the ring.  Note the invariant
+   found while doing it: an active flag without a mark is not a
+   representable cursor state, so activation must skip markless cursors.
 2. `kill-line` and `kill-whole-line`.  Very common, and expressible as a
-   batch edit over per-cursor line bounds.
+   batch edit over per-cursor line bounds.  Now the top priority.
 3. Case conversion (`upcase-word`, `downcase-word`, `capitalize-word`) and
    `delete-horizontal-space`/`just-one-space`.  Pure text transforms with
    no mode-specific callbacks.
@@ -447,20 +517,8 @@ The headless harness exists at
 so native painter counters are populated, and compare against
 `multiple-cursors.el` when that package is available on `load-path`.
 
-**The package comparison has never actually been run.**  Every recorded
-benchmark emits `# multiple-cursors.el unavailable; package rows omitted`,
-so design principle 8 and acceptance requirement 2 — that the native path
-beat `multiple-cursors.el` at 100 and 1,000 cursors — remain unverified.
-This is the cheapest outstanding item on the whole plan and it gates the
-project's central justification: install the package, run the matrix, and
-record the result either way.  Until then, no comparative performance claim
-should appear in `README.md`, `NEWS`, or the manuals.
-
-A 2026-07-27 headless run confirms the scaling shape is at least sound:
-cost per cursor is flat from 10 to 100 cursors across insert, delete,
-movement, and normalization (roughly 65 us per cursor per edit, 5 us per
-cursor per movement), with no quadratic marker growth.  Absolute numbers are
-machine-specific and are not thresholds.
+**The package comparison has now been run, and acceptance requirement 2
+fails for editing.**  See the checkpoint below.
 
 Capture reproducible results for 1, 10, 100, and 1,000 cursors across editing,
 movement, normalization, and redisplay.  Record median/p95 time, allocation,
