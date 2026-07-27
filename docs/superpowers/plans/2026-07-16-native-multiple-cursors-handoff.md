@@ -120,6 +120,57 @@ below are a longer-term backlog rather than unfinished work in this
 daily-editing slice; TAB, open-line, newline-and-indent, word killing,
 session undo/redo, and bounded yank-pop should not be reimplemented.
 
+### 2026-07-27 command-classification checkpoint
+
+A coverage audit measured how many ordinary editing commands actually reach
+a handler during a session.  Of a 45-command sample of common commands, only
+**5** were supported; **40** failed closed.  Most of the gap was not missing
+handlers but missing *classification*: commands which never edit at a cursor
+position — `other-window`, `switch-to-buffer`, `mwheel-scroll`,
+`scroll-other-window`, `describe-function`, `find-file` — signalled
+"not multiple-cursor safe" merely because nothing had registered them.
+The design already called for these to be `run-once`; that step had never
+been completed.  The same sample now reports **20** supported.
+
+Completed in this checkpoint:
+
+- `9be799d9fa9` collects the run-once set in
+  `multi-cursor--run-once-commands`, grouped by why each group is safe:
+  cursor-set management, prefix accumulation, scrolling and display, window
+  and frame management, buffer and file commands, help, and evaluation.
+  Entries which are not preloaded are skipped.  `multi-cursor-count` became
+  interactive so the documented accessibility report is bindable.
+- `c58c6c924c8` extends the vetted movement set with
+  `back-to-indentation`, plain `beginning-of-line`/`end-of-line`,
+  balanced-expression motion, paragraph and sentence motion, and defun
+  motion.
+- `884118c1f15` corrects `doc/emacs/mark.texi`, which had drifted far enough
+  to state the opposite of the shipped behavior.
+
+Two durable facts were established while doing this:
+
+- `multi-cursor-add-at-point` **cannot** become a command.  It rejects the
+  primary position by contract, so calling it without an argument always
+  signals.  It is a Lisp entry point; `multi-cursor-add-above` and
+  `multi-cursor-add-below` are the interactive equivalents.  Its docstring
+  now says so, and a test pins it.
+- Two mechanical traps govern adding movement commands.  Some take no
+  argument at all (`back-to-indentation`), so `multi-cursor--invoke-movement`
+  now calls argumentless commands without one.  Expression motion reports an
+  unreachable target with `scan-error`, not beginning/end-of-buffer, so that
+  condition is local for `multi-cursor--scan-motion-commands` only and still
+  aborts the broadcast from any other command.
+
+`beginning-of-buffer` and `end-of-buffer` were deliberately left out: they
+push the mark, which is buffer-global state the movement staging does not
+model per cursor.  Deciding their semantics (collapse-to-one versus
+primary-only) is open work.
+
+At this checkpoint the combined Lisp/C suite passes **303/303**, source
+invariants **31/31**, `makeinfo` reports no `mark.texi` diagnostics,
+`check-parens` passes, `checkdoc` reports **13** warnings both before and
+after the change (no new ones), and `git diff --check` is clean.
+
 ## Architectural invariants to preserve
 
 1. Lisp owns the session, command classification, cursor snapshots, planning,
@@ -329,9 +380,27 @@ separate explicit contracts.
 ### 3. Broaden editing commands and define session undo behavior
 
 After Return/TAB foundations, audit commonly used commands and add only
-bounded native handlers.  Likely candidates include `open-line`,
-`newline-and-indent`, word deletion, case conversion, transpose operations,
-and comment commands, but prioritize by usefulness and implementation risk.
+bounded native handlers.  `open-line`, `newline-and-indent`, and word
+deletion are done.  The remaining high-value candidates, in rough order of
+usefulness against implementation risk:
+
+1. `set-mark-command` and `exchange-point-and-mark`.  The cursor records
+   already carry an independent mark, direction, and active flag, and
+   secondary selections already render, but there is no interactive way to
+   reach any of it.  This is the largest capability currently sitting unused
+   behind a missing handler.
+2. `kill-line` and `kill-whole-line`.  Very common, and expressible as a
+   batch edit over per-cursor line bounds.
+3. Case conversion (`upcase-word`, `downcase-word`, `capitalize-word`) and
+   `delete-horizontal-space`/`just-one-space`.  Pure text transforms with
+   no mode-specific callbacks.
+4. `comment-dwim` and `comment-line` only after auditing how much
+   mode-specific machinery `comment-region` reaches; likely expensive.
+5. `beginning-of-buffer`/`end-of-buffer`, which need a decision about
+   `push-mark` before they can be classified at all.
+
+Transpose operations are deliberately ranked last: they move text across
+cursor boundaries and do not fit the disjoint-replacement model cleanly.
 
 Active-session undo/redo now restores cursor positions, selections, direction,
 goal columns, and yank metadata one session generation at a time. Remaining
@@ -339,12 +408,59 @@ undo work is compatibility hardening: exercise narrowing changes, more command
 types, long sessions, and interactive command-loop use without weakening the
 stale-history boundary.
 
+#### Open question: the cost of per-mode indentation
+
+Before writing a fourth indentation shadow plan, settle whether the current
+strategy scales.  Today roughly 900 lines buy RET and TAB *in Emacs Lisp
+mode only*:
+
+| region                        | lines |
+| ----------------------------- | ----- |
+| electric newline guards       | ~500  |
+| Emacs Lisp indent shadow plan | ~236  |
+| newline-and-indent shadow     | ~185  |
+
+Most of that is not indentation logic; it is
+`multi-cursor--electric-newline-reference-state` and its validators
+recursively snapshotting cons cells, char-tables, extra slots, parents, and
+vectors to detect whether a hook mutated a guarded option.  Extending this
+to C, Python, or any tree-sitter mode means reimplementing that mode's
+indentation engine per mode, at a similar cost each time.
+
+The invariant "never invoke an arbitrary interactive command once per
+cursor" is correct and must stay — it is what makes edits transactional and
+keeps cost linear.  But it constrains how edits are *applied*, not how a
+target column is *computed*.  Worth prototyping: run the mode's real
+`indent-line-function` in a shadow context (an indirect buffer, or a temp
+buffer carrying enough syntactic context) purely to compute each cursor's
+target indentation, then apply the whole set through the existing
+transaction.  That would keep atomicity, one undo unit, and linear scaling
+while making indentation mode-generic.
+
+If the prototype fails, record why, and treat per-mode indentation as
+permanently bounded rather than continuing to add shadow plans by default.
+
 ### 4. Run and record GUI performance baselines
 
 The headless harness exists at
 `test/benchmarks/multi-cursor-benchmarks.el`.  Run it from a graphical Mac frame
 so native painter counters are populated, and compare against
 `multiple-cursors.el` when that package is available on `load-path`.
+
+**The package comparison has never actually been run.**  Every recorded
+benchmark emits `# multiple-cursors.el unavailable; package rows omitted`,
+so design principle 8 and acceptance requirement 2 — that the native path
+beat `multiple-cursors.el` at 100 and 1,000 cursors — remain unverified.
+This is the cheapest outstanding item on the whole plan and it gates the
+project's central justification: install the package, run the matrix, and
+record the result either way.  Until then, no comparative performance claim
+should appear in `README.md`, `NEWS`, or the manuals.
+
+A 2026-07-27 headless run confirms the scaling shape is at least sound:
+cost per cursor is flat from 10 to 100 cursors across insert, delete,
+movement, and normalization (roughly 65 us per cursor per edit, 5 us per
+cursor per movement), with no quadratic marker growth.  Absolute numbers are
+machine-specific and are not thresholds.
 
 Capture reproducible results for 1, 10, 100, and 1,000 cursors across editing,
 movement, normalization, and redisplay.  Record median/p95 time, allocation,
