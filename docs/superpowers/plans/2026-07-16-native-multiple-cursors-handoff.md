@@ -237,11 +237,74 @@ exact cursor restoration on undo.  The package buys none of them — it pops
 each fake cursor's state from an overlay, runs the command inside
 `ignore-errors`, and recreates the cursor.
 
-Native still wins, so none of this is urgent.  If it is ever optimized, the
-one structural saving available is that the two snapshots per command are
-near-identical work; the "after" snapshot could likely be derived from the
-"before" snapshot plus the applied edit deltas rather than rebuilt from
-every cursor.  Profile before attempting it.
+Native still wins, so none of this is urgent.  The double snapshot was
+profiled on 2026-07-27 and **deliberately deferred**; see below so the work
+is not re-investigated.
+
+#### Deferred: removing the second per-command snapshot
+
+Measured, byte-compiled, with GC controlled and run order alternated.
+
+Replacing the second snapshot with a reuse of the first (semantically wrong,
+but it bounds the win) saves **37.6%** of command time at 100 cursors
+(0.990 ms to 0.618 ms) and **30.1%** at 1000 (11.200 ms to 7.828 ms).
+
+Within one snapshot the cost splits as:
+
+| component | 100 cursors | 1000 cursors |
+| --------- | ----------- | ------------ |
+| read cursor state back + construct (current) | 0.250 ms, 11 GCs | 2.31 ms, 92 GCs |
+| construct only, values already in hand | 0.033 ms, 2 GCs | 0.31 ms, 17 GCs |
+
+So **the read-back is ~87% and allocation only ~13%**.  Normalization is
+minor (0.039 ms of 0.291 ms at 100 cursors).  Swapping the `cl-defstruct`
+keyword constructor for a positional one is worthless: byte-compiled they
+measure 0.46 us against 0.44 us per record.
+
+That rules out changing the `multi-cursor--edit-state` representation to a
+flat vector of primitives.  It would attack the 13%, and to get it you must
+touch all 13 snapshot call sites, `multi-cursor--restore-edit-states`, and
+the undo-generation records.  Worst effort-to-benefit ratio available.
+
+The approach to use, if it is ever done, is to have the installer emit the
+after-states as a by-product.  `multi-cursor--install-edit-results` already
+computes every value one needs — the new `position`, the remapped mark, and
+the nil active/goal-column it sets — while it walks the survivors.  Emitting
+them there removes the read-back, which is the 87%.
+
+Do it incrementally, because it is a contract change, not a one-site edit:
+`multi-cursor--apply-edit-transaction` takes an optional installer, and yank,
+electric newline, and open-line each supply their own.
+
+1. Have only the **default** installer emit after-states; keep
+   `multi-cursor--snapshot-edit-states` as the fallback for installers which
+   do not.
+2. That covers `self-insert-command` and the deletion commands, which are the
+   only ones repeated fast enough for latency to matter.  Yank and RET are
+   one-offs where 3 ms is irrelevant.
+3. Pin the invariant with a permanent test: the states an installer emits
+   must equal what a fresh snapshot would produce at that moment.  That is
+   directly assertable, and it stops the fast and fallback paths silently
+   diverging.  Run it against the existing undo/redo suite, which is what
+   would actually catch a mistake.
+
+Trigger for revisiting: someone actually reporting latency at high cursor
+counts.  At 100 cursors the win is 0.37 ms, which nobody can perceive, and
+1000 is the `multi-cursor-max-cursors` ceiling rather than a workload.  Until
+then this trades risk in the undo machinery — the most safety-critical code
+on the branch — for speed no one will feel.
+
+#### Not a real problem: quadratic cursor creation
+
+Adding cursors by calling `multi-cursor-add-at-point` in a loop is
+O(n^2 log n) — every call scans the cursor list and then re-sorts all of it
+through `multi-cursor--normalize`, so building 1000 cursors that way takes
+about 364 ms.  This looks alarming and is not reachable from a user command.
+Every bulk creation path goes through `multi-cursor--add-states`, which
+dedupes with a hash table and normalizes exactly once:
+`multi-cursor-select-all-occurrences` produces 1000 cursors in 1.85 ms, flat
+at about 0.002 ms per cursor.  The loop is a benchmark-fixture shape, not a
+workload.  Do not "fix" it.
 
 ### Superseded: the invalid interpreted-mode comparison
 
