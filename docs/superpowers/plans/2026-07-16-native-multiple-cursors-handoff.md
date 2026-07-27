@@ -489,18 +489,30 @@ ordering; a failure in both backends points to glyph geometry, cache
 publication, or direct `draw_glyphs` use; a filled-box-only failure points to
 contrast rendering.
 
-#### 1.3 Scope renderer state correctly
+#### 1.3 Scope renderer state correctly (complete)
 
-The Metal painter currently changes the frame-wide clip with
-`emacs_metal_set_clip_rect` and later resets it.  Replace this with scoped
-clip-state handling: save or push the current clip, intersect it with the
-window text area and cursor rectangle, draw, and restore or pop the original
-clip.  Never reset renderer state owned by another drawing operation.  Assert
-that every cursor rectangle and clip is contained by the target window's text
-area.
+Done in `503ad47848e`, `Scope Metal clipping for secondary cursors`.
 
-Commit this behavior separately as `Scope Metal clipping for secondary
-cursors`.
+The painter now uses `emacs_metal_push_clip` and `emacs_metal_pop_clip`
+around each command instead of `emacs_metal_set_clip_rect` plus a trailing
+`emacs_metal_reset_clip`.  Both halves of the old pairing were wrong, and
+reading the renderer confirmed it rather than inferring it:
+`emacs_metal_set_clip_rect` goes through `clip_set_region_if_changed`, which
+forces `clip_depth` back to 1 and therefore discards a clip the caller had
+pushed; `emacs_metal_reset_clip` then sets the full frame rather than
+restoring the entry clip.  `push_clip` intersects with the parent instead of
+replacing it, `ensure_batch` reads `clip_stack[clip_depth - 1]` so the pushed
+clip governs the draws between push and pop, and the stack holds 32 levels
+against the painter's single nested push.  The Metal and Core Graphics paths
+now have matching clip semantics, the latter via
+`CGContextSaveGState`/`CGContextRestoreGState`.
+
+This was argued from the renderer's own clip contract and verified only by
+compiling and running the suites.  It is not visual verification; the gate in
+section 1 is still open.
+
+Still not done from this item: asserting that every cursor rectangle and clip
+is contained by the target window's text area.
 
 #### 1.4 Restore old cursor cells through ordinary redisplay
 
@@ -517,10 +529,21 @@ redisplay`.
 #### 1.5 Reintroduce filled-box contrast conservatively
 
 After rectangle painting and cursor removal are clean, redraw one contrasting
-glyph at a time under a local clip.  Remove the process-global
-`mac_cursor_decoration_span_*` state if possible.  Test wide glyphs, combining
-characters, bidi text, tabs, images, and overlapping glyph rows.  Reintroduce
+glyph at a time under a local clip.  Test wide glyphs, combining characters,
+bidi text, tabs, images, and overlapping glyph rows.  Reintroduce
 adjacent-glyph batching only after the graphical checks pass.
+
+**Do not remove the process-global `mac_cursor_decoration_span_*` state.**
+That instruction was written on suspicion; the code was read on 2026-07-27
+and the state is safe as written.  It is read in exactly one place,
+`mac_set_glyph_string_clipping`, which runs synchronously during
+`draw_glyphs` glyph-string setup, and the painter saves and restores all
+three variables around that call.  Nothing captures them in a GCD block, so
+deferred drawing cannot observe a stale value.  Removing them would mean
+adding a field to `struct glyph_string` or a parameter to the generic
+`draw_glyphs`, which would breach exactly the generic/backend boundary the
+redisplay design exists to protect.  This is a style preference, not a
+defect, and the trade is not worth it.
 
 Commit this behavior separately as `Restore contrasting secondary cursor
 glyphs safely`.
@@ -585,8 +608,13 @@ usefulness against implementation risk:
    command and secondary marks never reach the ring.  Note the invariant
    found while doing it: an active flag without a mark is not a
    representable cursor state, so activation must skip markless cursors.
-2. `kill-line` and `kill-whole-line`.  Very common, and expressible as a
-   batch edit over per-cursor line bounds.  Now the top priority.
+2. ~~`kill-line`~~ — done in `f1e3b393b38`, following the `word-kill`
+   contract: ranges planned from the original snapshots, overlaps merged so
+   two cursors on one line delete it once while both contribute payload, and
+   the handler reports itself as `kill-region' so consecutive kills append.
+   Prefix arguments and a cursor at the accessible end are rejected, the
+   latter because a broadcast edit is atomic.  `kill-whole-line` is still
+   open and is a smaller version of the same work.
 3. Case conversion (`upcase-word`, `downcase-word`, `capitalize-word`) and
    `delete-horizontal-space`/`just-one-space`.  Pure text transforms with
    no mode-specific callbacks.
