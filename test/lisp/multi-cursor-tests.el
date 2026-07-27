@@ -1595,6 +1595,20 @@ point rather than a bindable command."
       (should (region-active-p))
       (should (plist-get (car (multi-cursor-selections)) :mark-active)))))
 
+(ert-deftest multi-cursor-mark-repeat-never-activates-a-markless-cursor ()
+  "Activation must not produce an active selection with no mark."
+  (with-temp-buffer
+    (insert "alpha\nbeta\ngamma\n")
+    (goto-char 1)
+    (push-mark 3 t t)
+    (multi-cursor-add-at-point 7)
+    (let ((transient-mark-mode t)
+          (last-command 'set-mark-command))
+      (command-execute 'set-mark-command))
+    (let ((selection (car (multi-cursor-selections))))
+      (should-not (plist-get selection :mark))
+      (should-not (plist-get selection :mark-active)))))
+
 (ert-deftest multi-cursor-mark-prefixed-set-mark-is-rejected ()
   "Mark-ring navigation is buffer-global and must fail before acting."
   (with-temp-buffer

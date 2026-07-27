@@ -3959,14 +3959,18 @@ Reproducing that for a whole cursor set is not worth its own contract."
     (and mark (marker-position mark))))
 
 (defun multi-cursor--set-cursor-activation (cursors active)
-  "Set every cursor in CURSORS to ACTIVE, retaining its point and mark."
+  "Set every cursor in CURSORS to ACTIVE, retaining its point and mark.
+
+A cursor with no mark has no selection to activate, so it stays inactive:
+an active flag without a mark is not a representable cursor state."
   (dolist (cursor cursors)
-    (multi-cursor--set-record-state
-     cursor
-     (marker-position (multi-cursor--cursor-point cursor))
-     (multi-cursor--cursor-mark-position cursor)
-     active
-     (multi-cursor--cursor-goal-column cursor))))
+    (let ((mark (multi-cursor--cursor-mark-position cursor)))
+      (multi-cursor--set-record-state
+       cursor
+       (marker-position (multi-cursor--cursor-point cursor))
+       mark
+       (and mark active)
+       (multi-cursor--cursor-goal-column cursor)))))
 
 (defun multi-cursor--set-mark (command prefix _keys record-flag _special)
   "Set or toggle each cursor's own mark for COMMAND.
