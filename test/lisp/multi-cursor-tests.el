@@ -4533,6 +4533,137 @@ point rather than a bindable command."
       (should (multi-cursor--cursor-mark-active
                (car multi-cursor--cursors))))))
 
+(ert-deftest multi-cursor-line-kill-policy-and-stock-binding ()
+  "`kill-line' is dispatched by a bounded native handler."
+  (should (eq (car (gethash 'kill-line multi-cursor--command-policies))
+              'custom-handler))
+  (should (eq (key-binding (kbd "C-k")) 'kill-line)))
+
+(ert-deftest multi-cursor-line-kill-kills-each-line-remainder ()
+  "C-k kills from every cursor to its own end of line."
+  (with-temp-buffer
+    (insert "alpha one\nbeta two\ngamma three\n")
+    (goto-char 7)                       ; before "one"
+    (multi-cursor-add-at-point 16)      ; before "two"
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (interprogram-cut-function nil))
+      (command-execute 'kill-line)
+      (should (equal (buffer-string) "alpha \nbeta \ngamma three\n"))
+      (should (equal kill-ring '("onetwo"))))))
+
+(ert-deftest multi-cursor-line-kill-at-eol-takes-the-newline ()
+  "With nothing but the line end left, C-k kills through the newline."
+  (with-temp-buffer
+    (insert "alpha\nbeta\ngamma\n")
+    (goto-char 6)                       ; end of "alpha"
+    (multi-cursor-add-at-point 11)      ; end of "beta"
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (interprogram-cut-function nil))
+      (command-execute 'kill-line)
+      (should (equal (buffer-string) "alphabetagamma\n"))
+      (should (equal kill-ring '("\n\n"))))))
+
+(ert-deftest multi-cursor-line-kill-honors-kill-whole-line ()
+  "`kill-whole-line' at column zero kills the whole line and its newline."
+  (with-temp-buffer
+    (insert "alpha\nbeta\ngamma\n")
+    (goto-char 1)
+    (multi-cursor-add-at-point 7)
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (kill-whole-line t)
+          (interprogram-cut-function nil))
+      (command-execute 'kill-line)
+      (should (equal (buffer-string) "gamma\n"))
+      (should (equal kill-ring '("alpha\nbeta\n"))))))
+
+(ert-deftest multi-cursor-line-kill-is-one-undo-unit ()
+  "A broadcast line kill undoes as a single unit."
+  (with-temp-buffer
+    (buffer-enable-undo)
+    (insert "alpha one\nbeta two\ngamma\n")
+    (undo-boundary)
+    (goto-char 7)
+    (multi-cursor-add-at-point 16)
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (interprogram-cut-function nil))
+      (command-execute 'kill-line))
+    (should (equal (buffer-string) "alpha \nbeta \ngamma\n"))
+    (let ((last-command nil))
+      (command-execute 'undo))
+    (should (equal (buffer-string) "alpha one\nbeta two\ngamma\n"))))
+
+(ert-deftest multi-cursor-line-kill-same-line-cursors-merge-once ()
+  "Two cursors on one line delete it once but both contribute payload."
+  (with-temp-buffer
+    (insert "alpha beta gamma\nsecond\n")
+    (goto-char 7)                       ; before "beta"
+    (multi-cursor-add-at-point 12)      ; before "gamma"
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (interprogram-cut-function nil))
+      (command-execute 'kill-line)
+      (should (equal (buffer-string) "alpha \nsecond\n"))
+      ;; The merged deletion happens once; the payload keeps both original
+      ;; ranges in buffer order, including the overlap.
+      (should (equal kill-ring '("beta gammagamma"))))))
+
+(ert-deftest multi-cursor-line-kill-at-buffer-end-is-atomic ()
+  "A cursor at the accessible end rejects the whole command unchanged."
+  (with-temp-buffer
+    (insert "alpha\nbeta")
+    (goto-char 1)
+    (multi-cursor-add-at-point (point-max))
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (interprogram-cut-function nil))
+      (should-error (command-execute 'kill-line) :type 'end-of-buffer)
+      (should (equal (buffer-string) "alpha\nbeta"))
+      (should-not kill-ring)
+      (should (= (multi-cursor-count) 2)))))
+
+(ert-deftest multi-cursor-line-kill-rejects-prefix-atomically ()
+  "A prefixed `kill-line' counts visible lines and must fail before acting."
+  (with-temp-buffer
+    (insert "alpha one\nbeta two\ngamma\n")
+    (goto-char 7)
+    (multi-cursor-add-at-point 16)
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (prefix-arg '(4))
+          (interprogram-cut-function nil))
+      (should-error (command-execute 'kill-line) :type 'user-error)
+      (should (equal (buffer-string) "alpha one\nbeta two\ngamma\n"))
+      (should-not kill-ring))))
+
+(ert-deftest multi-cursor-line-kill-appends-to-consecutive-kills ()
+  "Consecutive line kills accumulate into one kill-ring entry."
+  (with-temp-buffer
+    (insert "alpha\nbeta\n")
+    (goto-char 1)
+    (multi-cursor-add-at-point 7)
+    (let ((kill-ring nil)
+          (kill-ring-yank-pointer nil)
+          (last-command 'unrelated)
+          (interprogram-cut-function nil))
+      (command-execute 'kill-line)
+      (should (equal kill-ring '("alphabeta")))
+      ;; The handler reports itself as `kill-region', so the next kill appends.
+      (should (eq this-command 'kill-region))
+      (let ((last-command 'kill-region))
+        (command-execute 'kill-line))
+      (should (equal kill-ring '("alphabeta\n\n")))
+      (should (equal (buffer-string) "")))))
+
 (ert-deftest multi-cursor-word-kill-policy-and-stock-bindings ()
   "Word-kill commands are dispatched by bounded native handlers."
   (dolist (command '(kill-word backward-kill-word))

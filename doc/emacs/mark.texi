@@ -462,6 +462,13 @@ remain unsupported.
 Kill and yank are transactional, while copy publishes its combined text
 once.  Kill and copy require a nonempty ordinary active region at every
 cursor, and @code{kill-word} and @code{backward-kill-word} are supported.
+@code{kill-line} kills from every cursor to its own end of line, following
+the ordinary rules for visible lines, trailing whitespace, and the option
+@code{kill-whole-line}.  Two cursors on one line delete it once while both
+contribute their text to the kill ring.  A cursor at the accessible end of
+the buffer rejects the whole command, since a broadcast edit is atomic, and
+the prefixed form is unsupported because it counts visible lines and can
+kill backward.
 Yank inserts one snapshot of the selected kill-ring entry everywhere.
 @code{yank-pop} is supported immediately after a native yank or
 @code{yank-pop}: it rotates the kill ring once and replaces the recorded

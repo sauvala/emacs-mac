@@ -1939,6 +1939,111 @@ are deferred until that transaction has committed."
       (funcall (car export) (cadr export)))
     nil))
 
+(defun multi-cursor--line-kill-state-edit (state)
+  "Return the `kill-line' deletion planned for STATE.
+
+The range is derived exactly as ordinary `kill-line' derives it, including
+visible-line semantics, `show-trailing-whitespace', and the option
+`kill-whole-line'.
+Planning runs against the original buffer with STATE's point restored
+afterwards, so no cursor sees an earlier cursor's deletion.
+A cursor at the accessible end of the buffer signals `end-of-buffer' exactly
+as the ordinary command does; because a broadcast edit is atomic, that
+rejects the whole command rather than only that cursor."
+  (let* ((point (multi-cursor--edit-state-point state))
+         (target
+          (save-excursion
+            (goto-char point)
+            (when (eobp)
+              (signal 'end-of-buffer nil))
+            (let ((end (save-excursion (end-of-visible-line) (point))))
+              (if (or (save-excursion
+                        ;; Visible trailing whitespace is not "nothing".
+                        (unless show-trailing-whitespace
+                          (skip-chars-forward " \t" end))
+                        (= (point) end))
+                      (and kill-whole-line (bolp)))
+                  (forward-visible-line 1)
+                (goto-char end)))
+            (point))))
+    (multi-cursor--preflight-edit-range point target point target)
+    (multi-cursor--edit-create
+     :beg point :end target :string "" :survivor state :members (list state))))
+
+(defun multi-cursor--line-kill
+    (command prefix _keys record-flag _special)
+  "Kill each cursor's line remainder in one transaction.
+
+COMMAND is `kill-line'.  Every range is planned from the original cursor
+snapshots, then overlapping deletions are merged for one native edit
+transaction; two cursors on the same line therefore kill that line once
+while both contribute their own text to the kill ring.  Kill-ring and
+clipboard effects are deferred until the transaction has committed.
+
+PREFIX must be nil: a prefixed `kill-line' counts visible lines and can kill
+backward, which needs its own contract.  RECORD-FLAG controls the variable
+`command-history'."
+  (unless (eq command 'kill-line)
+    (error "Invalid multiple-cursor line kill: %S" command))
+  (when prefix
+    (user-error "Prefixed %S is not multiple-cursor safe" command))
+  ;; See `multi-cursor--word-kill': a custom filter can own deletion as well
+  ;; as transformation, so admit only the stock implementation and nil.
+  (unless (memq filter-buffer-substring-function
+                '(nil buffer-substring--filter))
+    (user-error
+     "Custom filter-buffer-substring is not multiple-cursor safe"))
+  (let* ((states (multi-cursor--snapshot-edit-states))
+         (original-cursors (copy-sequence multi-cursor--cursors))
+         (original-next-id multi-cursor--next-id)
+         (ring-state (multi-cursor--kill-ring-state))
+         edits groups payload export completed)
+    (unwind-protect
+        (progn
+          (save-current-buffer
+            (save-restriction
+              (atomic-change-group
+                (let ((context (multi-cursor--callback-context)))
+                  (setq edits
+                        (mapcar
+                         (lambda (state)
+                           (save-excursion
+                             (multi-cursor--line-kill-state-edit state)))
+                         states)
+                        payload (multi-cursor--original-edit-payload edits))
+                  (multi-cursor--validate-callback-state context)
+                  (setq groups (multi-cursor--merge-edits edits))))))
+          (multi-cursor--apply-edit-transaction
+           states groups
+           (lambda (edit-groups positions edit-states)
+             ;; Store the payload while the change group can still cancel the
+             ;; text edit; postpone the irreversible clipboard callback.
+             (let ((context (multi-cursor--callback-context)))
+               ;; `kill-line' never kills backward without a prefix, so the
+               ;; payload always appends after the previous kill.
+               (setq export (multi-cursor--store-kill payload nil))
+               (multi-cursor--validate-callback-state context)
+               (multi-cursor--install-edit-results
+                edit-groups positions edit-states))))
+          (setq completed t))
+      (unless completed
+        (multi-cursor--restore-kill-ring-state ring-state)
+        (multi-cursor--restore-edit-states
+         states original-cursors original-next-id)
+        (unless multi-cursor-mode
+          (setq multi-cursor-mode t)
+          (multi-cursor--start))))
+    ;; Ordinary `kill-line' kills through `kill-region', so consecutive kills
+    ;; append to one kill-ring entry.  Match that.
+    (setq this-command 'kill-region
+          deactivate-mark t)
+    (when record-flag
+      (add-to-history 'command-history (list command nil) nil t))
+    ;; External effects only after text, cursor, and kill-ring state commit.
+    (when (car export)
+      (funcall (car export) (cadr export)))
+    nil))
+
 (defun multi-cursor--store-kill (string before-p)
   "Store STRING once, appending before the last kill when BEFORE-P.
 
@@ -4405,6 +4510,9 @@ which are not preloaded are skipped when this list is applied.")
 (dolist (command '(kill-word backward-kill-word))
   (multi-cursor-register-command
    command 'custom-handler #'multi-cursor--word-kill))
+
+(multi-cursor-register-command
+ 'kill-line 'custom-handler #'multi-cursor--line-kill)
 
 (multi-cursor-register-command 'yank 'batch-edit #'multi-cursor--yank)
 
