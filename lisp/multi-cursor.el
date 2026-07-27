@@ -3942,6 +3942,109 @@ the variable `command-history'."
       (add-to-history 'command-history (list command argument) nil t))
     nil))
 
+(defun multi-cursor--reject-temporary-transient-mark (command)
+  "Signal unless ordinary Transient Mark state applies to COMMAND.
+
+The `lambda' and `(only . @dots{})' values are one-command states which
+`set-mark-command' clears as a side effect before doing anything else.
+Reproducing that for a whole cursor set is not worth its own contract."
+  (when (or (eq transient-mark-mode 'lambda)
+            (eq (car-safe transient-mark-mode) 'only))
+    (user-error "Temporary transient mark is not multiple-cursor safe: %S"
+                command)))
+
+(defun multi-cursor--cursor-mark-position (cursor)
+  "Return CURSOR's mark position, or nil when it has no mark."
+  (let ((mark (multi-cursor--cursor-mark cursor)))
+    (and mark (marker-position mark))))
+
+(defun multi-cursor--set-cursor-activation (cursors active)
+  "Set every cursor in CURSORS to ACTIVE, retaining its point and mark."
+  (dolist (cursor cursors)
+    (multi-cursor--set-record-state
+     cursor
+     (marker-position (multi-cursor--cursor-point cursor))
+     (multi-cursor--cursor-mark-position cursor)
+     active
+     (multi-cursor--cursor-goal-column cursor))))
+
+(defun multi-cursor--set-mark (command prefix _keys record-flag _special)
+  "Set or toggle each cursor's own mark for COMMAND.
+
+Only the two branches of `set-mark-command' which act on the current
+position are supported: setting the mark at point, and the repeat
+idiom which toggles activation of an existing mark.  PREFIX must be nil,
+because every prefixed branch navigates the buffer-global mark ring, which
+is not per-cursor state.  RECORD-FLAG controls the variable
+`command-history'."
+  (when prefix
+    (user-error "Prefixed %S is not multiple-cursor safe" command))
+  (multi-cursor--reject-temporary-transient-mark command)
+  (when (and set-mark-command-repeat-pop
+             (memq last-command '(pop-to-mark-command pop-global-mark)))
+    (user-error "Repeated mark popping is not multiple-cursor safe"))
+  (let ((cursors (multi-cursor--normalized-cursors)))
+    (if (eq last-command 'set-mark-command)
+        ;; Repeat: toggle activation without moving any mark.
+        (if (region-active-p)
+            (progn
+              (deactivate-mark)
+              (multi-cursor--set-cursor-activation cursors nil)
+              (message "Mark deactivated"))
+          (activate-mark)
+          (multi-cursor--set-cursor-activation cursors t)
+          (message "Mark activated"))
+      ;; Ordinary set.  The primary keeps exact stock behavior, including
+      ;; its single mark-ring push; secondary marks are per-cursor state
+      ;; and never reach the ring.
+      (push-mark-command nil)
+      (dolist (cursor cursors)
+        (let ((position (marker-position (multi-cursor--cursor-point cursor))))
+          (multi-cursor--set-record-state
+           cursor position position t
+           (multi-cursor--cursor-goal-column cursor)))))
+    (setq multi-cursor--redisplay-snapshot-dirty-p t)
+    (when record-flag
+      (add-to-history 'command-history (list command nil) nil t))
+    nil))
+
+(defun multi-cursor--exchange-point-and-mark
+    (command prefix _keys record-flag _special)
+  "Swap point and mark at every cursor for COMMAND.
+
+Each cursor swaps its own point and mark and retains its own activation
+state.  PREFIX must be nil, because the prefixed form of
+`exchange-point-and-mark' inverts activation rather than preserving it.
+Every cursor is validated before any cursor is changed, so a cursor without
+a mark rejects the whole command.  RECORD-FLAG controls the variable
+`command-history'."
+  (when prefix
+    (user-error "Prefixed %S is not multiple-cursor safe" command))
+  (multi-cursor--reject-temporary-transient-mark command)
+  (let ((cursors (multi-cursor--normalized-cursors)))
+    (unless (mark t)
+      (user-error "No mark set in this buffer"))
+    (dolist (cursor cursors)
+      (unless (multi-cursor--cursor-mark cursor)
+        (user-error "A secondary cursor has no mark")))
+    ;; Every cursor is known good; commit.
+    (let ((active (region-active-p))
+          (target (mark t)))
+      (set-mark (point))
+      (goto-char target)
+      (unless active (deactivate-mark)))
+    (dolist (cursor cursors)
+      (multi-cursor--set-record-state
+       cursor
+       (multi-cursor--cursor-mark-position cursor)
+       (marker-position (multi-cursor--cursor-point cursor))
+       (multi-cursor--cursor-mark-active cursor)
+       (multi-cursor--cursor-goal-column cursor)))
+    (multi-cursor--normalize)
+    (when record-flag
+      (add-to-history 'command-history (list command nil) nil t))
+    nil))
+
 (defun multi-cursor--cycle (direction)
   "Exchange primary state with the next secondary in DIRECTION."
   (multi-cursor--normalized-cursors)
@@ -4315,6 +4418,12 @@ which are not preloaded are skipped when this list is applied.")
   (when (commandp command)
     (multi-cursor-register-command command 'custom-handler
                                    #'multi-cursor--session-undo)))
+
+(multi-cursor-register-command
+ 'set-mark-command 'custom-handler #'multi-cursor--set-mark)
+
+(multi-cursor-register-command
+ 'exchange-point-and-mark 'custom-handler #'multi-cursor--exchange-point-and-mark)
 
 (multi-cursor-register-command
  'keyboard-quit 'custom-handler #'multi-cursor--keyboard-quit)
