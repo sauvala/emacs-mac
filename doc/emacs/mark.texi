@@ -428,6 +428,18 @@ rejected because they depend on live window glyph geometry for every
 cursor.  Buffer-boundary motion is rejected because
 @code{beginning-of-buffer} and @code{end-of-buffer} push the mark, which is
 buffer-global rather than per-cursor state.
+@findex set-mark-command @r{(Multiple Cursor mode)}
+@findex exchange-point-and-mark @r{(Multiple Cursor mode)}
+  @kbd{C-@key{SPC}} sets each cursor's own mark at that cursor's own point
+and activates every selection, so ordinary motion afterwards extends all
+selections independently.  Repeating it toggles activation without moving
+any mark.  @kbd{C-x C-x} swaps each cursor's own point and mark, keeping
+that cursor's activation state; if any cursor has no mark, the command is
+rejected without changing anything.  Only the primary cursor's mark reaches
+the mark ring, exactly once, as it would without a session.  The prefixed
+forms of both commands are unsupported, because they navigate the
+buffer-global mark ring rather than per-cursor state.
+
 The command @code{newline}, normally bound to @key{RET}, runs as one
 transaction.  It has a guarded raw-newline fast path when electric
 indentation is disabled.  With Electric Indent mode enabled, it also supports
