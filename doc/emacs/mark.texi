@@ -403,17 +403,31 @@ total; its default is 1000.
 preflighted transaction at all cursors and form one undo unit.
 The command @code{backward-delete-char-untabify} supports its @code{nil},
 @code{untabify}, @code{hungry}, and @code{all} methods.  Prefix and
-overwrite-mode backward deletion remain unsupported.  The commands
-@code{forward-char}, @code{backward-char},
-@code{left-char}, @code{right-char}, @code{forward-word},
-@code{backward-word}, @code{left-word}, @code{right-word},
-@code{move-beginning-of-line}, @code{move-end-of-line},
-@code{next-line}, @code{previous-line}, @code{next-logical-line}, and
-@code{previous-logical-line} move every cursor independently, staging all
-cursor states before committing them.  Left and Right require logical-order
-cursor movement; Up and Down require logical-line movement.  Visual-order
-and display-line arrow movement are rejected because they depend on live
-window glyph geometry for every cursor.
+overwrite-mode backward deletion remain unsupported.  Character, word, and line motion (@code{forward-char},
+@code{backward-char}, @code{left-char}, @code{right-char},
+@code{forward-word}, @code{backward-word}, @code{left-word},
+@code{right-word}, @code{move-beginning-of-line}, @code{move-end-of-line},
+@code{beginning-of-line}, @code{end-of-line}, @code{next-line},
+@code{previous-line}, @code{next-logical-line}, and
+@code{previous-logical-line}), indentation motion
+(@code{back-to-indentation}), balanced-expression motion
+(@code{forward-sexp}, @code{backward-sexp}, @code{forward-list},
+@code{backward-list}, @code{down-list}, @code{up-list}, and
+@code{backward-up-list}), and larger-unit motion
+(@code{forward-paragraph}, @code{backward-paragraph},
+@code{forward-sentence}, @code{backward-sentence},
+@code{beginning-of-defun}, and @code{end-of-defun}) move every cursor
+independently, staging all cursor states before committing them.
+A cursor which cannot move further keeps its clamped position while the
+others proceed; for expression motion that boundary is reported by
+@code{scan-error}, which aborts the command only when it comes from a
+command outside the expression-motion set.
+Left and Right require logical-order cursor movement; Up and Down require
+logical-line movement.  Visual-order and display-line arrow movement are
+rejected because they depend on live window glyph geometry for every
+cursor.  Buffer-boundary motion is rejected because
+@code{beginning-of-buffer} and @code{end-of-buffer} push the mark, which is
+buffer-global rather than per-cursor state.
 The command @code{newline}, normally bound to @key{RET}, runs as one
 transaction.  It has a guarded raw-newline fast path when electric
 indentation is disabled.  With Electric Indent mode enabled, it also supports
@@ -426,22 +440,39 @@ complete edit set.  Auto-fill, abbrev expansion, hard newlines, left
 margins, input translation, adjacent text properties, overwrite mode, prefix
 arguments, and active selections remain unsupported.
 Higher-level newline commands such as
-@code{electric-newline-and-maybe-indent}, as well as mode-dependent
-@key{TAB} indentation and completion commands, remain unsupported.
+@code{electric-newline-and-maybe-indent} remain unsupported.
+The commands @code{open-line} and @code{newline-and-indent} are supported
+within the same bounded contract.
+@code{indent-for-tab-command} is supported when every cursor takes Emacs's
+literal @code{insert-tab} branch, and additionally for stock Emacs Lisp
+indentation; mode-dependent indentation and completion in other modes
+remain unsupported.
 Kill and yank are transactional, while copy publishes its combined text
 once.  Kill and copy require a nonempty ordinary active region at every
-cursor.  Yank inserts one snapshot of the selected kill-ring entry
-everywhere; @code{yank-pop} is not supported during a session.  @xref{Killing};
-see also @ref{Yanking}.
+cursor, and @code{kill-word} and @code{backward-kill-word} are supported.
+Yank inserts one snapshot of the selected kill-ring entry everywhere.
+@code{yank-pop} is supported immediately after a native yank or
+@code{yank-pop}: it rotates the kill ring once and replaces the recorded
+spans in one transaction, failing without changing text if the buffer,
+restriction, or cursor set has drifted.  A custom @code{yank-handler}
+remains unsupported.  @xref{Killing}; see also @ref{Yanking}.
 
   Multiple Cursor mode intentionally allows only commands with a known
 multi-cursor policy.  An unknown or unsupported command signals an error
-before changing the buffer.  Undo and redo, keyboard macros, incremental
-search, query replace, visual-line movement, and @kbd{M-x} itself are
-currently unsupported while the session is active.  Package authors can
-declare an explicit policy with @code{multi-cursor-register-command}; see
-@ref{Multiple-Cursor Command Dispatch,,, elisp, The Emacs Lisp Reference
-Manual}.
+before changing the buffer.  Undo and redo restore the cursor set along
+with the text, one session generation at a time, and refuse to run once the
+undo history no longer belongs to the session.  Keyboard macros,
+incremental search, query replace, visual-line movement, and @kbd{M-x}
+itself are unsupported while the session is active; @kbd{M-x} is excluded
+because the command it invokes would bypass the dispatcher and edit only at
+the primary cursor.
+
+  Commands which never edit at a cursor position run once at the primary
+cursor instead of failing.  These include window, frame, buffer, and file
+commands, scrolling and display adjustment, help and documentation, and
+evaluation.  Package authors can declare an explicit policy with
+@code{multi-cursor-register-command}; see @ref{Multiple-Cursor Command
+Dispatch,,, elisp, The Emacs Lisp Reference Manual}.
 
 @findex keyboard-quit @r{(Multiple Cursor mode)}
   Typing @kbd{C-g} deactivates all active primary and secondary regions
