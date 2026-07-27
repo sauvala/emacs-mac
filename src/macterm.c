@@ -4720,14 +4720,20 @@ mac_draw_window_cursor_decorations (struct window *w,
     }
   mac_reset_clip_rectangles (f, gc);
 #ifdef USE_METAL_RENDERING
+  /* Scope each cursor's clip like the Core Graphics path below does with
+     CGContextSaveGState.  emacs_metal_set_clip_rect forces clip_depth back to
+     1, which would discard a clip the caller had pushed, and
+     emacs_metal_reset_clip would then leave the whole frame unclipped rather
+     than restoring what was in effect on entry.  Push/pop intersects with the
+     caller's clip and restores it.  */
   for (ptrdiff_t i = 0; i < ncommands; ++i)
     {
       struct mac_cursor_decoration_command *command = commands + i;
-      emacs_metal_set_clip_rect (FRAME_METAL_CTX (f),
-				 floor (CGRectGetMinX (command->clip)),
-				 floor (CGRectGetMinY (command->clip)),
-				 ceil (CGRectGetWidth (command->clip)),
-				 ceil (CGRectGetHeight (command->clip)));
+      emacs_metal_push_clip (FRAME_METAL_CTX (f),
+			     floor (CGRectGetMinX (command->clip)),
+			     floor (CGRectGetMinY (command->clip)),
+			     ceil (CGRectGetWidth (command->clip)),
+			     ceil (CGRectGetHeight (command->clip)));
       if (command->outline_p)
 	emacs_metal_draw_rect (FRAME_METAL_CTX (f),
 			       CGRectGetMinX (command->rect),
@@ -4740,8 +4746,8 @@ mac_draw_window_cursor_decorations (struct window *w,
 			       CGRectGetMinY (command->rect),
 			       CGRectGetWidth (command->rect),
 			       CGRectGetHeight (command->rect), command->color);
+      emacs_metal_pop_clip (FRAME_METAL_CTX (f));
     }
-  emacs_metal_reset_clip (FRAME_METAL_CTX (f));
   free (commands);
 #else
   MAC_BEGIN_DRAW_TO_FRAME (f, gc, invalid, context);
