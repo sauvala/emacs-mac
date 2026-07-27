@@ -902,6 +902,66 @@
     (command-execute 'multi-cursor-mode)
     (should-not multi-cursor-mode)))
 
+(ert-deftest multi-cursor-policy-run-once-list-is-registered ()
+  "Every available command in the run-once list must carry that policy."
+  (dolist (command multi-cursor--run-once-commands)
+    (when (commandp command)
+      (should (eq (car (gethash command multi-cursor--command-policies))
+                  'run-once)))))
+
+(ert-deftest multi-cursor-policy-non-editing-commands-are-supported ()
+  "Commands which never edit at a cursor must not fail closed."
+  (dolist (command '(other-window delete-other-windows split-window-below
+                     switch-to-buffer next-buffer previous-buffer
+                     find-file save-buffer revert-buffer
+                     scroll-up-command scroll-down-command recenter
+                     describe-function describe-variable
+                     eval-expression eval-last-sexp))
+    (when (commandp command)
+      (should (eq (car (gethash command multi-cursor--command-policies))
+                  'run-once)))))
+
+(ert-deftest multi-cursor-policy-cursor-management-is-bindable ()
+  "The documented cursor-set commands must be reachable from a key binding."
+  (dolist (command '(multi-cursor-mode
+                     multi-cursor-remove-at-point
+                     multi-cursor-remove-all
+                     multi-cursor-add-above
+                     multi-cursor-add-below
+                     multi-cursor-edit-lines
+                     multi-cursor-select-next-occurrence
+                     multi-cursor-select-previous-occurrence
+                     multi-cursor-select-all-occurrences
+                     multi-cursor-cycle-forward
+                     multi-cursor-cycle-backward
+                     multi-cursor-count))
+    (should (commandp command))
+    (should (eq (car (gethash command multi-cursor--command-policies))
+                'run-once))))
+
+(ert-deftest multi-cursor-policy-run-once-preserves-the-session ()
+  "A dispatched run-once command must leave the cursor set untouched."
+  (with-temp-buffer
+    (insert "alpha\nbeta\ngamma\n")
+    (goto-char (point-min))
+    (multi-cursor-add-at-point 7)
+    (multi-cursor-add-at-point 12)
+    (should (= (multi-cursor-count) 3))
+    (should (= (command-execute 'multi-cursor-count) 3))
+    (should multi-cursor-mode)
+    (should (= (multi-cursor-count) 3))
+    (should (= (point) (point-min)))))
+
+(ert-deftest multi-cursor-add-at-point-is-not-a-command ()
+  "`multi-cursor-add-at-point' always rejects point, so it is a Lisp entry
+point rather than a bindable command."
+  (should-not (commandp 'multi-cursor-add-at-point))
+  (with-temp-buffer
+    (insert "alpha\nbeta\ngamma\n")
+    (goto-char (point-min))
+    (multi-cursor-add-at-point 7)
+    (should-error (multi-cursor-add-at-point) :type 'user-error)))
+
 (ert-deftest multi-cursor-policy-real-loop-run-once-and-prefixes ()
   (dolist (case '((nil "x") (3 "M-3 x") (- "M-- x")
                   ((4) "C-u x") ((16) "C-u C-u x")))

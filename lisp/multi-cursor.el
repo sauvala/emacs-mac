@@ -552,7 +552,10 @@ existing cursor's identifier."
 (defun multi-cursor-add-at-point (&optional position)
   "Add a secondary cursor at POSITION, defaulting to point.
 
-Signal `user-error' if POSITION is the ordinary primary point."
+Signal `user-error' if POSITION is the ordinary primary point.  Calling this
+without POSITION therefore always fails, so it is a Lisp entry point rather
+than a command; `multi-cursor-add-above' and `multi-cursor-add-below' are the
+interactive way to add a cursor relative to point."
   (multi-cursor-add-selection (if (null position) (point) position)))
 
 (defun multi-cursor-remove-at-point (&optional position)
@@ -589,8 +592,14 @@ Return the number of cursor records removed."
     count))
 
 (defun multi-cursor-count ()
-  "Return the cursor count, including the ordinary primary cursor."
-  (1+ (length multi-cursor--cursors)))
+  "Return the cursor count, including the ordinary primary cursor.
+
+Called interactively, also report the count in the echo area."
+  (interactive)
+  (let ((count (1+ (length multi-cursor--cursors))))
+    (when (called-interactively-p 'interactive)
+      (message "%d cursor%s" count (if (= count 1) "" "s")))
+    count))
 
 (defun multi-cursor-selections ()
   "Return detached snapshots of the secondary cursor selections.
@@ -4106,28 +4115,118 @@ created.  This mode refuses to start while the external
         (multi-cursor--start))
     (multi-cursor--clear)))
 
-(dolist (command '(multi-cursor-mode
-                   multi-cursor-remove-at-point
-                   multi-cursor-remove-all
-                   multi-cursor-add-above
-                   multi-cursor-add-below
-                   multi-cursor-edit-lines
-                   multi-cursor-select-next-occurrence
-                   multi-cursor-select-previous-occurrence
-                   multi-cursor-select-all-occurrences
-                   multi-cursor-add-at-mouse
-                   multi-cursor-cycle-forward
-                   multi-cursor-cycle-backward
-                   save-buffer
-                   recenter-top-bottom
-                   scroll-up-command
-                   scroll-down-command
-                   universal-argument
-                   universal-argument-more
-                   universal-argument-minus
-                   universal-argument-other-key
-                   digit-argument
-                   negative-argument))
+(defconst multi-cursor--run-once-commands
+  '(;; Cursor-set management.  These commands own the session itself, so
+    ;; broadcasting them to the cursors they maintain is meaningless.
+    multi-cursor-mode
+    multi-cursor-remove-at-point
+    multi-cursor-remove-all
+    multi-cursor-add-above
+    multi-cursor-add-below
+    multi-cursor-edit-lines
+    multi-cursor-select-next-occurrence
+    multi-cursor-select-previous-occurrence
+    multi-cursor-select-all-occurrences
+    multi-cursor-add-at-mouse
+    multi-cursor-cycle-forward
+    multi-cursor-cycle-backward
+    multi-cursor-count
+    ;; Prefix-argument accumulation.  The command loop consumes the result
+    ;; once, before the dispatcher sees the command it applies to.
+    universal-argument
+    universal-argument-more
+    universal-argument-minus
+    universal-argument-other-key
+    digit-argument
+    negative-argument
+    ;; Scrolling, recentering, and display adjustment.  None of these change
+    ;; buffer text or any cursor's position within it.
+    recenter
+    recenter-top-bottom
+    scroll-up-command
+    scroll-down-command
+    scroll-up
+    scroll-down
+    scroll-left
+    scroll-right
+    scroll-other-window
+    scroll-other-window-down
+    mwheel-scroll
+    mouse-wheel-text-scale
+    move-to-window-line-top-bottom
+    redraw-display
+    recenter-current-error
+    text-scale-adjust
+    text-scale-increase
+    text-scale-decrease
+    toggle-truncate-lines
+    visual-line-mode
+    display-line-numbers-mode
+    ;; Window and frame management.  The session belongs to a buffer, not to
+    ;; the window configuration displaying it.
+    other-window
+    split-window-below
+    split-window-right
+    split-window-vertically
+    split-window-horizontally
+    delete-window
+    delete-other-windows
+    balance-windows
+    enlarge-window
+    shrink-window
+    enlarge-window-horizontally
+    shrink-window-horizontally
+    other-frame
+    make-frame-command
+    delete-frame
+    toggle-frame-fullscreen
+    toggle-frame-maximized
+    ;; Buffer and file commands.  Those which replace or kill the buffer end
+    ;; the session through the ordinary lifecycle hooks.
+    switch-to-buffer
+    switch-to-buffer-other-window
+    switch-to-buffer-other-frame
+    next-buffer
+    previous-buffer
+    list-buffers
+    kill-buffer
+    kill-current-buffer
+    bury-buffer
+    save-buffer
+    save-some-buffers
+    write-file
+    find-file
+    find-file-other-window
+    find-file-other-frame
+    find-alternate-file
+    revert-buffer
+    ;; Help, documentation, and introspection.
+    describe-key
+    describe-function
+    describe-variable
+    describe-mode
+    describe-bindings
+    describe-char
+    help-for-help
+    info
+    apropos
+    apropos-command
+    where-is
+    view-lossage
+    ;; Evaluation.  These run at the primary cursor exactly as they do
+    ;; without a session; markers keep every secondary cursor attached.
+    eval-expression
+    eval-last-sexp
+    eval-defun
+    eval-region
+    eval-buffer)
+  "Commands which run once at the primary cursor during a session.
+
+None of these commands edit buffer text at a cursor position, so
+broadcasting them would be meaningless rather than merely unsafe.  Commands
+which are not preloaded are skipped when this list is applied.")
+
+(dolist (command multi-cursor--run-once-commands)
   (when (commandp command)
     (multi-cursor-register-command command 'run-once)))
 
