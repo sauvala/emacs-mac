@@ -393,4 +393,35 @@ int main () {
       (should (equal (internal--indent-guide-stops 1)
                      '((0 . 1) (4 . 2) (8 . 3) (12 . 4)))))))
 
+(defun xdisp-tests--positions-across-line (buffer-text)
+  "Return the buffer positions `posn-at-x-y' reports across line 1.
+Renders BUFFER-TEXT in a temporary window and samples every column."
+  (let ((buf (generate-new-buffer " *guide-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert buffer-text)
+          (set-window-buffer (selected-window) buf)
+          (goto-char (point-min))
+          (redisplay t)
+          (let ((res nil)
+                (h (line-pixel-height)))
+            (dotimes (col 20)
+              (push (posn-point
+                     (posn-at-x-y (* col (frame-char-width)) (/ h 2)))
+                    res))
+            (nreverse res)))
+      (kill-buffer buf))))
+
+(ert-deftest xdisp-tests--indent-guides-preserve-positions ()
+  "Enabling guides must not change where a column maps to in the buffer."
+  (skip-unless (not noninteractive))
+  (let* ((text "        foo\n        bar\n")
+         (without (let ((display-indent-guides nil))
+                    (xdisp-tests--positions-across-line text)))
+         (with (let ((display-indent-guides t)
+                     (display-indent-guides-spacing 4)
+                     (display-indent-guides-offset 0))
+                 (xdisp-tests--positions-across-line text))))
+    (should (equal without with))))
+
 ;;; xdisp-tests.el ends here

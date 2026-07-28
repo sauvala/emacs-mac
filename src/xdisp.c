@@ -24298,6 +24298,29 @@ dump_glyph (struct glyph_row *row, struct glyph *glyph, int area)
 	       glyph->left_box_line_p,
 	       glyph->right_box_line_p);
     }
+  else if (glyph->type == INDENT_GUIDE_GLYPH)
+    {
+      /* The Code column shows the guide's depth, so that the stops on a
+	 row can be read off directly.  */
+      fprintf (stderr,
+	       "  %5"pD"d     %c %9"pD"d   %c %3d 0x%06x      %c %4d %1.1d%1.1d\n",
+	       glyph - row->glyphs[TEXT_AREA],
+	       'V',
+	       glyph->charpos,
+	       (BUFFERP (glyph->object)
+		? 'B'
+		: (STRINGP (glyph->object)
+		   ? 'S'
+		   : (NILP (glyph->object)
+		      ? '0'
+		      : '-'))),
+	       glyph->pixel_width,
+	       glyph->u.indent_guide.depth,
+	       ' ',
+	       glyph->face_id,
+	       glyph->left_box_line_p,
+	       glyph->right_box_line_p);
+    }
   else if (glyph->type == IMAGE_GLYPH)
     {
       fprintf (stderr,
@@ -26926,6 +26949,142 @@ indent_guide_apply_scope (int depth, ptrdiff_t beg)
   return depth;
 }
 
+/* Depth of the block containing point in the window being redisplayed,
+   or 0 for none.  Set once per window by redisplay_window and read while
+   that window's rows are built.  Redisplay is single-threaded and one
+   window's rows are all built before the next window's, so a file-scope
+   value is safe here.  */
+
+static int indent_guide_current_depth;
+
+/* Face names for guides, indexed by (depth - 1) % 8.  */
+
+static Lisp_Object indent_guide_face_names[8];
+
+/* Read a fraction-valued guide variable, falling back to DFLT for any
+   value we cannot use.  */
+
+static double
+indent_guide_frac (Lisp_Object value, double dflt)
+{
+  if (!NUMBERP (value))
+    return dflt;
+  double v = XFLOATINT (value);
+  if (!(v >= 0.0) || v > 1.0)
+    return dflt;
+  return v;
+}
+
+/* Return the face for a guide at DEPTH.  BASE_FACE_ID is the face of the
+   whitespace being replaced, so that guides inherit its background.  */
+
+static int
+indent_guide_face (struct window *w, int depth, int base_face_id)
+{
+  Lisp_Object face_name;
+
+  if (!NILP (Vdisplay_indent_guides_highlight_current)
+      && depth == indent_guide_current_depth)
+    face_name = Qindent_guide_current;
+  else
+    face_name = indent_guide_face_names[(depth - 1) % 8];
+
+  return merge_faces (w, face_name, 0, base_face_id);
+}
+
+/* Turn the glyph at ROW->glyphs[TEXT_AREA][I] into a guide at DEPTH.  The
+   glyph must be a space; its position, object and width are kept, so
+   buffer positions and layout are unchanged.  */
+
+static void
+indent_guide_convert_glyph (struct window *w, struct glyph_row *row, int i,
+			    int depth, int width, int pad)
+{
+  struct glyph *g = row->glyphs[TEXT_AREA] + i;
+
+  eassert (g->type == CHAR_GLYPH && g->u.ch == ' ');
+
+  g->face_id = indent_guide_face (w, depth, g->face_id);
+  g->type = INDENT_GUIDE_GLYPH;
+  g->u.val = 0;
+  g->u.indent_guide.depth = min (depth, 255);
+  g->u.indent_guide.width = min (width, 255);
+  g->u.indent_guide.pad = min (pad, 255);
+  g->u.indent_guide.pattern = 0;
+}
+
+/* Decorate ROW with indentation guides.  Called once per row at the end
+   of display_line, after all glyphs have been produced and before the
+   cursor is placed, so that the cursor lands on the final glyphs.  */
+
+static void
+maybe_display_indent_guides (struct it *it, struct glyph_row *row)
+{
+  struct indent_guide_config cfg;
+
+  /* Guides belong to the first screen line of a buffer line.
+     Right-to-left rows are not supported.  */
+  if (MATRIX_ROW_CONTINUATION_LINE_P (row) || row->reversed_p)
+    return;
+
+  indent_guide_get_config (&cfg);
+  if (!cfg.enabled)
+    return;
+
+  ptrdiff_t beg = MATRIX_ROW_START_CHARPOS (row);
+  if (beg < BEGV || beg > ZV)
+    return;
+
+  int tab_width = SANE_TAB_WIDTH (current_buffer);
+  int depth = indent_guide_line_depth (it, beg, CHAR_TO_BYTE (beg),
+				       tab_width, &cfg);
+  depth = indent_guide_apply_scope (depth, beg);
+  if (depth <= 0)
+    return;
+
+  int char_width = FRAME_COLUMN_WIDTH (it->f);
+  int width = max (1, (int) (char_width
+			     * indent_guide_frac (Vdisplay_indent_guides_width,
+						  0.25)));
+  int pad = (int) (char_width
+		   * indent_guide_frac (Vdisplay_indent_guides_pad, 0.1));
+  if (pad + width > char_width)
+    pad = max (0, char_width - width);
+
+  /* Walk the row's glyphs, tracking the column each one starts at, and
+     convert the glyph covering each guide stop.  Tab indentation and
+     horizontal scrolling are handled in a later change; for now the walk
+     stops at anything that is not a space.  */
+  int next_depth = 1;
+  int col = 0;
+
+  for (int i = 0; i < row->used[TEXT_AREA] && next_depth <= depth; i++)
+    {
+      struct glyph *g = row->glyphs[TEXT_AREA] + i;
+
+      /* Only decorate glyphs that came from buffer text.  Rows that
+	 display no text carry a filler space whose object is nil, which
+	 exists to hold the newline and the cursor; converting it would
+	 put a guide on empty rows past the end of the buffer.  Guides on
+	 genuinely blank lines are appended separately.  */
+      if (g->type != CHAR_GLYPH || g->u.ch != ' ' || !BUFFERP (g->object))
+	break;
+
+      while (next_depth <= depth
+	     && indent_guide_column (next_depth, &cfg) < col)
+	next_depth++;
+
+      if (next_depth <= depth
+	  && indent_guide_column (next_depth, &cfg) == col)
+	{
+	  indent_guide_convert_glyph (it->w, row, i, next_depth, width, pad);
+	  next_depth++;
+	}
+
+      col++;
+    }
+}
+
 DEFUN ("internal--indent-guide-stops", Finternal__indent_guide_stops,
        Sinternal__indent_guide_stops, 1, 1, 0,
        doc: /* Return the indentation guides for the line containing POS.
@@ -27966,6 +28125,12 @@ display_line (struct it *it, int cursor_vpos)
   /* Highlight trailing whitespace.  */
   if (!NILP (Vshow_trailing_whitespace))
     highlight_trailing_whitespace (it);
+
+  /* Decorate leading whitespace with indentation guides.  This has to
+     happen before compute_line_metrics, which hashes the row; see the
+     implementation note below.  Guides keep each glyph's position and
+     pixel width, so they do not affect the metrics themselves.  */
+  maybe_display_indent_guides (it, row);
 
   /* Compute pixel dimensions of this line.  */
   compute_line_metrics (it);
@@ -40449,6 +40614,54 @@ malformed value is ignored.  */);
   Vdisplay_indent_guides_scope = Qnil;
   DEFSYM (Qdisplay_indent_guides_scope, "display-indent-guides-scope");
   Fmake_variable_buffer_local (Qdisplay_indent_guides_scope);
+
+  DEFVAR_LISP ("display-indent-guides-width", Vdisplay_indent_guides_width,
+    doc: /* Width of an indentation guide, as a fraction of character width.
+The value should be a number between 0 and 1.  */);
+  Vdisplay_indent_guides_width = make_float (0.25);
+  DEFSYM (Qdisplay_indent_guides_width, "display-indent-guides-width");
+  Fmake_variable_buffer_local (Qdisplay_indent_guides_width);
+
+  DEFVAR_LISP ("display-indent-guides-pad", Vdisplay_indent_guides_pad,
+    doc: /* Space left of an indentation guide, as a fraction of character width.
+The value should be a number between 0 and 1.  */);
+  Vdisplay_indent_guides_pad = make_float (0.1);
+  DEFSYM (Qdisplay_indent_guides_pad, "display-indent-guides-pad");
+  Fmake_variable_buffer_local (Qdisplay_indent_guides_pad);
+
+  DEFVAR_LISP ("display-indent-guides-highlight-current",
+	       Vdisplay_indent_guides_highlight_current,
+    doc: /* Non-nil means highlight the guide of the block containing point.
+The highlighted guide uses the `indent-guide-current' face.
+
+Enabling this disables two redisplay optimizations for windows showing
+this buffer, so that moving point redraws the guides.  This is the same
+cost `display-line-numbers' pays when the current line's number is shown
+in a distinct face.  */);
+  Vdisplay_indent_guides_highlight_current = Qnil;
+  DEFSYM (Qdisplay_indent_guides_highlight_current,
+	  "display-indent-guides-highlight-current");
+  Fmake_variable_buffer_local (Qdisplay_indent_guides_highlight_current);
+
+  DEFSYM (Qindent_guide_1, "indent-guide-1");
+  DEFSYM (Qindent_guide_2, "indent-guide-2");
+  DEFSYM (Qindent_guide_3, "indent-guide-3");
+  DEFSYM (Qindent_guide_4, "indent-guide-4");
+  DEFSYM (Qindent_guide_5, "indent-guide-5");
+  DEFSYM (Qindent_guide_6, "indent-guide-6");
+  DEFSYM (Qindent_guide_7, "indent-guide-7");
+  DEFSYM (Qindent_guide_8, "indent-guide-8");
+  DEFSYM (Qindent_guide_current, "indent-guide-current");
+  indent_guide_face_names[0] = Qindent_guide_1;
+  indent_guide_face_names[1] = Qindent_guide_2;
+  indent_guide_face_names[2] = Qindent_guide_3;
+  indent_guide_face_names[3] = Qindent_guide_4;
+  indent_guide_face_names[4] = Qindent_guide_5;
+  indent_guide_face_names[5] = Qindent_guide_6;
+  indent_guide_face_names[6] = Qindent_guide_7;
+  indent_guide_face_names[7] = Qindent_guide_8;
+  for (int i = 0; i < 8; i++)
+    staticpro (&indent_guide_face_names[i]);
 
   DEFVAR_BOOL ("display-fill-column-indicator", display_fill_column_indicator,
     doc: /* Non-nil means display the fill column indicator.
