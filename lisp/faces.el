@@ -2677,6 +2677,34 @@ non-nil."
   :group 'basic-faces
   :group 'display-fill-column-indicator)
 
+(defface indent-guide-1
+  '((t :inherit shadow))
+  "Face for indentation guides at depth 1, and every 8th depth after it."
+  :version "32.1"
+  :group 'basic-faces)
+
+(defface indent-guide-2 '((t :inherit indent-guide-1))
+  "Face for indentation guides at depth 2." :version "32.1" :group 'basic-faces)
+(defface indent-guide-3 '((t :inherit indent-guide-1))
+  "Face for indentation guides at depth 3." :version "32.1" :group 'basic-faces)
+(defface indent-guide-4 '((t :inherit indent-guide-1))
+  "Face for indentation guides at depth 4." :version "32.1" :group 'basic-faces)
+(defface indent-guide-5 '((t :inherit indent-guide-1))
+  "Face for indentation guides at depth 5." :version "32.1" :group 'basic-faces)
+(defface indent-guide-6 '((t :inherit indent-guide-1))
+  "Face for indentation guides at depth 6." :version "32.1" :group 'basic-faces)
+(defface indent-guide-7 '((t :inherit indent-guide-1))
+  "Face for indentation guides at depth 7." :version "32.1" :group 'basic-faces)
+(defface indent-guide-8 '((t :inherit indent-guide-1))
+  "Face for indentation guides at depth 8." :version "32.1" :group 'basic-faces)
+
+(defface indent-guide-current
+  '((t :inherit indent-guide-1 :weight bold))
+  "Face for the indentation guide of the block containing point.
+Used only when `display-indent-guides-highlight-current' is non-nil."
+  :version "32.1"
+  :group 'basic-faces)
+
 (defface escape-glyph
   '((((background dark)) :foreground "cyan")
     ;; See the comment in minibuffer-prompt for

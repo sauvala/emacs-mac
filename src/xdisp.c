@@ -26691,6 +26691,151 @@ row_text_area_empty (struct glyph_row *row)
   return true;
 }
 
+/***********************************************************************
+			  Indentation guides
+ ***********************************************************************/
+
+/* Hard cap on guides per line, independent of user configuration.  The
+   glyph's depth field is 8 bits wide, and a row cannot usefully hold
+   more guides than this anyway.  */
+#define INDENT_GUIDE_MAX_DEPTH 64
+
+/* Configuration for indentation guides in the current buffer, read once
+   per row and validated, so that the code building rows never has to
+   check user values again.  */
+
+struct indent_guide_config
+{
+  bool enabled;
+  int spacing;
+  int offset;
+  int max_depth;
+};
+
+/* Fill CFG from the buffer-local variables.  Set CFG->enabled to false
+   for any configuration we cannot use, so that a bad user value results
+   in no guides rather than a signal inside redisplay.  */
+
+static void
+indent_guide_get_config (struct indent_guide_config *cfg)
+{
+  cfg->enabled = false;
+  cfg->spacing = 0;
+  cfg->offset = 0;
+  cfg->max_depth = 0;
+
+  if (NILP (Vdisplay_indent_guides))
+    return;
+  if (!FIXNUMP (Vdisplay_indent_guides_spacing)
+      || !FIXNUMP (Vdisplay_indent_guides_offset)
+      || !FIXNUMP (Vdisplay_indent_guides_max_depth))
+    return;
+
+  EMACS_INT spacing = XFIXNUM (Vdisplay_indent_guides_spacing);
+  EMACS_INT offset = XFIXNUM (Vdisplay_indent_guides_offset);
+  EMACS_INT max_depth = XFIXNUM (Vdisplay_indent_guides_max_depth);
+
+  if (spacing < 1 || offset < 0 || max_depth < 1)
+    return;
+  if (spacing > 1000 || offset > 1000)
+    return;
+
+  cfg->enabled = true;
+  cfg->spacing = spacing;
+  cfg->offset = offset;
+  cfg->max_depth = min (max_depth, INDENT_GUIDE_MAX_DEPTH);
+}
+
+/* Number of guides for leading whitespace LEN columns wide.  This is the
+   same formula the indent-bars package uses, so that the two agree
+   visually.  */
+
+static int
+indent_guide_depth (int len, const struct indent_guide_config *cfg)
+{
+  if (len > cfg->offset)
+    return 1 + (len - cfg->offset - 1) / cfg->spacing;
+  return 0;
+}
+
+/* Column of guide number DEPTH, counting from 1.  */
+
+static int
+indent_guide_column (int depth, const struct indent_guide_config *cfg)
+{
+  return cfg->offset + (depth - 1) * cfg->spacing;
+}
+
+/* Measure the leading whitespace of the line starting at buffer position
+   BEG, whose byte position is BEG_BYTE.  Store its width in columns in
+   *WIDTH.  Return true if the line contains a non-whitespace character,
+   false if it is blank, meaning whitespace up to the newline or to ZV.
+
+   FETCH_BYTE is safe here: space and tab are ASCII, and the lead byte of
+   any multibyte character compares equal to neither, ending the scan.  */
+
+static bool
+indent_guide_line_indentation (ptrdiff_t beg, ptrdiff_t beg_byte,
+			       int tab_width, int *width)
+{
+  ptrdiff_t pos = beg, pos_byte = beg_byte;
+  int col = 0;
+
+  while (pos < ZV)
+    {
+      int c = FETCH_BYTE (pos_byte);
+
+      if (c == ' ')
+	col++;
+      else if (c == '\t')
+	col += tab_width - (col % tab_width);
+      else
+	{
+	  *width = col;
+	  return c != '\n';
+	}
+      pos++;
+      pos_byte++;
+    }
+
+  *width = col;
+  return false;
+}
+
+DEFUN ("internal--indent-guide-stops", Finternal__indent_guide_stops,
+       Sinternal__indent_guide_stops, 1, 1, 0,
+       doc: /* Return the indentation guides for the line containing POS.
+The value is a list of (COLUMN . DEPTH) pairs, in increasing column
+order, or nil if this line has no guides.  This function exists for
+testing the display code and should not be used in Lisp programs.  */)
+  (Lisp_Object pos)
+{
+  CHECK_FIXNUM_COERCE_MARKER (pos);
+
+  struct indent_guide_config cfg;
+  indent_guide_get_config (&cfg);
+  if (!cfg.enabled)
+    return Qnil;
+
+  ptrdiff_t charpos = clip_to_bounds (BEGV, XFIXNUM (pos), ZV);
+  ptrdiff_t beg_byte;
+  ptrdiff_t beg = find_newline_no_quit (charpos, CHAR_TO_BYTE (charpos),
+					-1, &beg_byte);
+
+  int tab_width = SANE_TAB_WIDTH (current_buffer);
+  int width;
+  indent_guide_line_indentation (beg, beg_byte, tab_width, &width);
+
+  int depth = min (indent_guide_depth (width, &cfg), cfg.max_depth);
+  Lisp_Object result = Qnil;
+  for (int d = depth; d >= 1; d--)
+    result = Fcons (Fcons (make_fixnum (indent_guide_column (d, &cfg)),
+			   make_fixnum (d)),
+		    result);
+  return result;
+}
+
+
 /* Construct the glyph row IT->glyph_row in the desired matrix of
    IT->w from text at the current position of IT.  See dispextern.h
    for an overview of struct it.  Value is true if
@@ -39287,6 +39432,7 @@ be let-bound around code that needs to disable messages temporarily. */);
 #ifdef GLYPH_DEBUG
   defsubr (&Sdump_frame_glyph_matrix);
   defsubr (&Sdump_glyph_matrix);
+  defsubr (&Sinternal__indent_guide_stops);
   defsubr (&Sdump_glyph_row);
   defsubr (&Sdump_tab_bar_row);
   defsubr (&Sdump_tool_bar_row);
@@ -40058,6 +40204,39 @@ It has no effect when set to 0, or when line numbers are not absolute.  */);
   display_line_numbers_offset = 0;
   DEFSYM (Qdisplay_line_numbers_offset, "display-line-numbers-offset");
   Fmake_variable_buffer_local (Qdisplay_line_numbers_offset);
+
+  DEFVAR_LISP ("display-indent-guides", Vdisplay_indent_guides,
+    doc: /* Non-nil means display vertical guides in leading indentation.
+Guides are drawn every `display-indent-guides-spacing' columns, starting
+at `display-indent-guides-offset'.
+
+Rather than setting this variable directly, you will usually want to
+enable `indent-guides-mode', which also picks a column spacing suited to
+the buffer's major mode.  */);
+  Vdisplay_indent_guides = Qnil;
+  DEFSYM (Qdisplay_indent_guides, "display-indent-guides");
+  Fmake_variable_buffer_local (Qdisplay_indent_guides);
+
+  DEFVAR_LISP ("display-indent-guides-spacing", Vdisplay_indent_guides_spacing,
+    doc: /* Number of columns between indentation guides.
+The value should be a positive integer.  Any other value disables
+indentation guides in this buffer.  */);
+  Vdisplay_indent_guides_spacing = make_fixnum (4);
+  DEFSYM (Qdisplay_indent_guides_spacing, "display-indent-guides-spacing");
+  Fmake_variable_buffer_local (Qdisplay_indent_guides_spacing);
+
+  DEFVAR_LISP ("display-indent-guides-offset", Vdisplay_indent_guides_offset,
+    doc: /* Column of the first indentation guide.  */);
+  Vdisplay_indent_guides_offset = make_fixnum (0);
+  DEFSYM (Qdisplay_indent_guides_offset, "display-indent-guides-offset");
+  Fmake_variable_buffer_local (Qdisplay_indent_guides_offset);
+
+  DEFVAR_LISP ("display-indent-guides-max-depth",
+	       Vdisplay_indent_guides_max_depth,
+    doc: /* Maximum number of indentation guides to draw on one line.  */);
+  Vdisplay_indent_guides_max_depth = make_fixnum (16);
+  DEFSYM (Qdisplay_indent_guides_max_depth, "display-indent-guides-max-depth");
+  Fmake_variable_buffer_local (Qdisplay_indent_guides_max_depth);
 
   DEFVAR_BOOL ("display-fill-column-indicator", display_fill_column_indicator,
     doc: /* Non-nil means display the fill column indicator.

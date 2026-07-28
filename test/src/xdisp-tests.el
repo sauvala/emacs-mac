@@ -228,4 +228,75 @@ int main () {
       (setq s2 (window-text-pixel-size nil (line-beginning-position) (point)))
       (should (equal m1 m2)))))
 
+
+;;; Indentation guides
+
+(defun xdisp-tests--guide-stops (text pos)
+  "Return guide stops for the line containing POS in a buffer with TEXT."
+  (with-temp-buffer
+    (insert text)
+    (setq-local display-indent-guides t)
+    (setq-local display-indent-guides-spacing 4)
+    (setq-local display-indent-guides-offset 0)
+    (setq-local tab-width 8)
+    (internal--indent-guide-stops pos)))
+
+(ert-deftest xdisp-tests--indent-guide-stops-none ()
+  "A line with no indentation has no guides."
+  (should (equal (xdisp-tests--guide-stops "foo\n" 1) nil)))
+
+(ert-deftest xdisp-tests--indent-guide-stops-one ()
+  "Four columns of indentation give one guide, at column 0."
+  (should (equal (xdisp-tests--guide-stops "    foo\n" 1) '((0 . 1)))))
+
+(ert-deftest xdisp-tests--indent-guide-stops-three ()
+  "Twelve columns of indentation give three guides."
+  (should (equal (xdisp-tests--guide-stops "            foo\n" 1)
+                 '((0 . 1) (4 . 2) (8 . 3)))))
+
+(ert-deftest xdisp-tests--indent-guide-stops-partial ()
+  "Indentation that does not land on a stop still yields the passed stops."
+  (should (equal (xdisp-tests--guide-stops "      foo\n" 1)
+                 '((0 . 1) (4 . 2)))))
+
+(ert-deftest xdisp-tests--indent-guide-stops-tabs ()
+  "A tab expands by `tab-width' when measuring indentation."
+  (should (equal (xdisp-tests--guide-stops "\tfoo\n" 1)
+                 '((0 . 1) (4 . 2)))))
+
+(ert-deftest xdisp-tests--indent-guide-stops-offset ()
+  "`display-indent-guides-offset' shifts the first stop."
+  (with-temp-buffer
+    (insert "        foo\n")
+    (setq-local display-indent-guides t)
+    (setq-local display-indent-guides-spacing 4)
+    (setq-local display-indent-guides-offset 2)
+    (should (equal (internal--indent-guide-stops 1) '((2 . 1) (6 . 2))))))
+
+(ert-deftest xdisp-tests--indent-guide-stops-disabled ()
+  "No guides when the feature is off in this buffer."
+  (with-temp-buffer
+    (insert "        foo\n")
+    (setq-local display-indent-guides nil)
+    (should (equal (internal--indent-guide-stops 1) nil))))
+
+(ert-deftest xdisp-tests--indent-guide-stops-max-depth ()
+  "`display-indent-guides-max-depth' caps the number of guides."
+  (with-temp-buffer
+    (insert (make-string 40 ?\s) "foo\n")
+    (setq-local display-indent-guides t)
+    (setq-local display-indent-guides-spacing 4)
+    (setq-local display-indent-guides-offset 0)
+    (setq-local display-indent-guides-max-depth 3)
+    (should (equal (internal--indent-guide-stops 1)
+                   '((0 . 1) (4 . 2) (8 . 3))))))
+
+(ert-deftest xdisp-tests--indent-guide-stops-bad-spacing ()
+  "A nonsensical spacing degrades to no guides rather than signalling."
+  (with-temp-buffer
+    (insert "        foo\n")
+    (setq-local display-indent-guides t)
+    (setq-local display-indent-guides-spacing 0)
+    (should (equal (internal--indent-guide-stops 1) nil))))
+
 ;;; xdisp-tests.el ends here
