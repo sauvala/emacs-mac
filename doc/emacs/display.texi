@@ -30,6 +30,7 @@ the text is displayed.
 * Highlight Interactively:: Tell Emacs what text to highlight.
 * Fringes::                Enabling or disabling window fringes.
 * Displaying Boundaries::  Displaying top and bottom of the buffer.
+* Indentation Guides::    Showing indentation depth with vertical lines.
 * Useless Whitespace::     Showing possibly spurious trailing whitespace.
 * Selective Display::      Hiding lines with lots of indentation.
 * Optional Mode Line::     Optional mode line display features.
@@ -1613,6 +1614,63 @@ bitmap in left fringe, the bottom angle bitmap in right fringe, and
 both arrow bitmaps in right fringe.  To show just the angle bitmaps in
 the left fringe, but no arrow bitmaps, use @code{((top .  left)
 (bottom . left))}.
+
+@node Indentation Guides
+@section Indentation Guides
+@cindex indentation guides
+@cindex guides, indentation
+
+@findex indent-guides-mode
+@findex global-indent-guides-mode
+  Indentation guides are thin vertical lines drawn in the leading
+whitespace of indented lines, showing at a glance how deeply each line
+is nested.  Type @kbd{M-x indent-guides-mode} to display them in the
+current buffer, or @kbd{M-x global-indent-guides-mode} to display them
+in every programming-language buffer.  As with the fill-column
+indicator, this assumes the buffer uses a fixed-pitch font.
+
+@vindex display-indent-guides-spacing
+@vindex display-indent-guides-offset
+  Guides are drawn every @code{display-indent-guides-spacing} columns,
+starting at column @code{display-indent-guides-offset}.
+@code{indent-guides-mode} sets the spacing from the major mode's own
+indentation width, falling back to @code{tab-width}; customize
+@code{indent-guides-spacing-alist} to teach it about further modes.
+
+@vindex display-indent-guides-width
+@vindex display-indent-guides-pad
+  @code{display-indent-guides-width} sets the width of a guide as a
+fraction of the width of a character, and
+@code{display-indent-guides-pad} sets how far the guide sits from the
+left edge of its column.  Both default to small fractions, giving a
+thin line rather than a full character.
+
+@vindex display-indent-guides-blank-lines
+  By default guides continue through blank lines, using the guides of
+the deeper of the nearest non-blank lines above and below.  Set
+@code{display-indent-guides-blank-lines} to @code{nil} to leave blank
+lines empty.
+
+@vindex display-indent-guides-highlight-current
+@cindex indent-guide-current face
+  If you set @code{display-indent-guides-highlight-current} to a
+non-@code{nil} value, the guide of the block containing point is drawn
+in the @code{indent-guide-current} face.  Note that this disables some
+redisplay optimizations for windows showing the buffer, in the same way
+that showing the current line's number in a distinct face does.
+
+@cindex indent-guide-1 face
+  Guides cycle through the faces @code{indent-guide-1} to
+@code{indent-guide-8} by depth, so customizing those faces gives each
+nesting level its own color.
+
+@vindex display-indent-guides-character
+  On text terminals a guide cannot be narrower than one character cell,
+so it is drawn using the character in
+@code{display-indent-guides-character}, which defaults to the
+box-drawing character @samp{U+2502 BOX DRAWINGS LIGHT VERTICAL}.
+
+  Indentation guides are not displayed in right-to-left paragraphs.
 
 @node Useless Whitespace
 @section Useless Whitespace

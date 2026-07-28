@@ -380,6 +380,7 @@ Controlling the Display
 * Highlight Interactively:: Tell Emacs what text to highlight.
 * Fringes::                Enabling or disabling window fringes.
 * Displaying Boundaries::  Displaying top and bottom of the buffer.
+* Indentation Guides::    Showing indentation depth with vertical lines.
 * Useless Whitespace::     Showing possibly spurious trailing whitespace.
 * Selective Display::      Hiding lines with lots of indentation.
 * Optional Mode Line::     Optional mode line display features.

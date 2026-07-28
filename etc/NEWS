@@ -30,6 +30,29 @@ applies, and please also update docstrings as needed.
 
 * Changes in Emacs 32.1
 
++++
+** New minor mode 'indent-guides-mode'.
+This mode displays thin vertical guides in leading indentation, drawn by
+the display engine rather than by text properties.  Use
+'global-indent-guides-mode' to enable it in all programming modes.
+
+Guides are drawn every 'display-indent-guides-spacing' columns, starting
+at 'display-indent-guides-offset'; 'indent-guides-mode' picks the spacing
+from the major mode's own indentation width.  Their appearance is
+controlled by 'display-indent-guides-width' and
+'display-indent-guides-pad', and by the faces 'indent-guide-1' through
+'indent-guide-8', which are cycled by depth.
+
+Set 'display-indent-guides-highlight-current' to draw the guide of the
+block containing point in the 'indent-guide-current' face; note that this
+disables some redisplay optimizations, as showing the current line's
+number in a distinct face does.  Set 'display-indent-guides-blank-lines'
+to nil to leave blank lines empty rather than continuing guides through
+them.  On text terminals the guides are drawn using
+'display-indent-guides-character'.
+
+Indentation guides are not displayed in right-to-left paragraphs.
+
 ---
 ** New char-table 'special-mirror-table' for mirroring special glyphs.
 This char-table is used to mirror special glyphs (truncation and
