@@ -299,4 +299,58 @@ int main () {
     (setq-local display-indent-guides-spacing 0)
     (should (equal (internal--indent-guide-stops 1) nil))))
 
+(defun xdisp-tests--guide-stops-blank (text pos)
+  "Return guide stops for TEXT at POS with blank-line guides enabled."
+  (with-temp-buffer
+    (insert text)
+    (setq-local display-indent-guides t)
+    (setq-local display-indent-guides-spacing 4)
+    (setq-local display-indent-guides-offset 0)
+    (setq-local display-indent-guides-blank-lines t)
+    (setq-local tab-width 8)
+    (internal--indent-guide-stops pos)))
+
+(ert-deftest xdisp-tests--indent-guide-blank-between ()
+  "A blank line between two indented lines takes the deeper context."
+  ;; Line 2 is blank; neighbours are indented 4 and 8 columns.
+  (should (equal (xdisp-tests--guide-stops-blank "    a\n\n        b\n" 7)
+                 '((0 . 1) (4 . 2)))))
+
+(ert-deftest xdisp-tests--indent-guide-blank-run ()
+  "All lines of a blank run get the same context."
+  (let ((text "        a\n\n\n\n    b\n"))
+    ;; Positions 11, 12 and 13 are the three blank lines.
+    (should (equal (xdisp-tests--guide-stops-blank text 11)
+                   '((0 . 1) (4 . 2))))
+    (should (equal (xdisp-tests--guide-stops-blank text 12)
+                   '((0 . 1) (4 . 2))))
+    (should (equal (xdisp-tests--guide-stops-blank text 13)
+                   '((0 . 1) (4 . 2))))))
+
+(ert-deftest xdisp-tests--indent-guide-blank-at-bob ()
+  "A blank line with no previous non-blank line uses the following one."
+  (should (equal (xdisp-tests--guide-stops-blank "\n        b\n" 1)
+                 '((0 . 1) (4 . 2)))))
+
+(ert-deftest xdisp-tests--indent-guide-blank-at-eob ()
+  "A blank line with no following non-blank line uses the previous one."
+  (should (equal (xdisp-tests--guide-stops-blank "        a\n\n" 11)
+                 '((0 . 1) (4 . 2)))))
+
+(ert-deftest xdisp-tests--indent-guide-blank-disabled ()
+  "With blank-line guides off, a blank line has no guides."
+  (with-temp-buffer
+    (insert "        a\n\n        b\n")
+    (setq-local display-indent-guides t)
+    (setq-local display-indent-guides-spacing 4)
+    (setq-local display-indent-guides-offset 0)
+    (setq-local display-indent-guides-blank-lines nil)
+    (should (equal (internal--indent-guide-stops 11) nil))))
+
+(ert-deftest xdisp-tests--indent-guide-whitespace-only-line ()
+  "A line of only whitespace counts as blank, not as indentation."
+  ;; Line 2 holds two spaces; context from neighbours is 8 columns deep.
+  (should (equal (xdisp-tests--guide-stops-blank "        a\n  \n        b\n" 11)
+                 '((0 . 1) (4 . 2)))))
+
 ;;; xdisp-tests.el ends here

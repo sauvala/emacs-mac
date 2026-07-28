@@ -2455,6 +2455,15 @@ struct it
      iterator position in `current'.  */
   ptrdiff_t prev_stop;
 
+  /* Memo for indentation guides on runs of blank lines.  Valid when
+     GUIDE_MEMO_BEG < GUIDE_MEMO_END, in which case it covers the buffer
+     range of one run of blank lines whose common guide depth is
+     GUIDE_MEMO_DEPTH.  This is scratch state for a single redisplay of a
+     window; nothing outside the guide code reads it, and it is never
+     consulted across redisplays, so there is nothing to invalidate.  */
+  ptrdiff_t guide_memo_beg, guide_memo_end;
+  int guide_memo_depth;
+
   /* Last stop position iterated across whose bidi embedding level is
      equal to the current paragraph's base embedding level.  */
   ptrdiff_t base_level_stop;

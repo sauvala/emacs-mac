@@ -26802,6 +26802,97 @@ indent_guide_line_indentation (ptrdiff_t beg, ptrdiff_t beg_byte,
   return false;
 }
 
+/* Return the guide depth for the blank line whose first character is at
+   BEG.  This is the greater of the depths of the nearest non-blank lines
+   above and below, skipping intervening blank lines, which is the rule
+   the indent-bars package uses.  Store the buffer range of the whole
+   blank run in *RUN_BEG and *RUN_END, so that callers can memoize the
+   answer for every line of the run.  */
+
+static int
+indent_guide_blank_context (ptrdiff_t beg, int tab_width,
+			    const struct indent_guide_config *cfg,
+			    ptrdiff_t *run_beg, ptrdiff_t *run_end)
+{
+  int width;
+  int prev_depth = 0, next_depth = 0;
+  ptrdiff_t p;
+
+  /* Walk backwards to the nearest non-blank line.  P strictly decreases,
+     because the line start found from P - 1 is always below P.  */
+  p = beg;
+  while (p > BEGV)
+    {
+      ptrdiff_t prev_byte;
+      ptrdiff_t prev = find_newline_no_quit (p - 1, CHAR_TO_BYTE (p - 1),
+					     -1, &prev_byte);
+      if (indent_guide_line_indentation (prev, prev_byte, tab_width, &width))
+	{
+	  prev_depth = indent_guide_depth (width, cfg);
+	  break;
+	}
+      p = prev;
+    }
+  *run_beg = p;
+
+  /* Walk forwards to the nearest non-blank line.  */
+  p = beg;
+  while (p < ZV)
+    {
+      ptrdiff_t next_byte;
+      ptrdiff_t next = find_newline_no_quit (p, CHAR_TO_BYTE (p),
+					     1, &next_byte);
+      if (next >= ZV)
+	{
+	  p = ZV;
+	  break;
+	}
+      if (indent_guide_line_indentation (next, next_byte, tab_width, &width))
+	{
+	  next_depth = indent_guide_depth (width, cfg);
+	  p = next;
+	  break;
+	}
+      p = next;
+    }
+  *run_end = p;
+
+  return max (prev_depth, next_depth);
+}
+
+/* Guide depth for the line starting at BEG, whose byte position is
+   BEG_BYTE.  IT may be NULL, in which case the blank-run memo is neither
+   consulted nor updated.  */
+
+static int
+indent_guide_line_depth (struct it *it, ptrdiff_t beg, ptrdiff_t beg_byte,
+			 int tab_width, const struct indent_guide_config *cfg)
+{
+  int width;
+
+  if (indent_guide_line_indentation (beg, beg_byte, tab_width, &width))
+    return min (indent_guide_depth (width, cfg), cfg->max_depth);
+
+  if (NILP (Vdisplay_indent_guides_blank_lines))
+    return 0;
+
+  if (it && it->guide_memo_beg < it->guide_memo_end
+      && beg >= it->guide_memo_beg && beg < it->guide_memo_end)
+    return it->guide_memo_depth;
+
+  ptrdiff_t run_beg, run_end;
+  int depth = min (indent_guide_blank_context (beg, tab_width, cfg,
+					       &run_beg, &run_end),
+		   cfg->max_depth);
+  if (it)
+    {
+      it->guide_memo_beg = run_beg;
+      it->guide_memo_end = run_end;
+      it->guide_memo_depth = depth;
+    }
+  return depth;
+}
+
 DEFUN ("internal--indent-guide-stops", Finternal__indent_guide_stops,
        Sinternal__indent_guide_stops, 1, 1, 0,
        doc: /* Return the indentation guides for the line containing POS.
@@ -26823,10 +26914,8 @@ testing the display code and should not be used in Lisp programs.  */)
 					-1, &beg_byte);
 
   int tab_width = SANE_TAB_WIDTH (current_buffer);
-  int width;
-  indent_guide_line_indentation (beg, beg_byte, tab_width, &width);
+  int depth = indent_guide_line_depth (NULL, beg, beg_byte, tab_width, &cfg);
 
-  int depth = min (indent_guide_depth (width, &cfg), cfg.max_depth);
   Lisp_Object result = Qnil;
   for (int d = depth; d >= 1; d--)
     result = Fcons (Fcons (make_fixnum (indent_guide_column (d, &cfg)),
@@ -40237,6 +40326,16 @@ indentation guides in this buffer.  */);
   Vdisplay_indent_guides_max_depth = make_fixnum (16);
   DEFSYM (Qdisplay_indent_guides_max_depth, "display-indent-guides-max-depth");
   Fmake_variable_buffer_local (Qdisplay_indent_guides_max_depth);
+
+  DEFVAR_LISP ("display-indent-guides-blank-lines",
+	       Vdisplay_indent_guides_blank_lines,
+    doc: /* Non-nil means draw indentation guides on blank lines.
+The guides drawn on a blank line are those of the deeper of the nearest
+non-blank lines above and below it.  */);
+  Vdisplay_indent_guides_blank_lines = Qt;
+  DEFSYM (Qdisplay_indent_guides_blank_lines,
+	  "display-indent-guides-blank-lines");
+  Fmake_variable_buffer_local (Qdisplay_indent_guides_blank_lines);
 
   DEFVAR_BOOL ("display-fill-column-indicator", display_fill_column_indicator,
     doc: /* Non-nil means display the fill column indicator.
