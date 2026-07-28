@@ -455,7 +455,10 @@ enum glyph_type
   STRETCH_GLYPH,
 
   /* Glyph is an external widget drawn by the GUI toolkit.  */
-  XWIDGET_GLYPH
+  XWIDGET_GLYPH,
+
+  /* Glyph is a vertical indentation guide.  */
+  INDENT_GUIDE_GLYPH
 };
 
 
@@ -628,6 +631,24 @@ struct glyph
       unsigned ascent  : 16;
     }
     stretch;
+
+    /* Sub-structure for type == INDENT_GUIDE_GLYPH.  These fields fit in
+       the 32 bits shared with U.VAL, so guides compare in one step like
+       every other glyph type.  WIDTH and PAD are resolved to pixels when
+       the row is built, so the glyph is self-describing at draw time even
+       if a buffer-local variable changed in between.  */
+    struct
+    {
+      /* Indentation depth this guide marks, counting from 1.  */
+      unsigned depth : 8;
+      /* Bar width in pixels.  */
+      unsigned width : 8;
+      /* Pixels between the left edge of the cell and the bar.  */
+      unsigned pad : 8;
+      /* Reserved for dashed and zigzag styles; always 0 for now.  */
+      unsigned pattern : 8;
+    }
+    indent_guide;
 
     /* Sub-stretch for type == GLYPHLESS_GLYPH.  */
     struct

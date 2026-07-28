@@ -1984,6 +1984,12 @@ haiku_draw_glyph_string (struct glyph_string *s)
     case STRETCH_GLYPH:
       haiku_draw_stretch_glyph_string (s);
       break;
+
+    case INDENT_GUIDE_GLYPH:
+      /* Indentation guides are drawn only by the mac backend for now.
+	 Rendering the glyph as its background keeps layout correct
+	 everywhere else.  */
+      break;
     case IMAGE_GLYPH:
       haiku_draw_image_glyph_string (s);
       break;

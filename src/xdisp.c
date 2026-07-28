@@ -32503,6 +32503,48 @@ fill_stretch_glyph_string (struct glyph_string *s, int start, int end)
   return glyph - s->row->glyphs[s->area];
 }
 
+/* Fill glyph string S from the indentation guide glyph at START in
+   S->row->glyphs[S->area].  Return the index of the next glyph.
+
+   One glyph per string: a guide carries its own width and padding, so
+   there is nothing to gain by merging a run, and struct glyph_string has
+   no glyph count for the drawing code to iterate over.  END is accepted
+   for symmetry with the other fill functions.  */
+
+static int
+fill_indent_guide_glyph_string (struct glyph_string *s, int start, int end)
+{
+  struct glyph *glyph;
+  int voffset, face_id;
+
+  eassert (s->first_glyph->type == INDENT_GUIDE_GLYPH);
+  eassert (start < end);
+
+  glyph = s->row->glyphs[s->area] + start;
+  face_id = glyph->face_id;
+  s->face = FACE_FROM_ID (s->f, face_id);
+  s->font = s->face->font;
+  if (s->hl == DRAW_MOUSE_FACE
+      || (s->hl == DRAW_CURSOR
+	  && MATRIX_ROW (s->w->current_matrix,
+			 s->w->phys_cursor.vpos)->mouse_face_p
+	  && cursor_in_mouse_face_p (s->w)))
+    {
+      Mouse_HLInfo *hlinfo = MOUSE_HL_INFO (s->f);
+      s->face = FACE_FROM_ID_OR_NULL (s->f, hlinfo->mouse_face_face_id);
+      if (!s->face)
+	s->face = FACE_FROM_ID (s->f, MOUSE_FACE_ID);
+      prepare_face_for_display (s->f, s->face);
+    }
+  s->width = glyph->pixel_width;
+  s->nchars = 1;
+  voffset = glyph->voffset;
+  s->ybase += voffset;
+
+  eassert (s->face);
+  return start + 1;
+}
+
 static struct font_metrics *
 get_per_char_metric (struct font *font, const unsigned *char2b)
 {
@@ -32902,6 +32944,25 @@ compute_overhangs_and_x (struct glyph_string *s, int x, bool backward_p)
      while (false)
 
 
+/* Add a glyph string for a run of indentation guide glyphs to the list
+   of strings between HEAD and TAIL.  START is the index of the first
+   guide glyph in row area AREA of glyph row ROW, END the index of the
+   last glyph in that area.  X is the current output position assigned to
+   the new glyph string.  HL overrides the face of the glyphs.  */
+
+#define BUILD_INDENT_GUIDE_GLYPH_STRING(START, END, HEAD, TAIL, HL, X,	    \
+					LAST_X)				    \
+     do									    \
+       {								    \
+	 s = alloca (sizeof *s);					    \
+	 INIT_GLYPH_STRING (s, NULL, w, row, area, START, HL);		    \
+	 START = fill_indent_guide_glyph_string (s, START, END);	    \
+	 append_glyph_string (&HEAD, &TAIL, s);				    \
+	 s->x = (X);							    \
+       }								    \
+     while (false)
+
+
 /* Add a glyph string for an image glyph to the list of strings
    between HEAD and TAIL.  START is the index of the image glyph in
    row area AREA of glyph row ROW.  END is the index of the last glyph
@@ -33085,6 +33146,11 @@ compute_overhangs_and_x (struct glyph_string *s, int x, bool backward_p)
 	    case STRETCH_GLYPH:						\
 	      BUILD_STRETCH_GLYPH_STRING (START, END, HEAD, TAIL,	\
 					  HL, X, LAST_X);		\
+	      break;							\
+									\
+	    case INDENT_GUIDE_GLYPH:					\
+	      BUILD_INDENT_GUIDE_GLYPH_STRING (START, END, HEAD, TAIL,	\
+					       HL, X, LAST_X);		\
 	      break;							\
 									\
 	    case IMAGE_GLYPH:						\

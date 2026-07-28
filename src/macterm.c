@@ -2690,6 +2690,48 @@ mac_draw_image_glyph_string (struct glyph_string *s)
 }
 
 
+/* Draw indentation guide glyph string S.
+
+   The background is filled first, so that region and hl-line
+   highlighting show through behind the bars, and the bars themselves go
+   through mac_fill_rectangle, which is what keeps this working under both
+   the Core Graphics and Metal rendering paths.
+
+   Each glyph carries its own width and padding in pixels, resolved when
+   the row was built.  The PATTERN field is reserved for dashed and zigzag
+   styles and is 0 (solid) for now.  */
+
+static void
+mac_draw_indent_guide_glyph_string (struct glyph_string *s)
+{
+  struct glyph *g = s->first_glyph;
+  int width = g->u.indent_guide.width;
+  int pad = g->u.indent_guide.pad;
+
+  eassert (g->type == INDENT_GUIDE_GLYPH);
+
+  if (!s->background_filled_p)
+    {
+      if (s->for_overlaps)
+	s->background_filled_p = true;
+      else if (s->background_width > 0)
+	{
+	  mac_clear_glyph_string_rect (s, s->x, s->y, s->background_width,
+				       s->height);
+	  s->background_filled_p = true;
+	}
+    }
+
+  /* When the cursor sits on indentation, the cursor rectangle has
+     already been drawn over this cell; leave it alone.  */
+  if (s->hl == DRAW_CURSOR)
+    return;
+
+  if (width > 0 && pad + width <= g->pixel_width)
+    mac_fill_rectangle (s->f, s->gc, s->x + pad, s->y, width, s->height);
+}
+
+
 /* Draw stretch glyph string S.  */
 
 static void
@@ -2887,6 +2929,10 @@ mac_draw_glyph_string (struct glyph_string *s)
 
     case STRETCH_GLYPH:
       mac_draw_stretch_glyph_string (s);
+      break;
+
+    case INDENT_GUIDE_GLYPH:
+      mac_draw_indent_guide_glyph_string (s);
       break;
 
     case CHAR_GLYPH:

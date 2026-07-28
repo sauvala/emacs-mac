@@ -4847,6 +4847,12 @@ ns_draw_glyph_string (struct glyph_string *s)
       ns_draw_stretch_glyph_string (s);
       break;
 
+    case INDENT_GUIDE_GLYPH:
+      /* Indentation guides are drawn only by the mac backend for now.
+	 Rendering the glyph as its background keeps layout correct
+	 everywhere else.  */
+      break;
+
     case CHAR_GLYPH:
     case COMPOSITE_GLYPH:
       {

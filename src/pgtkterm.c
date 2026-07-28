@@ -2602,6 +2602,12 @@ pgtk_draw_glyph_string (struct glyph_string *s)
       pgtk_draw_stretch_glyph_string (s);
       break;
 
+    case INDENT_GUIDE_GLYPH:
+      /* Indentation guides are drawn only by the mac backend for now.
+	 Rendering the glyph as its background keeps layout correct
+	 everywhere else.  */
+      break;
+
     case CHAR_GLYPH:
       if (s->for_overlaps)
 	s->background_filled_p = true;
