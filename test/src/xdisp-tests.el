@@ -393,6 +393,18 @@ int main () {
       (should (equal (internal--indent-guide-stops 1)
                      '((0 . 1) (4 . 2) (8 . 3) (12 . 4)))))))
 
+(ert-deftest xdisp-tests--indent-guides-character-default ()
+  "The text-terminal guide character defaults to a box-drawing bar."
+  (should (equal display-indent-guides-character
+                 ?\N{BOX DRAWINGS LIGHT VERTICAL})))
+
+(ert-deftest xdisp-tests--indent-guides-character-settable ()
+  "The text-terminal guide character is buffer-local and settable."
+  (with-temp-buffer
+    (setq-local display-indent-guides-character ?|)
+    (should (equal display-indent-guides-character ?|))
+    (should (local-variable-p 'display-indent-guides-character))))
+
 (defun xdisp-tests--positions-across-line (buffer-text)
   "Return the buffer positions `posn-at-x-y' reports across line 1.
 Renders BUFFER-TEXT in a temporary window and samples every column."

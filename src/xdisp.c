@@ -27033,6 +27033,17 @@ indent_guide_convert_glyph (struct window *w, struct glyph_row *row, int i,
   eassert (g->type == CHAR_GLYPH && g->u.ch == ' ');
 
   g->face_id = indent_guide_face (w, depth, g->face_id);
+
+  if (!FRAME_WINDOW_P (XFRAME (w->frame)))
+    {
+      /* A text terminal cannot draw a rule narrower than a cell, so
+	 display a character instead.  The glyph stays a CHAR_GLYPH,
+	 which keeps term.c and dispnew.c out of this feature entirely.  */
+      if (FIXNATP (Vdisplay_indent_guides_character))
+	g->u.ch = XFIXNAT (Vdisplay_indent_guides_character);
+      return;
+    }
+
   g->type = INDENT_GUIDE_GLYPH;
   g->u.val = 0;
   g->u.indent_guide.depth = min (depth, 255);
@@ -40928,6 +40939,16 @@ in a distinct face.  */);
   indent_guide_face_names[7] = Qindent_guide_8;
   for (int i = 0; i < 8; i++)
     staticpro (&indent_guide_face_names[i]);
+
+  DEFVAR_LISP ("display-indent-guides-character",
+	       Vdisplay_indent_guides_character,
+    doc: /* Character used to draw indentation guides on text terminals.
+On graphical displays, guides are drawn as thin vertical lines and this
+variable has no effect.  */);
+  Vdisplay_indent_guides_character = make_fixnum (0x2502);
+  DEFSYM (Qdisplay_indent_guides_character,
+	  "display-indent-guides-character");
+  Fmake_variable_buffer_local (Qdisplay_indent_guides_character);
 
   DEFVAR_BOOL ("display-fill-column-indicator", display_fill_column_indicator,
     doc: /* Non-nil means display the fill column indicator.
