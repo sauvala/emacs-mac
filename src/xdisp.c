@@ -20728,6 +20728,11 @@ try_cursor_movement (Lisp_Object window, struct text_pos startp,
 	   && NILP (Finternal_lisp_face_equal_p (Qline_number,
 						 Qline_number_current_line,
 						 w->frame, Qt)))
+      /* Likewise when the guide of the current indentation depth is
+	 highlighted: moving point changes which guides are highlighted,
+	 so the rows have to be rebuilt.  */
+      && !(!NILP (Vdisplay_indent_guides)
+	   && !NILP (Vdisplay_indent_guides_highlight_current))
       /* This code is not used for mini-buffer for the sake of the case
 	 of redisplaying to replace an echo area message; since in
 	 that case the mini-buffer contents per se are usually
@@ -21283,6 +21288,10 @@ optimizations mean and when they are in effect.  */)
       showing point will be fully (as opposed to partially) visible on
       display.  */
 
+/* Defined with the rest of the indentation guide code, before
+   display_line.  */
+static void indent_guide_update_current_depth (void);
+
 static void
 redisplay_window (Lisp_Object window, bool just_this_one_p)
 {
@@ -21457,6 +21466,11 @@ redisplay_window (Lisp_Object window, bool just_this_one_p)
       /* We don't use SET_PT so that the point-motion hooks don't run.  */
       TEMP_SET_PT_BOTH (new_pt, new_pt_byte);
     }
+
+  /* Record the depth of the block containing point, for highlighting its
+     guide.  Done once per window, with point already set to this
+     window's value, and read while the window's rows are built.  */
+  indent_guide_update_current_depth ();
 
   /* If any of the character widths specified in the display table
      have changed, invalidate the width run cache.  It's true that
@@ -22668,6 +22682,13 @@ try_window_reusing_current_matrix (struct window *w)
   if (!NILP (Vshow_trailing_whitespace))
     return false;
 
+  /* Can't reuse rows when the guide of the current indentation depth is
+     highlighted, because moving point changes which guides are drawn
+     highlighted, and reused rows keep the old faces.  */
+  if (!NILP (Vdisplay_indent_guides)
+      && !NILP (Vdisplay_indent_guides_highlight_current))
+    return false;
+
   /* If top-line visibility has changed, give up.  */
   if (!w->current_matrix->header_line_p
       && (window_wants_tab_line (w)
@@ -23555,6 +23576,13 @@ try_window_id (struct window *w)
 						Qline_number_current_line,
 						w->frame, Qt))))
     GIVE_UP (24);
+
+  /* Give up when the guide of the current indentation depth is
+     highlighted, for the same reason as the current line's number: moving
+     point changes which guides are drawn highlighted.  */
+  if (!NILP (Vdisplay_indent_guides)
+      && !NILP (Vdisplay_indent_guides_highlight_current))
+    GIVE_UP (28);
 
   /* composition-break-at-point is incompatible with the optimizations
      in this function, because we need to recompose characters when
@@ -27011,6 +27039,35 @@ indent_guide_convert_glyph (struct window *w, struct glyph_row *row, int i,
   g->u.indent_guide.width = min (width, 255);
   g->u.indent_guide.pad = min (pad, 255);
   g->u.indent_guide.pattern = 0;
+}
+
+/* Record the guide depth of the block containing point, so that
+   maybe_display_indent_guides can highlight that depth.  Called once per
+   window by redisplay_window, with point already set to the window's
+   value.  */
+
+static void
+indent_guide_update_current_depth (void)
+{
+  indent_guide_current_depth = 0;
+
+  if (NILP (Vdisplay_indent_guides)
+      || NILP (Vdisplay_indent_guides_highlight_current))
+    return;
+
+  struct indent_guide_config cfg;
+  indent_guide_get_config (&cfg);
+  if (!cfg.enabled)
+    return;
+
+  ptrdiff_t line_beg_byte;
+  ptrdiff_t line_beg = find_newline_no_quit (PT, PT_BYTE, -1, &line_beg_byte);
+
+  indent_guide_current_depth
+    = indent_guide_apply_scope (indent_guide_line_depth
+				  (NULL, line_beg, line_beg_byte,
+				   SANE_TAB_WIDTH (current_buffer), &cfg),
+				line_beg);
 }
 
 /* True if the character at CHARPOS is a tab.  */
