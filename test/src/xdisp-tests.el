@@ -353,4 +353,44 @@ int main () {
   (should (equal (xdisp-tests--guide-stops-blank "        a\n  \n        b\n" 11)
                  '((0 . 1) (4 . 2)))))
 
+(ert-deftest xdisp-tests--indent-guide-scope-caps-depth ()
+  "Lines inside a scope range are capped at the scope depth."
+  (with-temp-buffer
+    (insert "                a\n")
+    (setq-local display-indent-guides t)
+    (setq-local display-indent-guides-spacing 4)
+    (setq-local display-indent-guides-offset 0)
+    ;; Without a scope, 16 columns give four guides.
+    (should (equal (internal--indent-guide-stops 1)
+                   '((0 . 1) (4 . 2) (8 . 3) (12 . 4))))
+    ;; Cap depth at 2 for the whole buffer.
+    (setq-local display-indent-guides-scope (vector 2 (point-min) (point-max)))
+    (should (equal (internal--indent-guide-stops 1)
+                   '((0 . 1) (4 . 2))))))
+
+(ert-deftest xdisp-tests--indent-guide-scope-outside-range ()
+  "Lines outside every scope range are not capped."
+  (with-temp-buffer
+    (insert "                a\n                b\n")
+    (setq-local display-indent-guides t)
+    (setq-local display-indent-guides-spacing 4)
+    (setq-local display-indent-guides-offset 0)
+    ;; Cap applies only to the first line.
+    (setq-local display-indent-guides-scope (vector 1 1 19))
+    (should (equal (internal--indent-guide-stops 1) '((0 . 1))))
+    (should (equal (internal--indent-guide-stops 20)
+                   '((0 . 1) (4 . 2) (8 . 3) (12 . 4))))))
+
+(ert-deftest xdisp-tests--indent-guide-scope-malformed ()
+  "A malformed scope value is ignored rather than signalling."
+  (with-temp-buffer
+    (insert "                a\n")
+    (setq-local display-indent-guides t)
+    (setq-local display-indent-guides-spacing 4)
+    (setq-local display-indent-guides-offset 0)
+    (dolist (bad (list "not a vector" (vector) (vector 'x 1 2) (vector 2 1)))
+      (setq-local display-indent-guides-scope bad)
+      (should (equal (internal--indent-guide-stops 1)
+                     '((0 . 1) (4 . 2) (8 . 3) (12 . 4)))))))
+
 ;;; xdisp-tests.el ends here

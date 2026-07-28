@@ -26893,6 +26893,39 @@ indent_guide_line_depth (struct it *it, ptrdiff_t beg, ptrdiff_t beg_byte,
   return depth;
 }
 
+/* Apply `display-indent-guides-scope' to DEPTH, for a line starting at
+   BEG.  A malformed value is ignored: redisplay must not signal, and a
+   Lisp bug in a scope provider should cost at most the wrong number of
+   guides.  */
+
+static int
+indent_guide_apply_scope (int depth, ptrdiff_t beg)
+{
+  Lisp_Object scope = Vdisplay_indent_guides_scope;
+
+  if (!VECTORP (scope))
+    return depth;
+
+  ptrdiff_t size = ASIZE (scope);
+  if (size < 3 || (size % 2) == 0)
+    return depth;
+
+  Lisp_Object cap = AREF (scope, 0);
+  if (!FIXNUMP (cap) || XFIXNUM (cap) < 0)
+    return depth;
+
+  for (ptrdiff_t i = 1; i + 1 < size; i += 2)
+    {
+      Lisp_Object lo = AREF (scope, i), hi = AREF (scope, i + 1);
+      if (!FIXNUMP (lo) || !FIXNUMP (hi))
+	return depth;
+      if (beg >= XFIXNUM (lo) && beg < XFIXNUM (hi))
+	return min (depth, (int) XFIXNUM (cap));
+    }
+
+  return depth;
+}
+
 DEFUN ("internal--indent-guide-stops", Finternal__indent_guide_stops,
        Sinternal__indent_guide_stops, 1, 1, 0,
        doc: /* Return the indentation guides for the line containing POS.
@@ -26915,6 +26948,7 @@ testing the display code and should not be used in Lisp programs.  */)
 
   int tab_width = SANE_TAB_WIDTH (current_buffer);
   int depth = indent_guide_line_depth (NULL, beg, beg_byte, tab_width, &cfg);
+  depth = indent_guide_apply_scope (depth, beg);
 
   Lisp_Object result = Qnil;
   for (int d = depth; d >= 1; d--)
@@ -40336,6 +40370,19 @@ non-blank lines above and below it.  */);
   DEFSYM (Qdisplay_indent_guides_blank_lines,
 	  "display-indent-guides-blank-lines");
   Fmake_variable_buffer_local (Qdisplay_indent_guides_blank_lines);
+
+  DEFVAR_LISP ("display-indent-guides-scope", Vdisplay_indent_guides_scope,
+    doc: /* Scope ranges limiting indentation guide depth, or nil.
+The value is a vector [DEPTH BEG END BEG END ...].  Lines whose start
+lies within any BEG..END range draw at most DEPTH guides.
+
+This is how `indent-guides-mode' applies tree-sitter scope and suppresses
+guides inside multi-line strings.  Redisplay only reads this variable and
+never computes it, which is what keeps parsing off the redisplay path.  A
+malformed value is ignored.  */);
+  Vdisplay_indent_guides_scope = Qnil;
+  DEFSYM (Qdisplay_indent_guides_scope, "display-indent-guides-scope");
+  Fmake_variable_buffer_local (Qdisplay_indent_guides_scope);
 
   DEFVAR_BOOL ("display-fill-column-indicator", display_fill_column_indicator,
     doc: /* Non-nil means display the fill column indicator.
