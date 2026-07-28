@@ -412,10 +412,27 @@ Renders BUFFER-TEXT in a temporary window and samples every column."
             (nreverse res)))
       (kill-buffer buf))))
 
+;; These tests need real redisplay, so they only run in a GUI session.
+;; The same properties are checked from the shell by
+;; test/manual/indent-guides-probe.sh, which reads the glyph matrix
+;; directly and can assert on guide columns and depths as well.
+
 (ert-deftest xdisp-tests--indent-guides-preserve-positions ()
   "Enabling guides must not change where a column maps to in the buffer."
   (skip-unless (not noninteractive))
   (let* ((text "        foo\n        bar\n")
+         (without (let ((display-indent-guides nil))
+                    (xdisp-tests--positions-across-line text)))
+         (with (let ((display-indent-guides t)
+                     (display-indent-guides-spacing 4)
+                     (display-indent-guides-offset 0))
+                 (xdisp-tests--positions-across-line text))))
+    (should (equal without with))))
+
+(ert-deftest xdisp-tests--indent-guides-preserve-positions-tabs ()
+  "Guides inside tab indentation must not change buffer positions."
+  (skip-unless (not noninteractive))
+  (let* ((text "\t\tfoo\n\t\tbar\n")
          (without (let ((display-indent-guides nil))
                     (xdisp-tests--positions-across-line text)))
          (with (let ((display-indent-guides t)

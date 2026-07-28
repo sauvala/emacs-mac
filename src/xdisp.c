@@ -27013,6 +27013,104 @@ indent_guide_convert_glyph (struct window *w, struct glyph_row *row, int i,
   g->u.indent_guide.pattern = 0;
 }
 
+/* True if the character at CHARPOS is a tab.  */
+
+static bool
+char_at_is_tab (ptrdiff_t charpos)
+{
+  if (charpos < BEGV || charpos >= ZV)
+    return false;
+  return FETCH_BYTE (CHAR_TO_BYTE (charpos)) == '\t';
+}
+
+/* Width in columns of the text from BEG to END, expanding tabs.  */
+
+static void
+indent_guide_line_indentation_upto (ptrdiff_t beg, ptrdiff_t beg_byte,
+				    ptrdiff_t end, int tab_width, int *width)
+{
+  int col = 0;
+  ptrdiff_t pos_byte = beg_byte;
+
+  for (ptrdiff_t pos = beg; pos < end && pos < ZV; pos++, pos_byte++)
+    {
+      int c = FETCH_BYTE (pos_byte);
+      if (c == '\t')
+	col += tab_width - (col % tab_width);
+      else
+	col++;
+    }
+  *width = col;
+}
+
+/* Split the tab stretch glyph at *I in ROW so that a guide can be drawn
+   at column STOP_COL.  The glyph starts at column COL and spans
+   GLYPH_COLS columns.
+
+   On success, *I is left on the new guide glyph, *CONSUMED holds the
+   number of columns from COL up to and including the guide, and any
+   remainder of the tab is left in the row as a following stretch glyph
+   so that further guides can be placed inside the same tab.  Returns
+   false without touching ROW when the row has no room for the extra
+   glyphs.  */
+
+static bool
+indent_guide_split_tab (struct it *it, struct glyph_row *row, int *i,
+			int col, int stop_col, int glyph_cols,
+			int depth, int width, int pad, int *consumed)
+{
+  struct glyph *area_start = row->glyphs[TEXT_AREA];
+  struct glyph *area_end = row->glyphs[1 + TEXT_AREA];
+  int capacity = area_end - area_start;
+  int used = row->used[TEXT_AREA];
+  struct glyph *tab = area_start + *i;
+
+  int left_cols = stop_col - col;
+  int right_cols = glyph_cols - left_cols - 1;
+  int extra = (left_cols > 0) + (right_cols > 0);
+
+  if (used + extra > capacity)
+    return false;
+
+  int total_width = tab->pixel_width;
+  int guide_width = total_width / glyph_cols;
+  int left_width = (total_width * left_cols) / glyph_cols;
+  int right_width = total_width - left_width - guide_width;
+
+  /* Make room after the tab glyph for the pieces we are adding.  */
+  memmove (tab + 1 + extra, tab + 1, (used - *i - 1) * sizeof *tab);
+  row->used[TEXT_AREA] = used + extra;
+
+  /* All pieces inherit the tab's position and object, so that mouse
+     clicks and cursor placement still land on the tab.  */
+  struct glyph proto = *tab;
+  int at = *i;
+
+  if (left_cols > 0)
+    {
+      area_start[at] = proto;
+      area_start[at].pixel_width = left_width;
+      at++;
+    }
+
+  area_start[at] = proto;
+  area_start[at].type = CHAR_GLYPH;
+  area_start[at].u.val = 0;
+  area_start[at].u.ch = ' ';
+  area_start[at].pixel_width = guide_width;
+  indent_guide_convert_glyph (it->w, row, at, depth, width, pad);
+  *i = at;
+  *consumed = left_cols + 1;
+
+  if (right_cols > 0)
+    {
+      area_start[at + 1] = proto;
+      area_start[at + 1].pixel_width = right_width;
+    }
+
+  return true;
+}
+
 /* Decorate ROW with indentation guides.  Called once per row at the end
    of display_line, after all glyphs have been produced and before the
    cursor is placed, so that the cursor lands on the final glyphs.  */
@@ -27051,37 +27149,84 @@ maybe_display_indent_guides (struct it *it, struct glyph_row *row)
   if (pad + width > char_width)
     pad = max (0, char_width - width);
 
-  /* Walk the row's glyphs, tracking the column each one starts at, and
-     convert the glyph covering each guide stop.  Tab indentation and
-     horizontal scrolling are handled in a later change; for now the walk
-     stops at anything that is not a space.  */
-  int next_depth = 1;
+  /* Column at which the row's first glyph starts.  With horizontal
+     scrolling the leading columns are off-screen, and their stops must be
+     skipped rather than drawn at the wrong place.  */
   int col = 0;
+  if (row->used[TEXT_AREA] > 0)
+    {
+      struct glyph *first = row->glyphs[TEXT_AREA];
 
+      if (BUFFERP (first->object) && first->charpos > beg)
+	indent_guide_line_indentation_upto (beg, CHAR_TO_BYTE (beg),
+					    first->charpos, tab_width, &col);
+
+      /* Scrolling can cut a tab in half, leaving a stretch narrower than
+	 the tab it came from.  Advance past the columns that were cut.  */
+      if (first->type == STRETCH_GLYPH && char_at_is_tab (first->charpos))
+	{
+	  int full_cols = tab_width - (col % tab_width);
+	  int shown_cols = ((first->pixel_width + char_width - 1)
+			    / max (1, char_width));
+	  if (shown_cols < full_cols)
+	    col += full_cols - shown_cols;
+	}
+    }
+
+  int next_depth = 1;
+  while (next_depth <= depth && indent_guide_column (next_depth, &cfg) < col)
+    next_depth++;
+
+  /* Walk the row's glyphs, tracking the column each one starts at, and
+     convert the glyph covering each guide stop.  */
   for (int i = 0; i < row->used[TEXT_AREA] && next_depth <= depth; i++)
     {
       struct glyph *g = row->glyphs[TEXT_AREA] + i;
+      int glyph_cols;
 
       /* Only decorate glyphs that came from buffer text.  Rows that
 	 display no text carry a filler space whose object is nil, which
 	 exists to hold the newline and the cursor; converting it would
 	 put a guide on empty rows past the end of the buffer.  Guides on
 	 genuinely blank lines are appended separately.  */
-      if (g->type != CHAR_GLYPH || g->u.ch != ' ' || !BUFFERP (g->object))
+      if (!BUFFERP (g->object))
 	break;
 
-      while (next_depth <= depth
-	     && indent_guide_column (next_depth, &cfg) < col)
-	next_depth++;
+      if (g->type == CHAR_GLYPH && g->u.ch == ' ')
+	glyph_cols = 1;
+      else if (g->type == STRETCH_GLYPH && char_at_is_tab (g->charpos))
+	/* Derive the span from the pixel width rather than from
+	   tab-width, so that the remainder left behind by an earlier
+	   split, and a tab clipped by hscroll, both measure correctly.  */
+	glyph_cols = max (1, ((g->pixel_width + char_width - 1)
+			      / max (1, char_width)));
+      else
+	break;
 
-      if (next_depth <= depth
-	  && indent_guide_column (next_depth, &cfg) == col)
+      int stop_col = indent_guide_column (next_depth, &cfg);
+
+      if (stop_col >= col && stop_col < col + glyph_cols)
 	{
-	  indent_guide_convert_glyph (it->w, row, i, next_depth, width, pad);
-	  next_depth++;
+	  if (g->type == CHAR_GLYPH)
+	    {
+	      indent_guide_convert_glyph (it->w, row, i, next_depth,
+					  width, pad);
+	      next_depth++;
+	    }
+	  else
+	    {
+	      int consumed;
+	      if (!indent_guide_split_tab (it, row, &i, col, stop_col,
+					   glyph_cols, next_depth, width, pad,
+					   &consumed))
+		break;
+	      next_depth++;
+	      col += consumed;
+	      continue;
+	    }
 	}
 
-      col++;
+      col += glyph_cols;
     }
 }
 
