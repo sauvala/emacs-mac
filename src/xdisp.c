@@ -27111,6 +27111,56 @@ indent_guide_split_tab (struct it *it, struct glyph_row *row, int *i,
   return true;
 }
 
+/* Insert guides on a blank ROW, which holds only the filler space that
+   carries the newline and the cursor.
+
+   Columns 0 through the last guide's column are filled with spaces, and
+   the ones sitting on a stop become guides; the filler is shifted right
+   so that it still ends the row.  Every inserted glyph inherits the
+   filler's position, so point on a blank line still renders at column
+   zero, on the first guide.  */
+
+static void
+indent_guide_insert_on_blank_row (struct it *it, struct glyph_row *row,
+				  const struct indent_guide_config *cfg,
+				  int depth, int width, int pad,
+				  int char_width)
+{
+  struct glyph *area_start = row->glyphs[TEXT_AREA];
+  struct glyph *area_end = row->glyphs[1 + TEXT_AREA];
+  int capacity = area_end - area_start;
+  int used = row->used[TEXT_AREA];
+
+  /* Drop depth until the row can hold the glyphs, so that a narrow
+     window shows fewer guides rather than none at all.  */
+  int needed = indent_guide_column (depth, cfg) + 1;
+  while (depth > 0 && used + needed > capacity)
+    {
+      depth--;
+      needed = depth > 0 ? indent_guide_column (depth, cfg) + 1 : 0;
+    }
+  if (depth <= 0)
+    return;
+
+  struct glyph proto = area_start[0];
+
+  memmove (area_start + needed, area_start, used * sizeof *area_start);
+  row->used[TEXT_AREA] = used + needed;
+
+  for (int at = 0; at < needed; at++)
+    {
+      area_start[at] = proto;
+      area_start[at].type = CHAR_GLYPH;
+      area_start[at].u.val = 0;
+      area_start[at].u.ch = ' ';
+      area_start[at].pixel_width = char_width;
+    }
+
+  for (int d = 1; d <= depth; d++)
+    indent_guide_convert_glyph (it->w, row, indent_guide_column (d, cfg),
+				d, width, pad);
+}
+
 /* Decorate ROW with indentation guides.  Called once per row at the end
    of display_line, after all glyphs have been produced and before the
    cursor is placed, so that the cursor lands on the final glyphs.  */
@@ -27148,6 +27198,20 @@ maybe_display_indent_guides (struct it *it, struct glyph_row *row)
 		   * indent_guide_frac (Vdisplay_indent_guides_pad, 0.1));
   if (pad + width > char_width)
     pad = max (0, char_width - width);
+
+  /* A blank line has no whitespace glyphs to convert; its row holds only
+     the filler space carrying the newline.  Guides are inserted there
+     instead.  */
+  if (row->used[TEXT_AREA] == 1
+      && row->glyphs[TEXT_AREA][0].type == CHAR_GLYPH
+      && row->glyphs[TEXT_AREA][0].u.ch == ' '
+      && row->glyphs[TEXT_AREA][0].charpos == beg
+      && !BUFFERP (row->glyphs[TEXT_AREA][0].object))
+    {
+      indent_guide_insert_on_blank_row (it, row, &cfg, depth, width, pad,
+					char_width);
+      return;
+    }
 
   /* Column at which the row's first glyph starts.  With horizontal
      scrolling the leading columns are off-screen, and their stops must be
