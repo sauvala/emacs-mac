@@ -26,6 +26,10 @@ static const char *emacs_metal_presenter_queue_label =
 #define GLYPH_ATLAS_MAX_PAGES (8)
 #define GLYPH_CACHE_SIZE (16384)  /* MUST be power of 2 for hash table */
 #define GLYPH_CACHE_EVICT_BATCH (1024)
+/* How far lookups and insertions probe from the hash slot.  Both must use
+   the same bound: an entry stored further away than lookups search would
+   never be found again.  */
+#define GLYPH_CACHE_MAX_PROBE (16)
 #define SUBPIXEL_POSITIONS (4)
 
 typedef struct {
@@ -1384,7 +1388,7 @@ glyph_cache_lookup (emacs_metal_context_t *ctx,
   struct emacs_metal_glyph_cache *gc = ctx->glyph_cache;
   uint32_t idx = glyph_cache_hash (font, glyph_id, subpixel, scale);
 
-  for (int probe = 0; probe < 16; probe++)
+  for (int probe = 0; probe < GLYPH_CACHE_MAX_PROBE; probe++)
     {
       uint32_t slot = (idx + probe) & (GLYPH_CACHE_SIZE - 1);
       glyph_cache_entry_t *e = &gc->entries[slot];
@@ -1533,25 +1537,37 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   uint32_t idx = glyph_cache_hash (font, glyph_id, subpixel, (uint8_t)ctx->scale);
   glyph_cache_entry_t *entry = NULL;
   glyph_cache_entry_t *deleted_entry = NULL;
-  for (int probe = 0; probe < GLYPH_CACHE_SIZE; probe++)
+  glyph_cache_entry_t *lru_entry = NULL;
+  for (int probe = 0; probe < GLYPH_CACHE_MAX_PROBE; probe++)
     {
       uint32_t slot = (idx + probe) & (GLYPH_CACHE_SIZE - 1);
       glyph_cache_entry_t *candidate = &gc->entries[slot];
 
-      if (candidate->font == NULL && candidate->deleted)
+      if (candidate->font == NULL)
         {
+          if (!candidate->deleted)
+            {
+              entry = deleted_entry ? deleted_entry : candidate;
+              break;
+            }
           if (!deleted_entry)
             deleted_entry = candidate;
         }
-      else if (candidate->font == NULL)
-        {
-          entry = deleted_entry ? deleted_entry : candidate;
-          break;
-        }
+      else if (!lru_entry || candidate->last_used < lru_entry->last_used)
+        lru_entry = candidate;
     }
 
   if (!entry)
     entry = deleted_entry;
+  if (!entry && lru_entry)
+    {
+      /* Every slot in the probe window is taken.  Reclaim the least
+         recently used one rather than storing the glyph beyond the
+         distance glyph_cache_lookup searches, which would leave it
+         permanently unfindable and re-rasterized on every draw.  */
+      glyph_cache_entry_clear (gc, lru_entry);
+      entry = lru_entry;
+    }
   if (!entry)
     return NULL;
 
