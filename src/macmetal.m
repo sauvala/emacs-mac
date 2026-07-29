@@ -109,7 +109,6 @@ typedef struct {
     uint16_t atlas_x, atlas_y;
     uint16_t atlas_w, atlas_h;
     float bearing_x, bearing_y;
-    float advance;
     uint64_t last_used;
     bool is_color;
     bool deleted;
@@ -188,7 +187,6 @@ static NSString *const metal_shader_source = @
 /* Vertex and batch data structures.  */
 
 #define METAL_MAX_VERTICES (262144)
-#define METAL_MAX_CLIP_STACK (32)
 /* Number of vertex buffers cycled through, and hence the number of frames
    allowed in flight.  Two makes emacs_metal_frame_begin wait for the GPU
    to finish the immediately preceding frame; three lets the CPU build the
@@ -260,8 +258,7 @@ struct emacs_metal_context
   id<MTLTexture> current_texture;
   bool current_is_glyph;
 
-  metal_clip_region_t clip_stack[METAL_MAX_CLIP_STACK];
-  int clip_depth;
+  metal_clip_region_t clip;
 
   int width, height, scale;
   bool in_frame;
@@ -845,9 +842,8 @@ emacs_metal_frame_begin (emacs_metal_context_t *ctx)
   ctx->current_is_glyph = false;
 
   /* Default clip to full frame in pixels.  */
-  ctx->clip_depth = 1;
-  ctx->clip_stack[0].count = 1;
-  ctx->clip_stack[0].rects[0] = (metal_clip_rect_t){
+  ctx->clip.count = 1;
+  ctx->clip.rects[0] = (metal_clip_rect_t){
     .x = 0, .y = 0,
     .w = ctx->width * ctx->scale,
     .h = ctx->height * ctx->scale
@@ -1207,12 +1203,10 @@ static bool
 clip_set_region_if_changed (emacs_metal_context_t *ctx,
                             metal_clip_region_t *clip)
 {
-  if (ctx->clip_depth == 1
-      && clip_regions_equal (&ctx->clip_stack[0], clip))
+  if (clip_regions_equal (&ctx->clip, clip))
     return false;
 
-  ctx->clip_depth = 1;
-  ctx->clip_stack[0] = *clip;
+  ctx->clip = *clip;
   return true;
 }
 
@@ -1288,7 +1282,7 @@ static metal_batch_t *
 ensure_batch (emacs_metal_context_t *ctx,
               id<MTLTexture> texture, bool is_glyph)
 {
-  metal_clip_region_t *clip = &ctx->clip_stack[ctx->clip_depth - 1];
+  metal_clip_region_t *clip = &ctx->clip;
 
   if (ctx->batch_count > 0)
     {
@@ -1591,10 +1585,6 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   CTFontGetBoundingRectsForGlyphs (font, kCTFontOrientationHorizontal,
                                    &cg_glyph, &bbox, 1);
 
-  CGSize advance_size;
-  CTFontGetAdvancesForGlyphs (font, kCTFontOrientationHorizontal,
-                              &cg_glyph, &advance_size, 1);
-
   int s = ctx->scale;
 
   /* Compute the glyph's pixel bounding box (relative to pen position).
@@ -1755,7 +1745,6 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
      so gh + bearing_y = px_top - px_bottom + 2 + px_bottom - 1 = px_top + 1. */
   entry->bearing_x = px_left - 1.0f;
   entry->bearing_y = px_bottom - 1.0f;
-  entry->advance = (float)advance_size.width * s;
   entry->last_used = ++gc->clock;
   entry->is_color = is_color;
   gc->entry_count++;
@@ -1936,46 +1925,6 @@ emacs_metal_draw_line (emacs_metal_context_t *ctx,
       set_vertex (&v[4], p3x, p3y, 0, 0, c, 0);
       set_vertex (&v[5], p1x, p1y, 0, 0, c, 0);
     }
-}
-
-void
-emacs_metal_push_clip (emacs_metal_context_t *ctx,
-                       int x, int y, int w, int h)
-{
-  if (!ctx || ctx->clip_depth >= METAL_MAX_CLIP_STACK)
-    return;
-
-  int s = ctx->scale;
-  metal_clip_region_t *parent = &ctx->clip_stack[ctx->clip_depth - 1];
-  metal_clip_region_t *child = &ctx->clip_stack[ctx->clip_depth];
-
-  /* New rect in physical pixels.  */
-  metal_clip_rect_t clip = {
-    .x = x * s,
-    .y = y * s,
-    .w = w * s,
-    .h = h * s
-  };
-
-  child->count = 0;
-  for (int i = 0; i < parent->count; i++)
-    {
-      metal_clip_rect_t rect = intersect_clip_rects (parent->rects[i], clip);
-      if (rect.w > 0 && rect.h > 0)
-        child->rects[child->count++] = rect;
-    }
-
-  if (child->count == 0)
-    child->rects[child->count++] = (metal_clip_rect_t){ .x = 0, .y = 0,
-                                                        .w = 0, .h = 0 };
-  ctx->clip_depth++;
-}
-
-void
-emacs_metal_pop_clip (emacs_metal_context_t *ctx)
-{
-  if (ctx && ctx->clip_depth > 1)
-    ctx->clip_depth--;
 }
 
 void
