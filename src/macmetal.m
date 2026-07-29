@@ -189,7 +189,11 @@ static NSString *const metal_shader_source = @
 
 #define METAL_MAX_VERTICES (262144)
 #define METAL_MAX_CLIP_STACK (32)
-#define METAL_VERTEX_BUFFER_COUNT (2)
+/* Number of vertex buffers cycled through, and hence the number of frames
+   allowed in flight.  Two makes emacs_metal_frame_begin wait for the GPU
+   to finish the immediately preceding frame; three lets the CPU build the
+   next frame while the GPU is still working on the last one.  */
+#define METAL_VERTEX_BUFFER_COUNT (3)
 #define METAL_MAX_BATCHES (4096)
 #define METAL_MAX_ACTIVE_CLIP_RECTS (128)
 #define METAL_MAX_BATCH_CLIP_RECTS (16384)
