@@ -706,8 +706,11 @@ emacs_metal_context_resize (emacs_metal_context_t *ctx, int width, int height,
     return;
 
   id<MTLTexture> old_backbuffer = ctx->backbuffer;
-  int old_width = ctx->width * ctx->scale;
-  int old_height = ctx->height * ctx->scale;
+  int prev_width = ctx->width;
+  int prev_height = ctx->height;
+  int prev_scale = ctx->scale;
+  int old_width = prev_width * prev_scale;
+  int old_height = prev_height * prev_scale;
 
   ctx->width = width;
   ctx->height = height;
@@ -715,10 +718,17 @@ emacs_metal_context_resize (emacs_metal_context_t *ctx, int width, int height,
 
   if (!create_backbuffer (ctx))
     {
-      /* Restore old backbuffer on failure.  */
+      /* Restore the previous geometry along with the backbuffer.  The
+         recorded size is what scissor rects, the viewport and the present
+         blit are computed from, so leaving it describing a texture that
+         was never created would drive drawing outside the one still in
+         use.  */
       pthread_mutex_lock (&ctx->presentation_mutex);
       ctx->backbuffer = old_backbuffer;
       pthread_mutex_unlock (&ctx->presentation_mutex);
+      ctx->width = prev_width;
+      ctx->height = prev_height;
+      ctx->scale = prev_scale;
       return;
     }
 
