@@ -565,8 +565,11 @@ create_backbuffer (emacs_metal_context_t *ctx)
   id<MTLRenderCommandEncoder> encoder
     = [cmd renderCommandEncoderWithDescriptor:pass];
   [encoder endEncoding];
+  /* No waitUntilCompleted: command buffers on one queue execute in commit
+     order, so everything committed afterwards already sees the cleared
+     texture, and blocking here would stall the main thread on the GPU for
+     every step of a live resize.  */
   [cmd commit];
-  [cmd waitUntilCompleted];
 
   /* Publish under the lock: the presenter queue snapshots this field.  */
   pthread_mutex_lock (&ctx->presentation_mutex);
@@ -767,8 +770,9 @@ emacs_metal_context_resize (emacs_metal_context_t *ctx, int width, int height,
            destinationLevel:0
           destinationOrigin:MTLOriginMake (0, 0, 0)];
       [blit endEncoding];
+      /* As in create_backbuffer, queue order is enough; the command buffer
+         keeps the old texture alive until the copy has run.  */
       [cmd commit];
-      [cmd waitUntilCompleted];
     }
 
   ctx->backbuffer_dirty = true;
