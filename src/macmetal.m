@@ -166,6 +166,14 @@ struct emacs_metal_context
 
   id<MTLBuffer> vertex_buffers[METAL_VERTEX_BUFFER_COUNT];
   int current_buffer;
+  /* Buffer the current batches emit into.  Normally one of
+     vertex_buffers, but a frame that emits more than METAL_MAX_VERTICES
+     vertices switches to freshly allocated spill buffers.  */
+  id<MTLBuffer> current_vertex_buffer;
+  /* Spill buffers allocated for the frame being built.  Held until the
+     frame's command buffer completes, since the render passes already
+     encoded into it still read from them.  */
+  NSMutableArray *spill_vertex_buffers;
   metal_vertex_t *vertices;
   int vertex_count;
 
@@ -453,6 +461,37 @@ create_vertex_buffers (emacs_metal_context_t *ctx)
   ctx->buffer_semaphore
     = dispatch_semaphore_create (METAL_VERTEX_BUFFER_COUNT);
   ctx->current_buffer = 0;
+  ctx->current_vertex_buffer = ctx->vertex_buffers[0];
+
+  return true;
+}
+
+/* Switch to a freshly allocated vertex buffer, so that vertices already
+   encoded into the frame's command buffer are not overwritten by the
+   drawing that follows.  The buffer is kept alive until the frame's
+   command buffer completes.  Returns false if allocation fails.  */
+
+static bool
+rotate_spill_vertex_buffer (emacs_metal_context_t *ctx)
+{
+  NSUInteger size = METAL_MAX_VERTICES * sizeof (metal_vertex_t);
+  id<MTLBuffer> buffer
+    = [shared_device newBufferWithLength:size
+                                 options:MTLResourceStorageModeShared];
+  if (!buffer)
+    {
+      NSLog (@"Metal: failed to allocate spill vertex buffer");
+      return false;
+    }
+
+  if (!ctx->spill_vertex_buffers)
+    ctx->spill_vertex_buffers = [[NSMutableArray alloc] init];
+  [ctx->spill_vertex_buffers addObject:buffer];
+
+  ctx->current_vertex_buffer = buffer;
+  ctx->vertices = [buffer contents];
+  ctx->vertex_count = 0;
+  render_stats.vertex_buffer_spills++;
 
   return true;
 }
@@ -638,7 +677,9 @@ emacs_metal_frame_begin (emacs_metal_context_t *ctx)
   dispatch_semaphore_wait (ctx->buffer_semaphore, DISPATCH_TIME_FOREVER);
 
   ctx->current_buffer = (ctx->current_buffer + 1) % METAL_VERTEX_BUFFER_COUNT;
-  ctx->vertices = [ctx->vertex_buffers[ctx->current_buffer] contents];
+  ctx->current_vertex_buffer = ctx->vertex_buffers[ctx->current_buffer];
+  ctx->spill_vertex_buffers = nil;
+  ctx->vertices = [ctx->current_vertex_buffer contents];
   ctx->vertex_count = 0;
   ctx->batch_count = 0;
   ctx->batch_clip_rect_count = 0;
@@ -671,7 +712,7 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
       return;
     }
 
-  id<MTLBuffer> draw_buffer = ctx->vertex_buffers[ctx->current_buffer];
+  id<MTLBuffer> draw_buffer = ctx->current_vertex_buffer;
   if (!draw_buffer)
     return;
 
@@ -931,21 +972,18 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
   /* Render all pending batches into the backbuffer.  */
   flush_render_batches (ctx, cmd);
 
-  if (!ctx->backbuffer_dirty)
+  if (!ctx->backbuffer_dirty || !cmd)
     {
       dispatch_semaphore_signal (ctx->buffer_semaphore);
       ctx->frame_command_buffer = nil;
-      return;
-    }
-
-  if (!cmd)
-    {
-      dispatch_semaphore_signal (ctx->buffer_semaphore);
-      ctx->frame_command_buffer = nil;
+      ctx->spill_vertex_buffers = nil;
       return;
     }
 
   __block dispatch_semaphore_t sema = ctx->buffer_semaphore;
+  /* Captured so the spill buffers this frame drew from stay alive until
+     the GPU is done reading them; released with the block.  */
+  NSMutableArray *spilled = ctx->spill_vertex_buffers;
   double command_start = CACurrentMediaTime ();
   render_stats.command_buffers++;
   [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull buffer) {
@@ -955,8 +993,10 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
     render_stats.command_buffer_seconds += elapsed;
     if (render_stats.max_command_buffer_seconds < elapsed)
       render_stats.max_command_buffer_seconds = elapsed;
+    (void) spilled;
     dispatch_semaphore_signal (sema);
   }];
+  ctx->spill_vertex_buffers = nil;
 
   [cmd commit];
   ctx->backbuffer_dirty = false;
@@ -1114,11 +1154,18 @@ emit_vertices (emacs_metal_context_t *ctx, int count,
   if (!ctx->frame_command_buffer)
     return NULL;
 
+  if (count > METAL_MAX_VERTICES)
+    return NULL;
+
   if (ctx->vertex_count + count > METAL_MAX_VERTICES)
     {
+      /* Flushing encodes draw commands that read from the current vertex
+         buffer, and the frame's command buffer is not committed until
+         emacs_metal_frame_end, so the space cannot simply be reused.
+         Continue in a fresh buffer instead of dropping the rest of the
+         frame on the floor.  */
       flush_render_batches (ctx, ctx->frame_command_buffer);
-      if (count > METAL_MAX_VERTICES
-          || ctx->vertex_count + count > METAL_MAX_VERTICES)
+      if (!rotate_spill_vertex_buffer (ctx))
         return NULL;
     }
 

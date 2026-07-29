@@ -15,6 +15,7 @@ struct emacs_metal_render_stats
   uintmax_t flushes;
   uintmax_t batches;
   uintmax_t vertices;
+  uintmax_t vertex_buffer_spills;
   uintmax_t scissor_draws;
   uintmax_t blits;
   uintmax_t blit_bytes;

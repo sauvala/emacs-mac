@@ -319,6 +319,7 @@ active in Metal rendering builds.  */)
   uintmax_t flushes = 0;
   uintmax_t batches = 0;
   uintmax_t vertices = 0;
+  uintmax_t vertex_buffer_spills = 0;
   uintmax_t scissor_draws = 0;
   uintmax_t blits = 0;
   uintmax_t blit_bytes = 0;
@@ -355,6 +356,7 @@ active in Metal rendering builds.  */)
   flushes = stats.flushes;
   batches = stats.batches;
   vertices = stats.vertices;
+  vertex_buffer_spills = stats.vertex_buffer_spills;
   scissor_draws = stats.scissor_draws;
   blits = stats.blits;
   blit_bytes = stats.blit_bytes;
@@ -390,6 +392,8 @@ active in Metal rendering builds.  */)
       intern_c_string (":flushes"), make_uint (flushes),
       intern_c_string (":batches"), make_uint (batches),
       intern_c_string (":vertices"), make_uint (vertices),
+      intern_c_string (":vertex-buffer-spills"),
+      make_uint (vertex_buffer_spills),
       intern_c_string (":scissor-draws"), make_uint (scissor_draws),
       intern_c_string (":blits"), make_uint (blits),
       intern_c_string (":blit-bytes"), make_uint (blit_bytes),
