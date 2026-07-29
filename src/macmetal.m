@@ -443,7 +443,11 @@ create_backbuffer (emacs_metal_context_t *ctx)
   [cmd commit];
   [cmd waitUntilCompleted];
 
+  /* Publish under the lock: the presenter queue snapshots this field.  */
+  pthread_mutex_lock (&ctx->presentation_mutex);
   ctx->backbuffer = texture;
+  pthread_mutex_unlock (&ctx->presentation_mutex);
+
   ctx->backbuffer_dirty = true;
   return true;
 }
@@ -604,7 +608,9 @@ emacs_metal_context_resize (emacs_metal_context_t *ctx, int width, int height,
   if (!create_backbuffer (ctx))
     {
       /* Restore old backbuffer on failure.  */
+      pthread_mutex_lock (&ctx->presentation_mutex);
       ctx->backbuffer = old_backbuffer;
+      pthread_mutex_unlock (&ctx->presentation_mutex);
       return;
     }
 
@@ -806,6 +812,9 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
       {
         id<CAMetalDrawable> drawable = nil;
         id<MTLCommandBuffer> cmd = nil;
+        CAMetalLayer *layer = nil;
+        id<MTLTexture> backbuffer = nil;
+        id<MTLCommandQueue> command_queue = nil;
         bool valid;
 
         pthread_mutex_lock (&ctx->presentation_mutex);
@@ -815,6 +824,13 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
             ctx->presentation_scheduled = false;
             ctx->presentation_in_flight = true;
             render_stats.presentation_task_runs++;
+            /* Take the snapshot under the lock.  These are strong
+               references that the main thread replaces -- the backbuffer
+               on every resize -- so reading them unlocked races with the
+               store and can observe a torn or already released value.  */
+            layer = ctx->layer;
+            backbuffer = ctx->backbuffer;
+            command_queue = ctx->command_queue;
           }
         else
           ctx->presentation_scheduled = false;
@@ -825,10 +841,6 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
             emacs_metal_context_release (ctx);
             return;
           }
-
-        CAMetalLayer *layer = ctx->layer;
-        id<MTLTexture> backbuffer = ctx->backbuffer;
-        id<MTLCommandQueue> command_queue = ctx->command_queue;
 
         if (layer)
           {
