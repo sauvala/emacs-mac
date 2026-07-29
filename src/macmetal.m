@@ -213,6 +213,8 @@ struct emacs_metal_context
 static void flush_render_batches (emacs_metal_context_t *ctx,
                                   id<MTLCommandBuffer> cmd);
 static void emacs_metal_schedule_presentation (emacs_metal_context_t *ctx);
+static void glyph_cache_entry_clear (struct emacs_metal_glyph_cache *gc,
+                                     glyph_cache_entry_t *entry);
 
 void
 emacs_metal_get_render_stats (struct emacs_metal_render_stats *stats,
@@ -284,6 +286,9 @@ emacs_metal_context_finalize (emacs_metal_context_t *ctx)
     {
       for (int i = 0; i < ctx->glyph_cache->page_count; i++)
         ctx->glyph_cache->pages[i].texture = nil;
+      for (int i = 0; i < GLYPH_CACHE_SIZE; i++)
+        glyph_cache_entry_clear (ctx->glyph_cache,
+                                 &ctx->glyph_cache->entries[i]);
       free (ctx->glyph_cache);
     }
 
@@ -1210,6 +1215,23 @@ metal_opaque_if_no_alpha (uint32_t color)
 
 /* --- Glyph atlas --- */
 
+/* Drop ENTRY, releasing the font reference it owns.  The slot is marked
+   deleted rather than empty so that open-addressed probe chains running
+   through it stay intact.  */
+
+static void
+glyph_cache_entry_clear (struct emacs_metal_glyph_cache *gc,
+                         glyph_cache_entry_t *entry)
+{
+  if (entry->font == NULL)
+    return;
+
+  CFRelease (entry->font);
+  entry->font = NULL;
+  entry->deleted = true;
+  gc->entry_count--;
+}
+
 /* Allocate a rectangle (required_w x required_h) in the glyph atlas using
    shelf packing.  Returns the page index, and stores the allocated position
    in *out_x, *out_y.  Returns -1 on failure.  */
@@ -1274,11 +1296,7 @@ glyph_cache_get_page (emacs_metal_context_t *ctx,
           if (gc->entries[i].font == NULL)
             continue;
           if (gc->entries[i].atlas_page == 0)
-            {
-              gc->entries[i].font = NULL;
-              gc->entries[i].deleted = true;
-              gc->entry_count--;
-            }
+            glyph_cache_entry_clear (gc, &gc->entries[i]);
           else
             gc->entries[i].atlas_page--;
         }
@@ -1352,9 +1370,7 @@ glyph_cache_evict_entries (struct emacs_metal_glyph_cache *gc)
       if (entry->last_used > protected_after && scanned < GLYPH_CACHE_SIZE)
         continue;
 
-      entry->font = NULL;
-      entry->deleted = true;
-      gc->entry_count--;
+      glyph_cache_entry_clear (gc, entry);
       evicted++;
     }
 }
@@ -1539,7 +1555,11 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   if (!entry)
     return NULL;
 
-  entry->font = font;
+  /* Own a reference to the font: the entry is keyed on the CTFontRef
+     address, so a font released while entries still refer to it could be
+     replaced by an unrelated font allocated at the same address, and
+     those entries would then match and render the wrong glyphs.  */
+  entry->font = (CTFontRef) CFRetain (font);
   entry->deleted = false;
   entry->glyph_id = glyph_id;
   entry->subpixel = subpixel;
