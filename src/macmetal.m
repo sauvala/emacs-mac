@@ -262,6 +262,9 @@ struct emacs_metal_context
 
   int width, height, scale;
   bool in_frame;
+  /* Set when the open frame was started by emacs_metal_ensure_frame
+     rather than by update_begin.  */
+  bool implicit_frame;
   bool backbuffer_dirty;
   bool presentation_valid;
   bool presentation_scheduled;
@@ -829,6 +832,11 @@ emacs_metal_set_maximum_drawable_count (emacs_metal_context_t *ctx,
 void
 emacs_metal_frame_begin (emacs_metal_context_t *ctx)
 {
+  /* Drawing done outside update_begin may have left an implicit frame
+     open.  Finish it, so that its contents reach the screen and the
+     vertex buffer slot it holds is released before we take another.  */
+  emacs_metal_end_implicit_frame (ctx);
+
   dispatch_semaphore_wait (ctx->buffer_semaphore, DISPATCH_TIME_FOREVER);
 
   ctx->current_buffer = (ctx->current_buffer + 1) % METAL_VERTEX_BUFFER_COUNT;
@@ -850,7 +858,32 @@ emacs_metal_frame_begin (emacs_metal_context_t *ctx)
   };
 
   ctx->in_frame = true;
+  ctx->implicit_frame = false;
   ctx->frame_command_buffer = [ctx->command_queue commandBuffer];
+}
+
+/* Open a frame on demand.  Emacs draws outside update_begin and
+   update_end in several places -- cursor and focus updates through
+   gui_update_cursor, mouse face highlighting from note_mouse_highlight,
+   and the visual bell -- and that drawing used to be discarded because
+   every primitive requires an open frame.  Frames opened this way are
+   closed again by emacs_metal_end_implicit_frame.  */
+
+void
+emacs_metal_ensure_frame (emacs_metal_context_t *ctx)
+{
+  if (!ctx || ctx->in_frame)
+    return;
+
+  emacs_metal_frame_begin (ctx);
+  ctx->implicit_frame = true;
+}
+
+void
+emacs_metal_end_implicit_frame (emacs_metal_context_t *ctx)
+{
+  if (ctx && ctx->in_frame && ctx->implicit_frame)
+    emacs_metal_frame_end (ctx);
 }
 
 /* Render all pending batches into the backbuffer and reset batch state.
@@ -1129,6 +1162,7 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
     return;
 
   ctx->in_frame = false;
+  ctx->implicit_frame = false;
 
   id<MTLCommandBuffer> cmd = ctx->frame_command_buffer;
   if (!cmd)
@@ -1764,7 +1798,8 @@ emacs_metal_draw_glyphs (emacs_metal_context_t *ctx,
                          float origin_x,
                          float baseline_y)
 {
-  if (!ctx->in_frame || count <= 0)
+  emacs_metal_ensure_frame (ctx);
+  if (!ctx || !ctx->in_frame || count <= 0)
     return;
 
   CTFontRef font = (CTFontRef)font_ptr;
@@ -1833,7 +1868,8 @@ emacs_metal_fill_rect (emacs_metal_context_t *ctx,
                        int x, int y, int w, int h,
                        uint32_t color)
 {
-  if (!ctx->in_frame || w <= 0 || h <= 0)
+  emacs_metal_ensure_frame (ctx);
+  if (!ctx || !ctx->in_frame || w <= 0 || h <= 0)
     return;
 
   int s = ctx->scale;
@@ -1857,7 +1893,8 @@ emacs_metal_draw_rect (emacs_metal_context_t *ctx,
                        int x, int y, int w, int h,
                        uint32_t color)
 {
-  if (!ctx->in_frame || w <= 0 || h <= 0)
+  emacs_metal_ensure_frame (ctx);
+  if (!ctx || !ctx->in_frame || w <= 0 || h <= 0)
     return;
 
   emacs_metal_fill_rect (ctx, x, y, w, 1, color);           /* top    */
@@ -1871,7 +1908,8 @@ emacs_metal_draw_line (emacs_metal_context_t *ctx,
                        int x1, int y1, int x2, int y2,
                        uint32_t color)
 {
-  if (!ctx->in_frame)
+  emacs_metal_ensure_frame (ctx);
+  if (!ctx || !ctx->in_frame)
     return;
 
   int dx = x2 - x1;
@@ -2058,7 +2096,8 @@ emacs_metal_scroll (emacs_metal_context_t *ctx,
                     int x, int y, int w, int h,
                     int dx, int dy)
 {
-  if (!ctx->in_frame || w <= 0 || h <= 0 || (dx == 0 && dy == 0))
+  emacs_metal_ensure_frame (ctx);
+  if (!ctx || !ctx->in_frame || w <= 0 || h <= 0 || (dx == 0 && dy == 0))
     return;
 
   int s = ctx->scale;
@@ -2231,7 +2270,8 @@ emacs_metal_draw_image_texture (emacs_metal_context_t *ctx,
                                 int src_x, int src_y, int src_w, int src_h,
                                 int dst_x, int dst_y, int dst_w, int dst_h)
 {
-  if (!ctx->in_frame || !texture_ptr)
+  emacs_metal_ensure_frame (ctx);
+  if (!ctx || !ctx->in_frame || !texture_ptr)
     return;
 
   id<MTLTexture> texture = (__bridge id<MTLTexture>)texture_ptr;

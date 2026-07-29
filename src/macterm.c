@@ -1360,7 +1360,15 @@ static void
 mac_frame_up_to_date (struct frame *f)
 {
   if (FRAME_MAC_P (f))
-    FRAME_MOUSE_UPDATE (f);
+    {
+#ifdef USE_METAL_RENDERING
+      /* Present anything drawn outside update_begin/update_end.  */
+      block_input ();
+      emacs_metal_end_implicit_frame (FRAME_METAL_CTX (f));
+      unblock_input ();
+#endif
+      FRAME_MOUSE_UPDATE (f);
+    }
 }
 
 /* Clear under internal border if any. */

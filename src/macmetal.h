@@ -64,6 +64,9 @@ extern bool emacs_metal_set_maximum_drawable_count (emacs_metal_context_t *ctx,
 /* Frame begin/end */
 extern void emacs_metal_frame_begin (emacs_metal_context_t *ctx);
 extern void emacs_metal_frame_end (emacs_metal_context_t *ctx);
+/* For drawing that happens outside update_begin/update_end.  */
+extern void emacs_metal_ensure_frame (emacs_metal_context_t *ctx);
+extern void emacs_metal_end_implicit_frame (emacs_metal_context_t *ctx);
 
 /* Drawing primitives */
 extern void emacs_metal_fill_rect (emacs_metal_context_t *ctx,

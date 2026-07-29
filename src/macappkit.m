@@ -5444,6 +5444,12 @@ void
 mac_flush (struct frame *f)
 {
   block_input ();
+#ifdef USE_METAL_RENDERING
+  /* Drawing that happened outside update_begin/update_end sits in an
+     implicit frame; a flush is a request to make it visible.  */
+  if (f && FRAME_MAC_P (f))
+    emacs_metal_end_implicit_frame (FRAME_METAL_CTX (f));
+#endif
   mac_within_gui (^{mac_flush_1 (NULL);});
   unblock_input ();
 }
