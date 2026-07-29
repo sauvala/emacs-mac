@@ -100,7 +100,7 @@
     (should (string-match-p "METAL_STAT_ADD (texture_upload_bytes"
 			    upload-body))
     (should (string-match-p "next_drawable_seconds" source))
-    (should (string-match-p "METAL_STAT_INC (next_drawable_calls)"
+    (should (string-match-p "METAL_SHARED_INC (next_drawable_calls)"
 			    presentation-body))
     (should (string-match-p "next_drawable_ns" presentation-body))
     (should (string-match-p "command_buffer_seconds" source))))
@@ -109,14 +109,22 @@
   "Counters are updated from the main thread, the presenter queue and
 Metal's completion handler threads, so they must not be plain fields."
   (let ((source (macmetal-tests--source)))
-    (should (string-match-p "struct metal_render_counters" source))
+    (should (string-match-p "struct metal_shared_counters" source))
     (should (string-match-p "_Atomic uintmax_t frames" source))
     (should (string-match-p "atomic_fetch_add_explicit" source))
     (should (string-match-p "metal_stat_max" source))
     ;; Elapsed times accumulate in nanoseconds: C11 has no atomic
     ;; arithmetic on floating point types.
     (should (string-match-p "_Atomic uint64_t command_buffer_ns" source))
-    (should-not (string-match-p "memset (&render_stats" source))))
+    ;; Counters the main thread owns must stay plain, and must not share a
+    ;; cache line with the ones other threads write.
+    (should (string-match-p "struct metal_main_counters" source))
+    (should (string-match-p (regexp-quote "(main_stats.field++)") source))
+    (should (string-match-p "aligned (METAL_CACHE_LINE)" source))
+    (should (string-match-p "METAL_STAT_INC (glyph_cache_hits)"
+                            (macmetal-tests--function-body
+                             "glyph_cache_lookup")))
+    (should-not (string-match-p "atomic.*glyph_cache_hits" source))))
 
 (ert-deftest macmetal-can-toggle-layer-display-sync ()
   "Metal should expose a layer display-sync toggle for pacing experiments."
@@ -142,9 +150,9 @@ Metal's completion handler threads, so they must not be plain fields."
     (should (string-match-p "present_blit_bytes" source))
     (should (string-match-p "scroll_blits" source))
     (should (string-match-p "scroll_blit_bytes" source))
-    (should (string-match-p "METAL_STAT_INC (present_blits)"
+    (should (string-match-p "METAL_SHARED_INC (present_blits)"
 			    presentation-body))
-    (should (string-match-p "METAL_STAT_ADD (present_blit_bytes"
+    (should (string-match-p "METAL_SHARED_ADD (present_blit_bytes"
 			    presentation-body))
     (should (string-match-p "METAL_STAT_ADD (scroll_blits" scroll-body))
     (should (string-match-p "METAL_STAT_ADD (scroll_blit_bytes"
