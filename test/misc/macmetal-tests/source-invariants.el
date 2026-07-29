@@ -46,8 +46,23 @@
   (let ((body (macmetal-tests--function-body "flush_render_batches")))
     (should-not (string-match-p "newBufferWithBytes" body))
     (should (string-match-p
-             (regexp-quote "ctx->vertex_buffers[ctx->current_buffer]")
+             (regexp-quote "ctx->current_vertex_buffer")
              body))))
+
+(ert-deftest macmetal-spills-instead-of-dropping-overflowing-frames ()
+  "Exhausting a frame's vertex buffer must not discard the rest of the frame."
+  (let ((source (macmetal-tests--source))
+        (emit-body (macmetal-tests--function-body "emit_vertices")))
+    (should (string-match-p "rotate_spill_vertex_buffer" source))
+    (should (string-match-p "spill_vertex_buffers" source))
+    (should (string-match-p "rotate_spill_vertex_buffer" emit-body))
+    (should (string-match-p "vertex_buffer_spills" source))))
+
+(ert-deftest macmetal-triple-buffers-vertex-storage ()
+  "Frame begin must not block on the immediately preceding frame."
+  (should (string-match-p
+           (regexp-quote "#define METAL_VERTEX_BUFFER_COUNT (3)")
+           (macmetal-tests--source))))
 
 (ert-deftest macmetal-glyph-rasterize-reuses-scratch-pixel-buffer ()
   "Glyph cache misses should reuse context-owned scratch pixel storage."
@@ -78,17 +93,30 @@
 		      "emacs_metal_upload_cg_image")))
     (should (string-match-p "emacs_metal_render_stats" source))
     (should (string-match-p "emacs_metal_get_render_stats" source))
-    (should (string-match-p "render_stats.flushes" flush-body))
-    (should (string-match-p "render_stats.batches" flush-body))
-    (should (string-match-p "render_stats.vertices" flush-body))
-    (should (string-match-p "render_stats.texture_uploads" upload-body))
-    (should (string-match-p "render_stats.texture_upload_bytes" upload-body))
+    (should (string-match-p "METAL_STAT_INC (flushes)" flush-body))
+    (should (string-match-p "METAL_STAT_ADD (batches" flush-body))
+    (should (string-match-p "METAL_STAT_ADD (vertices" flush-body))
+    (should (string-match-p "METAL_STAT_INC (texture_uploads)" upload-body))
+    (should (string-match-p "METAL_STAT_ADD (texture_upload_bytes"
+			    upload-body))
     (should (string-match-p "next_drawable_seconds" source))
-    (should (string-match-p "render_stats.next_drawable_calls"
+    (should (string-match-p "METAL_STAT_INC (next_drawable_calls)"
 			    presentation-body))
-    (should (string-match-p "render_stats.next_drawable_seconds"
-			    presentation-body))
+    (should (string-match-p "next_drawable_ns" presentation-body))
     (should (string-match-p "command_buffer_seconds" source))))
+
+(ert-deftest macmetal-counters-are-atomic ()
+  "Counters are updated from the main thread, the presenter queue and
+Metal's completion handler threads, so they must not be plain fields."
+  (let ((source (macmetal-tests--source)))
+    (should (string-match-p "struct metal_render_counters" source))
+    (should (string-match-p "_Atomic uintmax_t frames" source))
+    (should (string-match-p "atomic_fetch_add_explicit" source))
+    (should (string-match-p "metal_stat_max" source))
+    ;; Elapsed times accumulate in nanoseconds: C11 has no atomic
+    ;; arithmetic on floating point types.
+    (should (string-match-p "_Atomic uint64_t command_buffer_ns" source))
+    (should-not (string-match-p "memset (&render_stats" source))))
 
 (ert-deftest macmetal-can-toggle-layer-display-sync ()
   "Metal should expose a layer display-sync toggle for pacing experiments."
@@ -114,11 +142,13 @@
     (should (string-match-p "present_blit_bytes" source))
     (should (string-match-p "scroll_blits" source))
     (should (string-match-p "scroll_blit_bytes" source))
-    (should (string-match-p "render_stats.present_blits" presentation-body))
-    (should (string-match-p "render_stats.present_blit_bytes"
+    (should (string-match-p "METAL_STAT_INC (present_blits)"
 			    presentation-body))
-    (should (string-match-p "render_stats.scroll_blits" scroll-body))
-    (should (string-match-p "render_stats.scroll_blit_bytes" scroll-body))))
+    (should (string-match-p "METAL_STAT_ADD (present_blit_bytes"
+			    presentation-body))
+    (should (string-match-p "METAL_STAT_ADD (scroll_blits" scroll-body))
+    (should (string-match-p "METAL_STAT_ADD (scroll_blit_bytes"
+			    scroll-body))))
 
 (ert-deftest macmetal-skips-presentation-when-backbuffer-is-unchanged ()
   "Metal should avoid full-drawable presentation for no-op update cycles."
@@ -133,8 +163,42 @@
     (should (string-match-p "ctx->backbuffer_dirty = true" scroll-body))
     (should (string-match-p "ctx->backbuffer_dirty = false" frame-end-body))
     (should (string-match-p
-	     "if (!ctx->backbuffer_dirty)[\0-\377]*return;[^\0]*emacs_metal_schedule_presentation"
+	     "if (!ctx->backbuffer_dirty || !cmd)[\0-\377]*return;[^\0]*emacs_metal_schedule_presentation"
 	     frame-end-body))))
+
+(ert-deftest macmetal-presentation-task-snapshots-context-under-lock ()
+  "The presenter queue must not read context fields the main thread stores."
+  (let ((body (macmetal-tests--function-body
+               "emacs_metal_dispatch_presentation_task")))
+    (should (string-match-p
+             (concat "pthread_mutex_lock (&ctx->presentation_mutex)"
+                     "[\0-\377]*backbuffer = ctx->backbuffer;"
+                     "[\0-\377]*pthread_mutex_unlock")
+             body))))
+
+(ert-deftest macmetal-does-not-block-the-main-thread-on-resize ()
+  "Backbuffer creation and resize must not stall redisplay on the GPU."
+  (let ((create-body (macmetal-tests--function-body "create_backbuffer"))
+        (resize-body (macmetal-tests--function-body
+                      "emacs_metal_context_resize")))
+    (should-not (string-match-p (regexp-quote "[cmd waitUntilCompleted]")
+                                create-body))
+    (should-not (string-match-p (regexp-quote "[cmd waitUntilCompleted]")
+                                resize-body))))
+
+(ert-deftest macmetal-draws-outside-redisplay-updates ()
+  "Cursor, mouse face and visual bell drawing happens outside update_begin."
+  (let ((source (macmetal-tests--source))
+        (macterm (macmetal-tests--macterm-source)))
+    (should (string-match-p "emacs_metal_ensure_frame" source))
+    (should (string-match-p "emacs_metal_end_implicit_frame" source))
+    (should (string-match-p "implicit_frame" source))
+    (should (string-match-p "emacs_metal_end_implicit_frame" macterm))
+    (dolist (fn '("emacs_metal_fill_rect" "emacs_metal_draw_rect"
+                  "emacs_metal_draw_line" "emacs_metal_draw_glyphs"
+                  "emacs_metal_scroll" "emacs_metal_draw_image_texture"))
+      (should (string-match-p "emacs_metal_ensure_frame"
+                              (macmetal-tests--function-body fn))))))
 
 (ert-deftest macmetal-uses-byte-exact-color-render-targets ()
   "Metal render targets should preserve Emacs sRGB color bytes."
@@ -151,10 +215,11 @@
     (should-not (string-match-p "scroll_backbuffer_in_place" source))
     (should-not (string-match-p "METAL_SCROLL_DIRECT_MAX_BLITS" source))
     (should (string-match-p
-             (regexp-quote "render_stats.scroll_blits += scroll_blit_count")
+             (regexp-quote "METAL_STAT_ADD (scroll_blits, scroll_blit_count)")
              scroll-body))
     (should (string-match-p
-             (regexp-quote "render_stats.scroll_blit_bytes += scroll_blit_bytes")
+             (regexp-quote
+              "METAL_STAT_ADD (scroll_blit_bytes, scroll_blit_bytes)")
              scroll-body))
     (should (string-match-p
              "scroll_blit_bytes = (uintmax_t) sw \\* sh \\* 4 \\* 2"
@@ -176,8 +241,29 @@
                          "glyph_cache_rasterize")))
     (should (string-match-p "glyph_cache_hits" source))
     (should (string-match-p "glyph_cache_misses" source))
-    (should (string-match-p "render_stats.glyph_cache_hits" lookup-body))
-    (should (string-match-p "render_stats.glyph_cache_misses" rasterize-body))))
+    (should (string-match-p "METAL_STAT_INC (glyph_cache_hits)" lookup-body))
+    (should (string-match-p "METAL_STAT_INC (glyph_cache_misses)"
+			    rasterize-body))))
+
+(ert-deftest macmetal-glyph-cache-owns-its-font-references ()
+  "Entries are keyed on the CTFontRef address, so they must hold a reference."
+  (let ((source (macmetal-tests--source))
+        (rasterize-body (macmetal-tests--function-body
+                         "glyph_cache_rasterize")))
+    (should (string-match-p "glyph_cache_entry_clear" source))
+    (should (string-match-p "CFRelease (entry->font)" source))
+    (should (string-match-p "CFRetain (font)" rasterize-body))))
+
+(ert-deftest macmetal-glyph-cache-probes-consistently ()
+  "An entry stored beyond the distance lookups search is never found again."
+  (let ((source (macmetal-tests--source))
+        (lookup-body (macmetal-tests--function-body "glyph_cache_lookup"))
+        (rasterize-body (macmetal-tests--function-body
+                         "glyph_cache_rasterize")))
+    (should (string-match-p "GLYPH_CACHE_MAX_PROBE" source))
+    (should (string-match-p "probe < GLYPH_CACHE_MAX_PROBE" lookup-body))
+    (should (string-match-p "probe < GLYPH_CACHE_MAX_PROBE" rasterize-body))
+    (should-not (string-match-p "probe < GLYPH_CACHE_SIZE" rasterize-body))))
 
 (ert-deftest macmetal-glyph-cache-is-keyed-by-backing-scale ()
   "Glyphs rasterized for one backing scale must not be reused at another scale."
