@@ -385,6 +385,23 @@ emacs_metal_context_finalize (emacs_metal_context_t *ctx)
   for (int i = 0; i < METAL_VERTEX_BUFFER_COUNT; i++)
     ctx->vertex_buffers[i] = nil;
 
+  ctx->current_vertex_buffer = nil;
+  ctx->spill_vertex_buffers = nil;
+  ctx->frame_command_buffer = nil;
+  ctx->current_texture = nil;
+  for (int i = 0; i < METAL_MAX_BATCHES; i++)
+    ctx->batches[i].texture = nil;
+
+  if (ctx->buffer_semaphore)
+    {
+      /* A frame left open at destruction still holds a slot.  Give it
+         back: dispatch traps if a semaphore is deallocated while its
+         value is below the one it was created with.  */
+      if (ctx->in_frame)
+        dispatch_semaphore_signal (ctx->buffer_semaphore);
+      ctx->buffer_semaphore = nil;
+    }
+
   ctx->backbuffer = nil;
   ctx->scroll_staging = nil;
   ctx->command_queue = nil;
