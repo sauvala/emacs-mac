@@ -16,7 +16,98 @@ static id<MTLDevice> shared_device;
 static id<MTLLibrary> shared_library;
 static id<MTLRenderPipelineState> shared_solid_pipeline;
 static id<MTLRenderPipelineState> shared_textured_pipeline;
-static struct emacs_metal_render_stats render_stats;
+/* Renderer counters, split by which threads write them.
+
+   The main thread owns the batch, clip, glyph cache and texture counters,
+   and emacs_metal_get_render_stats runs there too, so those need no
+   synchronization.  Keeping them in a separate, separately aligned object
+   matters: glyph_cache_hits is incremented once per glyph drawn, and if it
+   shared a cache line with counters the presenter queue writes, every
+   presented frame would invalidate that line under the glyph loop.
+
+   The second group is written from the presenter queue and from command
+   buffer completion handlers, which Metal runs on its own threads.  blits,
+   blit_bytes and command_buffers are also written by the main thread, from
+   emacs_metal_scroll and emacs_metal_frame_end, so they belong here too.
+   Relaxed ordering is enough: these are diagnostics and order nothing.
+
+   Elapsed times are accumulated in nanoseconds because C11 has no atomic
+   arithmetic on floating point types.  */
+
+#define METAL_CACHE_LINE (128)
+
+struct metal_main_counters
+{
+  uintmax_t flushes;
+  uintmax_t batches;
+  uintmax_t vertices;
+  uintmax_t vertex_buffer_spills;
+  uintmax_t scissor_draws;
+  uintmax_t scroll_blits;
+  uintmax_t scroll_blit_bytes;
+  uintmax_t texture_uploads;
+  uintmax_t texture_upload_bytes;
+  uintmax_t glyph_cache_hits;
+  uintmax_t glyph_cache_misses;
+  uintmax_t clip_set_rect_calls;
+  uintmax_t clip_set_rect_skips;
+  uintmax_t clip_set_rects_calls;
+  uintmax_t clip_set_rects_skips;
+  uintmax_t clip_reset_calls;
+  uintmax_t clip_reset_skips;
+  uintmax_t presentation_requests;
+  uintmax_t presentation_coalesced_requests;
+};
+
+struct metal_shared_counters
+{
+  _Atomic uintmax_t frames;
+  _Atomic uintmax_t command_buffers;
+  _Atomic uintmax_t blits;
+  _Atomic uintmax_t blit_bytes;
+  _Atomic uintmax_t present_blits;
+  _Atomic uintmax_t present_blit_bytes;
+  _Atomic uintmax_t next_drawable_calls;
+  _Atomic uintmax_t presentation_task_runs;
+  _Atomic uintmax_t presentation_final_reschedules;
+  _Atomic uint64_t next_drawable_ns;
+  _Atomic uint64_t max_next_drawable_ns;
+  _Atomic uint64_t command_buffer_ns;
+  _Atomic uint64_t max_command_buffer_ns;
+};
+
+static struct metal_main_counters main_stats
+  __attribute__ ((aligned (METAL_CACHE_LINE)));
+static struct metal_shared_counters shared_stats
+  __attribute__ ((aligned (METAL_CACHE_LINE)));
+
+#define METAL_STAT_INC(field) (main_stats.field++)
+#define METAL_STAT_ADD(field, n) (main_stats.field += (uintmax_t) (n))
+#define METAL_SHARED_INC(field) \
+  atomic_fetch_add_explicit (&shared_stats.field, 1, memory_order_relaxed)
+#define METAL_SHARED_ADD(field, n) \
+  atomic_fetch_add_explicit (&shared_stats.field, (uintmax_t) (n), \
+                             memory_order_relaxed)
+
+/* Raise *SLOT to VALUE if VALUE is larger.  */
+
+static void
+metal_stat_max (_Atomic uint64_t *slot, uint64_t value)
+{
+  uint64_t prev = atomic_load_explicit (slot, memory_order_relaxed);
+
+  while (prev < value
+         && !atomic_compare_exchange_weak_explicit (slot, &prev, value,
+                                                    memory_order_relaxed,
+                                                    memory_order_relaxed))
+    ;
+}
+
+static uint64_t
+metal_stat_ns (double seconds)
+{
+  return seconds > 0.0 ? (uint64_t) (seconds * 1e9) : 0;
+}
 static const char *emacs_metal_presenter_queue_label =
   "org.gnu.Emacs.macmetal.presenter";
 
@@ -26,6 +117,10 @@ static const char *emacs_metal_presenter_queue_label =
 #define GLYPH_ATLAS_MAX_PAGES (8)
 #define GLYPH_CACHE_SIZE (16384)  /* MUST be power of 2 for hash table */
 #define GLYPH_CACHE_EVICT_BATCH (1024)
+/* How far lookups and insertions probe from the hash slot.  Both must use
+   the same bound: an entry stored further away than lookups search would
+   never be found again.  */
+#define GLYPH_CACHE_MAX_PROBE (16)
 #define SUBPIXEL_POSITIONS (4)
 
 typedef struct {
@@ -37,7 +132,6 @@ typedef struct {
     uint16_t atlas_x, atlas_y;
     uint16_t atlas_w, atlas_h;
     float bearing_x, bearing_y;
-    float advance;
     uint64_t last_used;
     bool is_color;
     bool deleted;
@@ -116,8 +210,11 @@ static NSString *const metal_shader_source = @
 /* Vertex and batch data structures.  */
 
 #define METAL_MAX_VERTICES (262144)
-#define METAL_MAX_CLIP_STACK (32)
-#define METAL_VERTEX_BUFFER_COUNT (2)
+/* Number of vertex buffers cycled through, and hence the number of frames
+   allowed in flight.  Two makes emacs_metal_frame_begin wait for the GPU
+   to finish the immediately preceding frame; three lets the CPU build the
+   next frame while the GPU is still working on the last one.  */
+#define METAL_VERTEX_BUFFER_COUNT (3)
 #define METAL_MAX_BATCHES (4096)
 #define METAL_MAX_ACTIVE_CLIP_RECTS (128)
 #define METAL_MAX_BATCH_CLIP_RECTS (16384)
@@ -166,6 +263,14 @@ struct emacs_metal_context
 
   id<MTLBuffer> vertex_buffers[METAL_VERTEX_BUFFER_COUNT];
   int current_buffer;
+  /* Buffer the current batches emit into.  Normally one of
+     vertex_buffers, but a frame that emits more than METAL_MAX_VERTICES
+     vertices switches to freshly allocated spill buffers.  */
+  id<MTLBuffer> current_vertex_buffer;
+  /* Spill buffers allocated for the frame being built.  Held until the
+     frame's command buffer completes, since the render passes already
+     encoded into it still read from them.  */
+  NSMutableArray *spill_vertex_buffers;
   metal_vertex_t *vertices;
   int vertex_count;
 
@@ -176,11 +281,13 @@ struct emacs_metal_context
   id<MTLTexture> current_texture;
   bool current_is_glyph;
 
-  metal_clip_region_t clip_stack[METAL_MAX_CLIP_STACK];
-  int clip_depth;
+  metal_clip_region_t clip;
 
   int width, height, scale;
   bool in_frame;
+  /* Set when the open frame was started by emacs_metal_ensure_frame
+     rather than by update_begin.  */
+  bool implicit_frame;
   bool backbuffer_dirty;
   bool presentation_valid;
   bool presentation_scheduled;
@@ -205,14 +312,59 @@ struct emacs_metal_context
 static void flush_render_batches (emacs_metal_context_t *ctx,
                                   id<MTLCommandBuffer> cmd);
 static void emacs_metal_schedule_presentation (emacs_metal_context_t *ctx);
+static void glyph_cache_entry_clear (struct emacs_metal_glyph_cache *gc,
+                                     glyph_cache_entry_t *entry);
 
 void
 emacs_metal_get_render_stats (struct emacs_metal_render_stats *stats,
                               bool reset)
 {
-  *stats = render_stats;
+#define METAL_SHARED_READ(field)                                        \
+  (reset                                                                \
+   ? atomic_exchange_explicit (&shared_stats.field, 0,                  \
+                               memory_order_relaxed)                    \
+   : atomic_load_explicit (&shared_stats.field, memory_order_relaxed))
+
+  stats->flushes = main_stats.flushes;
+  stats->batches = main_stats.batches;
+  stats->vertices = main_stats.vertices;
+  stats->vertex_buffer_spills = main_stats.vertex_buffer_spills;
+  stats->scissor_draws = main_stats.scissor_draws;
+  stats->scroll_blits = main_stats.scroll_blits;
+  stats->scroll_blit_bytes = main_stats.scroll_blit_bytes;
+  stats->texture_uploads = main_stats.texture_uploads;
+  stats->texture_upload_bytes = main_stats.texture_upload_bytes;
+  stats->glyph_cache_hits = main_stats.glyph_cache_hits;
+  stats->glyph_cache_misses = main_stats.glyph_cache_misses;
+  stats->clip_set_rect_calls = main_stats.clip_set_rect_calls;
+  stats->clip_set_rect_skips = main_stats.clip_set_rect_skips;
+  stats->clip_set_rects_calls = main_stats.clip_set_rects_calls;
+  stats->clip_set_rects_skips = main_stats.clip_set_rects_skips;
+  stats->clip_reset_calls = main_stats.clip_reset_calls;
+  stats->clip_reset_skips = main_stats.clip_reset_skips;
+  stats->presentation_requests = main_stats.presentation_requests;
+  stats->presentation_coalesced_requests = main_stats.presentation_coalesced_requests;
   if (reset)
-    memset (&render_stats, 0, sizeof render_stats);
+    memset (&main_stats, 0, sizeof main_stats);
+
+  stats->frames = METAL_SHARED_READ (frames);
+  stats->command_buffers = METAL_SHARED_READ (command_buffers);
+  stats->blits = METAL_SHARED_READ (blits);
+  stats->blit_bytes = METAL_SHARED_READ (blit_bytes);
+  stats->present_blits = METAL_SHARED_READ (present_blits);
+  stats->present_blit_bytes = METAL_SHARED_READ (present_blit_bytes);
+  stats->next_drawable_calls = METAL_SHARED_READ (next_drawable_calls);
+  stats->presentation_task_runs = METAL_SHARED_READ (presentation_task_runs);
+  stats->presentation_final_reschedules = METAL_SHARED_READ (presentation_final_reschedules);
+  stats->next_drawable_seconds
+    = METAL_SHARED_READ (next_drawable_ns) / 1e9;
+  stats->max_next_drawable_seconds
+    = METAL_SHARED_READ (max_next_drawable_ns) / 1e9;
+  stats->command_buffer_seconds
+    = METAL_SHARED_READ (command_buffer_ns) / 1e9;
+  stats->max_command_buffer_seconds
+    = METAL_SHARED_READ (max_command_buffer_ns) / 1e9;
+#undef METAL_SHARED_READ
 }
 
 static uint8_t *
@@ -263,6 +415,23 @@ emacs_metal_context_finalize (emacs_metal_context_t *ctx)
   for (int i = 0; i < METAL_VERTEX_BUFFER_COUNT; i++)
     ctx->vertex_buffers[i] = nil;
 
+  ctx->current_vertex_buffer = nil;
+  ctx->spill_vertex_buffers = nil;
+  ctx->frame_command_buffer = nil;
+  ctx->current_texture = nil;
+  for (int i = 0; i < METAL_MAX_BATCHES; i++)
+    ctx->batches[i].texture = nil;
+
+  if (ctx->buffer_semaphore)
+    {
+      /* A frame left open at destruction still holds a slot.  Give it
+         back: dispatch traps if a semaphore is deallocated while its
+         value is below the one it was created with.  */
+      if (ctx->in_frame)
+        dispatch_semaphore_signal (ctx->buffer_semaphore);
+      ctx->buffer_semaphore = nil;
+    }
+
   ctx->backbuffer = nil;
   ctx->scroll_staging = nil;
   ctx->command_queue = nil;
@@ -276,6 +445,9 @@ emacs_metal_context_finalize (emacs_metal_context_t *ctx)
     {
       for (int i = 0; i < ctx->glyph_cache->page_count; i++)
         ctx->glyph_cache->pages[i].texture = nil;
+      for (int i = 0; i < GLYPH_CACHE_SIZE; i++)
+        glyph_cache_entry_clear (ctx->glyph_cache,
+                                 &ctx->glyph_cache->entries[i]);
       free (ctx->glyph_cache);
     }
 
@@ -423,10 +595,17 @@ create_backbuffer (emacs_metal_context_t *ctx)
   id<MTLRenderCommandEncoder> encoder
     = [cmd renderCommandEncoderWithDescriptor:pass];
   [encoder endEncoding];
+  /* No waitUntilCompleted: command buffers on one queue execute in commit
+     order, so everything committed afterwards already sees the cleared
+     texture, and blocking here would stall the main thread on the GPU for
+     every step of a live resize.  */
   [cmd commit];
-  [cmd waitUntilCompleted];
 
+  /* Publish under the lock: the presenter queue snapshots this field.  */
+  pthread_mutex_lock (&ctx->presentation_mutex);
   ctx->backbuffer = texture;
+  pthread_mutex_unlock (&ctx->presentation_mutex);
+
   ctx->backbuffer_dirty = true;
   return true;
 }
@@ -453,6 +632,37 @@ create_vertex_buffers (emacs_metal_context_t *ctx)
   ctx->buffer_semaphore
     = dispatch_semaphore_create (METAL_VERTEX_BUFFER_COUNT);
   ctx->current_buffer = 0;
+  ctx->current_vertex_buffer = ctx->vertex_buffers[0];
+
+  return true;
+}
+
+/* Switch to a freshly allocated vertex buffer, so that vertices already
+   encoded into the frame's command buffer are not overwritten by the
+   drawing that follows.  The buffer is kept alive until the frame's
+   command buffer completes.  Returns false if allocation fails.  */
+
+static bool
+rotate_spill_vertex_buffer (emacs_metal_context_t *ctx)
+{
+  NSUInteger size = METAL_MAX_VERTICES * sizeof (metal_vertex_t);
+  id<MTLBuffer> buffer
+    = [shared_device newBufferWithLength:size
+                                 options:MTLResourceStorageModeShared];
+  if (!buffer)
+    {
+      NSLog (@"Metal: failed to allocate spill vertex buffer");
+      return false;
+    }
+
+  if (!ctx->spill_vertex_buffers)
+    ctx->spill_vertex_buffers = [[NSMutableArray alloc] init];
+  [ctx->spill_vertex_buffers addObject:buffer];
+
+  ctx->current_vertex_buffer = buffer;
+  ctx->vertices = [buffer contents];
+  ctx->vertex_count = 0;
+  METAL_STAT_INC (vertex_buffer_spills);
 
   return true;
 }
@@ -546,8 +756,11 @@ emacs_metal_context_resize (emacs_metal_context_t *ctx, int width, int height,
     return;
 
   id<MTLTexture> old_backbuffer = ctx->backbuffer;
-  int old_width = ctx->width * ctx->scale;
-  int old_height = ctx->height * ctx->scale;
+  int prev_width = ctx->width;
+  int prev_height = ctx->height;
+  int prev_scale = ctx->scale;
+  int old_width = prev_width * prev_scale;
+  int old_height = prev_height * prev_scale;
 
   ctx->width = width;
   ctx->height = height;
@@ -555,8 +768,17 @@ emacs_metal_context_resize (emacs_metal_context_t *ctx, int width, int height,
 
   if (!create_backbuffer (ctx))
     {
-      /* Restore old backbuffer on failure.  */
+      /* Restore the previous geometry along with the backbuffer.  The
+         recorded size is what scissor rects, the viewport and the present
+         blit are computed from, so leaving it describing a texture that
+         was never created would drive drawing outside the one still in
+         use.  */
+      pthread_mutex_lock (&ctx->presentation_mutex);
       ctx->backbuffer = old_backbuffer;
+      pthread_mutex_unlock (&ctx->presentation_mutex);
+      ctx->width = prev_width;
+      ctx->height = prev_height;
+      ctx->scale = prev_scale;
       return;
     }
 
@@ -578,8 +800,9 @@ emacs_metal_context_resize (emacs_metal_context_t *ctx, int width, int height,
            destinationLevel:0
           destinationOrigin:MTLOriginMake (0, 0, 0)];
       [blit endEncoding];
+      /* As in create_backbuffer, queue order is enough; the command buffer
+         keeps the old texture alive until the copy has run.  */
       [cmd commit];
-      [cmd waitUntilCompleted];
     }
 
   ctx->backbuffer_dirty = true;
@@ -635,10 +858,17 @@ emacs_metal_set_maximum_drawable_count (emacs_metal_context_t *ctx,
 void
 emacs_metal_frame_begin (emacs_metal_context_t *ctx)
 {
+  /* Drawing done outside update_begin may have left an implicit frame
+     open.  Finish it, so that its contents reach the screen and the
+     vertex buffer slot it holds is released before we take another.  */
+  emacs_metal_end_implicit_frame (ctx);
+
   dispatch_semaphore_wait (ctx->buffer_semaphore, DISPATCH_TIME_FOREVER);
 
   ctx->current_buffer = (ctx->current_buffer + 1) % METAL_VERTEX_BUFFER_COUNT;
-  ctx->vertices = [ctx->vertex_buffers[ctx->current_buffer] contents];
+  ctx->current_vertex_buffer = ctx->vertex_buffers[ctx->current_buffer];
+  ctx->spill_vertex_buffers = nil;
+  ctx->vertices = [ctx->current_vertex_buffer contents];
   ctx->vertex_count = 0;
   ctx->batch_count = 0;
   ctx->batch_clip_rect_count = 0;
@@ -646,16 +876,40 @@ emacs_metal_frame_begin (emacs_metal_context_t *ctx)
   ctx->current_is_glyph = false;
 
   /* Default clip to full frame in pixels.  */
-  ctx->clip_depth = 1;
-  ctx->clip_stack[0].count = 1;
-  ctx->clip_stack[0].rects[0] = (metal_clip_rect_t){
+  ctx->clip.count = 1;
+  ctx->clip.rects[0] = (metal_clip_rect_t){
     .x = 0, .y = 0,
     .w = ctx->width * ctx->scale,
     .h = ctx->height * ctx->scale
   };
 
   ctx->in_frame = true;
+  ctx->implicit_frame = false;
   ctx->frame_command_buffer = [ctx->command_queue commandBuffer];
+}
+
+/* Open a frame on demand.  Emacs draws outside update_begin and
+   update_end in several places -- cursor and focus updates through
+   gui_update_cursor, mouse face highlighting from note_mouse_highlight,
+   and the visual bell -- and that drawing used to be discarded because
+   every primitive requires an open frame.  Frames opened this way are
+   closed again by emacs_metal_end_implicit_frame.  */
+
+void
+emacs_metal_ensure_frame (emacs_metal_context_t *ctx)
+{
+  if (!ctx || ctx->in_frame)
+    return;
+
+  emacs_metal_frame_begin (ctx);
+  ctx->implicit_frame = true;
+}
+
+void
+emacs_metal_end_implicit_frame (emacs_metal_context_t *ctx)
+{
+  if (ctx && ctx->in_frame && ctx->implicit_frame)
+    emacs_metal_frame_end (ctx);
 }
 
 /* Render all pending batches into the backbuffer and reset batch state.
@@ -671,7 +925,7 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
       return;
     }
 
-  id<MTLBuffer> draw_buffer = ctx->vertex_buffers[ctx->current_buffer];
+  id<MTLBuffer> draw_buffer = ctx->current_vertex_buffer;
   if (!draw_buffer)
     return;
 
@@ -734,15 +988,15 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
           [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                       vertexStart:(NSUInteger)batch->vertex_offset
                       vertexCount:(NSUInteger)batch->vertex_count];
-          render_stats.scissor_draws++;
+          METAL_STAT_INC (scissor_draws);
         }
     }
 
   [encoder endEncoding];
 
-  render_stats.flushes++;
-  render_stats.batches += flushed_batches;
-  render_stats.vertices += flushed_vertices;
+  METAL_STAT_INC (flushes);
+  METAL_STAT_ADD (batches, flushed_batches);
+  METAL_STAT_ADD (vertices, flushed_vertices);
 
   ctx->batch_count = 0;
   ctx->batch_clip_rect_count = 0;
@@ -756,6 +1010,9 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
       {
         id<CAMetalDrawable> drawable = nil;
         id<MTLCommandBuffer> cmd = nil;
+        CAMetalLayer *layer = nil;
+        id<MTLTexture> backbuffer = nil;
+        id<MTLCommandQueue> command_queue = nil;
         bool valid;
 
         pthread_mutex_lock (&ctx->presentation_mutex);
@@ -764,7 +1021,14 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
           {
             ctx->presentation_scheduled = false;
             ctx->presentation_in_flight = true;
-            render_stats.presentation_task_runs++;
+            METAL_SHARED_INC (presentation_task_runs);
+            /* Take the snapshot under the lock.  These are strong
+               references that the main thread replaces -- the backbuffer
+               on every resize -- so reading them unlocked races with the
+               store and can observe a torn or already released value.  */
+            layer = ctx->layer;
+            backbuffer = ctx->backbuffer;
+            command_queue = ctx->command_queue;
           }
         else
           ctx->presentation_scheduled = false;
@@ -776,10 +1040,6 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
             return;
           }
 
-        CAMetalLayer *layer = ctx->layer;
-        id<MTLTexture> backbuffer = ctx->backbuffer;
-        id<MTLCommandQueue> command_queue = ctx->command_queue;
-
         if (layer)
           {
             double next_drawable_start = CACurrentMediaTime ();
@@ -788,10 +1048,14 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
               CACurrentMediaTime () - next_drawable_start;
             if (next_drawable_elapsed < 0.0)
               next_drawable_elapsed = 0.0;
-            render_stats.next_drawable_calls++;
-            render_stats.next_drawable_seconds += next_drawable_elapsed;
-            if (render_stats.max_next_drawable_seconds < next_drawable_elapsed)
-              render_stats.max_next_drawable_seconds = next_drawable_elapsed;
+            uint64_t next_drawable_ns
+              = metal_stat_ns (next_drawable_elapsed);
+            METAL_SHARED_INC (next_drawable_calls);
+            atomic_fetch_add_explicit (&shared_stats.next_drawable_ns,
+                                       next_drawable_ns,
+                                       memory_order_relaxed);
+            metal_stat_max (&shared_stats.max_next_drawable_ns,
+                            next_drawable_ns);
           }
 
         pthread_mutex_lock (&ctx->presentation_mutex);
@@ -823,26 +1087,27 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
                    destinationLevel:0
                   destinationOrigin:MTLOriginMake (0, 0, 0)];
               [blit endEncoding];
-              render_stats.blits++;
-              render_stats.blit_bytes += (uintmax_t) copy_w * copy_h * 4;
-              render_stats.present_blits++;
-              render_stats.present_blit_bytes += (uintmax_t) copy_w * copy_h * 4;
+              METAL_SHARED_INC (blits);
+              METAL_SHARED_ADD (blit_bytes, (uintmax_t) copy_w * copy_h * 4);
+              METAL_SHARED_INC (present_blits);
+              METAL_SHARED_ADD (present_blit_bytes, (uintmax_t) copy_w * copy_h * 4);
             }
         }
 
         [cmd presentDrawable:drawable];
 
         double command_start = CACurrentMediaTime ();
-        render_stats.frames++;
-        render_stats.command_buffers++;
+        METAL_SHARED_INC (frames);
+        METAL_SHARED_INC (command_buffers);
         [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull buffer) {
           double elapsed = CACurrentMediaTime () - command_start;
           bool schedule_again = false;
           if (elapsed < 0.0)
             elapsed = 0.0;
-          render_stats.command_buffer_seconds += elapsed;
-          if (render_stats.max_command_buffer_seconds < elapsed)
-            render_stats.max_command_buffer_seconds = elapsed;
+          uint64_t elapsed_ns = metal_stat_ns (elapsed);
+          atomic_fetch_add_explicit (&shared_stats.command_buffer_ns,
+                                     elapsed_ns, memory_order_relaxed);
+          metal_stat_max (&shared_stats.max_command_buffer_ns, elapsed_ns);
 
           pthread_mutex_lock (&ctx->presentation_mutex);
           ctx->presentation_in_flight = false;
@@ -851,7 +1116,7 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
               ctx->presentation_needs_reschedule = false;
               ctx->presentation_scheduled = true;
               emacs_metal_context_retain (ctx);
-              render_stats.presentation_final_reschedules++;
+              METAL_SHARED_INC (presentation_final_reschedules);
               schedule_again = true;
             }
           pthread_mutex_unlock (&ctx->presentation_mutex);
@@ -874,7 +1139,7 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
               ctx->presentation_needs_reschedule = false;
               ctx->presentation_scheduled = true;
               emacs_metal_context_retain (ctx);
-              render_stats.presentation_final_reschedules++;
+              METAL_SHARED_INC (presentation_final_reschedules);
               schedule_again = true;
             }
           pthread_mutex_unlock (&ctx->presentation_mutex);
@@ -895,13 +1160,13 @@ emacs_metal_schedule_presentation (emacs_metal_context_t *ctx)
   pthread_mutex_lock (&ctx->presentation_mutex);
   if (ctx->presentation_valid)
     {
-      render_stats.presentation_requests++;
+      METAL_STAT_INC (presentation_requests);
       if (ctx->presentation_scheduled)
-        render_stats.presentation_coalesced_requests++;
+        METAL_STAT_INC (presentation_coalesced_requests);
       else if (ctx->presentation_in_flight)
         {
           ctx->presentation_needs_reschedule = true;
-          render_stats.presentation_coalesced_requests++;
+          METAL_STAT_INC (presentation_coalesced_requests);
         }
       else
         {
@@ -923,6 +1188,7 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
     return;
 
   ctx->in_frame = false;
+  ctx->implicit_frame = false;
 
   id<MTLCommandBuffer> cmd = ctx->frame_command_buffer;
   if (!cmd)
@@ -931,32 +1197,32 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
   /* Render all pending batches into the backbuffer.  */
   flush_render_batches (ctx, cmd);
 
-  if (!ctx->backbuffer_dirty)
+  if (!ctx->backbuffer_dirty || !cmd)
     {
       dispatch_semaphore_signal (ctx->buffer_semaphore);
       ctx->frame_command_buffer = nil;
-      return;
-    }
-
-  if (!cmd)
-    {
-      dispatch_semaphore_signal (ctx->buffer_semaphore);
-      ctx->frame_command_buffer = nil;
+      ctx->spill_vertex_buffers = nil;
       return;
     }
 
   __block dispatch_semaphore_t sema = ctx->buffer_semaphore;
+  /* Captured so the spill buffers this frame drew from stay alive until
+     the GPU is done reading them; released with the block.  */
+  NSMutableArray *spilled = ctx->spill_vertex_buffers;
   double command_start = CACurrentMediaTime ();
-  render_stats.command_buffers++;
+  METAL_SHARED_INC (command_buffers);
   [cmd addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull buffer) {
     double elapsed = CACurrentMediaTime () - command_start;
     if (elapsed < 0.0)
       elapsed = 0.0;
-    render_stats.command_buffer_seconds += elapsed;
-    if (render_stats.max_command_buffer_seconds < elapsed)
-      render_stats.max_command_buffer_seconds = elapsed;
+    uint64_t elapsed_ns = metal_stat_ns (elapsed);
+    atomic_fetch_add_explicit (&shared_stats.command_buffer_ns,
+                               elapsed_ns, memory_order_relaxed);
+    metal_stat_max (&shared_stats.max_command_buffer_ns, elapsed_ns);
+    (void) spilled;
     dispatch_semaphore_signal (sema);
   }];
+  ctx->spill_vertex_buffers = nil;
 
   [cmd commit];
   ctx->backbuffer_dirty = false;
@@ -997,12 +1263,10 @@ static bool
 clip_set_region_if_changed (emacs_metal_context_t *ctx,
                             metal_clip_region_t *clip)
 {
-  if (ctx->clip_depth == 1
-      && clip_regions_equal (&ctx->clip_stack[0], clip))
+  if (clip_regions_equal (&ctx->clip, clip))
     return false;
 
-  ctx->clip_depth = 1;
-  ctx->clip_stack[0] = *clip;
+  ctx->clip = *clip;
   return true;
 }
 
@@ -1078,7 +1342,7 @@ static metal_batch_t *
 ensure_batch (emacs_metal_context_t *ctx,
               id<MTLTexture> texture, bool is_glyph)
 {
-  metal_clip_region_t *clip = &ctx->clip_stack[ctx->clip_depth - 1];
+  metal_clip_region_t *clip = &ctx->clip;
 
   if (ctx->batch_count > 0)
     {
@@ -1114,11 +1378,18 @@ emit_vertices (emacs_metal_context_t *ctx, int count,
   if (!ctx->frame_command_buffer)
     return NULL;
 
+  if (count > METAL_MAX_VERTICES)
+    return NULL;
+
   if (ctx->vertex_count + count > METAL_MAX_VERTICES)
     {
+      /* Flushing encodes draw commands that read from the current vertex
+         buffer, and the frame's command buffer is not committed until
+         emacs_metal_frame_end, so the space cannot simply be reused.
+         Continue in a fresh buffer instead of dropping the rest of the
+         frame on the floor.  */
       flush_render_batches (ctx, ctx->frame_command_buffer);
-      if (count > METAL_MAX_VERTICES
-          || ctx->vertex_count + count > METAL_MAX_VERTICES)
+      if (!rotate_spill_vertex_buffer (ctx))
         return NULL;
     }
 
@@ -1162,6 +1433,23 @@ metal_opaque_if_no_alpha (uint32_t color)
 }
 
 /* --- Glyph atlas --- */
+
+/* Drop ENTRY, releasing the font reference it owns.  The slot is marked
+   deleted rather than empty so that open-addressed probe chains running
+   through it stay intact.  */
+
+static void
+glyph_cache_entry_clear (struct emacs_metal_glyph_cache *gc,
+                         glyph_cache_entry_t *entry)
+{
+  if (entry->font == NULL)
+    return;
+
+  CFRelease (entry->font);
+  entry->font = NULL;
+  entry->deleted = true;
+  gc->entry_count--;
+}
 
 /* Allocate a rectangle (required_w x required_h) in the glyph atlas using
    shelf packing.  Returns the page index, and stores the allocated position
@@ -1227,11 +1515,7 @@ glyph_cache_get_page (emacs_metal_context_t *ctx,
           if (gc->entries[i].font == NULL)
             continue;
           if (gc->entries[i].atlas_page == 0)
-            {
-              gc->entries[i].font = NULL;
-              gc->entries[i].deleted = true;
-              gc->entry_count--;
-            }
+            glyph_cache_entry_clear (gc, &gc->entries[i]);
           else
             gc->entries[i].atlas_page--;
         }
@@ -1305,9 +1589,7 @@ glyph_cache_evict_entries (struct emacs_metal_glyph_cache *gc)
       if (entry->last_used > protected_after && scanned < GLYPH_CACHE_SIZE)
         continue;
 
-      entry->font = NULL;
-      entry->deleted = true;
-      gc->entry_count--;
+      glyph_cache_entry_clear (gc, entry);
       evicted++;
     }
 }
@@ -1321,7 +1603,7 @@ glyph_cache_lookup (emacs_metal_context_t *ctx,
   struct emacs_metal_glyph_cache *gc = ctx->glyph_cache;
   uint32_t idx = glyph_cache_hash (font, glyph_id, subpixel, scale);
 
-  for (int probe = 0; probe < 16; probe++)
+  for (int probe = 0; probe < GLYPH_CACHE_MAX_PROBE; probe++)
     {
       uint32_t slot = (idx + probe) & (GLYPH_CACHE_SIZE - 1);
       glyph_cache_entry_t *e = &gc->entries[slot];
@@ -1335,7 +1617,7 @@ glyph_cache_lookup (emacs_metal_context_t *ctx,
           && e->subpixel == subpixel && e->scale == scale)
         {
           e->last_used = ++gc->clock;
-          render_stats.glyph_cache_hits++;
+          METAL_STAT_INC (glyph_cache_hits);
           return e;
         }
     }
@@ -1350,7 +1632,7 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
                        CTFontRef font, uint16_t glyph_id, uint8_t subpixel)
 {
   struct emacs_metal_glyph_cache *gc = ctx->glyph_cache;
-  render_stats.glyph_cache_misses++;
+  METAL_STAT_INC (glyph_cache_misses);
 
   /* If the cache is nearly full, evict some old entries without discarding
      all atlas pages.  The atlas page eviction path reclaims texture space.  */
@@ -1362,10 +1644,6 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
   CGRect bbox;
   CTFontGetBoundingRectsForGlyphs (font, kCTFontOrientationHorizontal,
                                    &cg_glyph, &bbox, 1);
-
-  CGSize advance_size;
-  CTFontGetAdvancesForGlyphs (font, kCTFontOrientationHorizontal,
-                              &cg_glyph, &advance_size, 1);
 
   int s = ctx->scale;
 
@@ -1436,8 +1714,8 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
                                  mipmapLevel:0
                                    withBytes:pixels
                                  bytesPerRow:(NSUInteger)(gw * 4)];
-      render_stats.texture_uploads++;
-      render_stats.texture_upload_bytes += (uintmax_t) gw * gh * 4;
+      METAL_STAT_INC (texture_uploads);
+      METAL_STAT_ADD (texture_upload_bytes, (uintmax_t) gw * gh * 4);
     }
   else
     {
@@ -1462,37 +1740,53 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
                                  mipmapLevel:0
                                    withBytes:pixels
                                  bytesPerRow:(NSUInteger)gw];
-      render_stats.texture_uploads++;
-      render_stats.texture_upload_bytes += (uintmax_t) gw * gh;
+      METAL_STAT_INC (texture_uploads);
+      METAL_STAT_ADD (texture_upload_bytes, (uintmax_t) gw * gh);
     }
 
   /* Insert into the hash table using open addressing.  */
   uint32_t idx = glyph_cache_hash (font, glyph_id, subpixel, (uint8_t)ctx->scale);
   glyph_cache_entry_t *entry = NULL;
   glyph_cache_entry_t *deleted_entry = NULL;
-  for (int probe = 0; probe < GLYPH_CACHE_SIZE; probe++)
+  glyph_cache_entry_t *lru_entry = NULL;
+  for (int probe = 0; probe < GLYPH_CACHE_MAX_PROBE; probe++)
     {
       uint32_t slot = (idx + probe) & (GLYPH_CACHE_SIZE - 1);
       glyph_cache_entry_t *candidate = &gc->entries[slot];
 
-      if (candidate->font == NULL && candidate->deleted)
+      if (candidate->font == NULL)
         {
+          if (!candidate->deleted)
+            {
+              entry = deleted_entry ? deleted_entry : candidate;
+              break;
+            }
           if (!deleted_entry)
             deleted_entry = candidate;
         }
-      else if (candidate->font == NULL)
-        {
-          entry = deleted_entry ? deleted_entry : candidate;
-          break;
-        }
+      else if (!lru_entry || candidate->last_used < lru_entry->last_used)
+        lru_entry = candidate;
     }
 
   if (!entry)
     entry = deleted_entry;
+  if (!entry && lru_entry)
+    {
+      /* Every slot in the probe window is taken.  Reclaim the least
+         recently used one rather than storing the glyph beyond the
+         distance glyph_cache_lookup searches, which would leave it
+         permanently unfindable and re-rasterized on every draw.  */
+      glyph_cache_entry_clear (gc, lru_entry);
+      entry = lru_entry;
+    }
   if (!entry)
     return NULL;
 
-  entry->font = font;
+  /* Own a reference to the font: the entry is keyed on the CTFontRef
+     address, so a font released while entries still refer to it could be
+     replaced by an unrelated font allocated at the same address, and
+     those entries would then match and render the wrong glyphs.  */
+  entry->font = (CTFontRef) CFRetain (font);
   entry->deleted = false;
   entry->glyph_id = glyph_id;
   entry->subpixel = subpixel;
@@ -1511,7 +1805,6 @@ glyph_cache_rasterize (emacs_metal_context_t *ctx,
      so gh + bearing_y = px_top - px_bottom + 2 + px_bottom - 1 = px_top + 1. */
   entry->bearing_x = px_left - 1.0f;
   entry->bearing_y = px_bottom - 1.0f;
-  entry->advance = (float)advance_size.width * s;
   entry->last_used = ++gc->clock;
   entry->is_color = is_color;
   gc->entry_count++;
@@ -1531,7 +1824,8 @@ emacs_metal_draw_glyphs (emacs_metal_context_t *ctx,
                          float origin_x,
                          float baseline_y)
 {
-  if (!ctx->in_frame || count <= 0)
+  emacs_metal_ensure_frame (ctx);
+  if (!ctx || !ctx->in_frame || count <= 0)
     return;
 
   CTFontRef font = (CTFontRef)font_ptr;
@@ -1600,7 +1894,8 @@ emacs_metal_fill_rect (emacs_metal_context_t *ctx,
                        int x, int y, int w, int h,
                        uint32_t color)
 {
-  if (!ctx->in_frame || w <= 0 || h <= 0)
+  emacs_metal_ensure_frame (ctx);
+  if (!ctx || !ctx->in_frame || w <= 0 || h <= 0)
     return;
 
   int s = ctx->scale;
@@ -1624,7 +1919,8 @@ emacs_metal_draw_rect (emacs_metal_context_t *ctx,
                        int x, int y, int w, int h,
                        uint32_t color)
 {
-  if (!ctx->in_frame || w <= 0 || h <= 0)
+  emacs_metal_ensure_frame (ctx);
+  if (!ctx || !ctx->in_frame || w <= 0 || h <= 0)
     return;
 
   emacs_metal_fill_rect (ctx, x, y, w, 1, color);           /* top    */
@@ -1638,7 +1934,8 @@ emacs_metal_draw_line (emacs_metal_context_t *ctx,
                        int x1, int y1, int x2, int y2,
                        uint32_t color)
 {
-  if (!ctx->in_frame)
+  emacs_metal_ensure_frame (ctx);
+  if (!ctx || !ctx->in_frame)
     return;
 
   int dx = x2 - x1;
@@ -1695,53 +1992,13 @@ emacs_metal_draw_line (emacs_metal_context_t *ctx,
 }
 
 void
-emacs_metal_push_clip (emacs_metal_context_t *ctx,
-                       int x, int y, int w, int h)
-{
-  if (!ctx || ctx->clip_depth >= METAL_MAX_CLIP_STACK)
-    return;
-
-  int s = ctx->scale;
-  metal_clip_region_t *parent = &ctx->clip_stack[ctx->clip_depth - 1];
-  metal_clip_region_t *child = &ctx->clip_stack[ctx->clip_depth];
-
-  /* New rect in physical pixels.  */
-  metal_clip_rect_t clip = {
-    .x = x * s,
-    .y = y * s,
-    .w = w * s,
-    .h = h * s
-  };
-
-  child->count = 0;
-  for (int i = 0; i < parent->count; i++)
-    {
-      metal_clip_rect_t rect = intersect_clip_rects (parent->rects[i], clip);
-      if (rect.w > 0 && rect.h > 0)
-        child->rects[child->count++] = rect;
-    }
-
-  if (child->count == 0)
-    child->rects[child->count++] = (metal_clip_rect_t){ .x = 0, .y = 0,
-                                                        .w = 0, .h = 0 };
-  ctx->clip_depth++;
-}
-
-void
-emacs_metal_pop_clip (emacs_metal_context_t *ctx)
-{
-  if (ctx && ctx->clip_depth > 1)
-    ctx->clip_depth--;
-}
-
-void
 emacs_metal_set_clip_rect (emacs_metal_context_t *ctx,
                            int x, int y, int w, int h)
 {
   if (!ctx)
     return;
 
-  render_stats.clip_set_rect_calls++;
+  METAL_STAT_INC (clip_set_rect_calls);
 
   int s = ctx->scale;
   int nx = x * s;
@@ -1766,7 +2023,7 @@ emacs_metal_set_clip_rect (emacs_metal_context_t *ctx,
   };
 
   if (!clip_set_region_if_changed (ctx, &clip))
-    render_stats.clip_set_rect_skips++;
+    METAL_STAT_INC (clip_set_rect_skips);
 }
 
 void
@@ -1776,7 +2033,7 @@ emacs_metal_set_clip_rects (emacs_metal_context_t *ctx,
   if (!ctx)
     return;
 
-  render_stats.clip_set_rects_calls++;
+  METAL_STAT_INC (clip_set_rects_calls);
 
   if (!rects || count <= 0)
     {
@@ -1836,7 +2093,7 @@ emacs_metal_set_clip_rects (emacs_metal_context_t *ctx,
                                                     .w = 0, .h = 0 };
 
   if (!clip_set_region_if_changed (ctx, &clip))
-    render_stats.clip_set_rects_skips++;
+    METAL_STAT_INC (clip_set_rects_skips);
 }
 
 void
@@ -1845,7 +2102,7 @@ emacs_metal_reset_clip (emacs_metal_context_t *ctx)
   if (!ctx)
     return;
 
-  render_stats.clip_reset_calls++;
+  METAL_STAT_INC (clip_reset_calls);
 
   metal_clip_region_t clip = {
     .count = 1,
@@ -1857,7 +2114,7 @@ emacs_metal_reset_clip (emacs_metal_context_t *ctx)
   };
 
   if (!clip_set_region_if_changed (ctx, &clip))
-    render_stats.clip_reset_skips++;
+    METAL_STAT_INC (clip_reset_skips);
 }
 
 void
@@ -1865,7 +2122,8 @@ emacs_metal_scroll (emacs_metal_context_t *ctx,
                     int x, int y, int w, int h,
                     int dx, int dy)
 {
-  if (!ctx->in_frame || w <= 0 || h <= 0 || (dx == 0 && dy == 0))
+  emacs_metal_ensure_frame (ctx);
+  if (!ctx || !ctx->in_frame || w <= 0 || h <= 0 || (dx == 0 && dy == 0))
     return;
 
   int s = ctx->scale;
@@ -1919,10 +2177,10 @@ emacs_metal_scroll (emacs_metal_context_t *ctx,
   scroll_blit_count = 2;
   scroll_blit_bytes = (uintmax_t) sw * sh * 4 * 2;
 
-  render_stats.blits += scroll_blit_count;
-  render_stats.blit_bytes += scroll_blit_bytes;
-  render_stats.scroll_blits += scroll_blit_count;
-  render_stats.scroll_blit_bytes += scroll_blit_bytes;
+  METAL_SHARED_ADD (blits, scroll_blit_count);
+  METAL_SHARED_ADD (blit_bytes, scroll_blit_bytes);
+  METAL_STAT_ADD (scroll_blits, scroll_blit_count);
+  METAL_STAT_ADD (scroll_blit_bytes, scroll_blit_bytes);
   ctx->backbuffer_dirty = true;
 }
 
@@ -1974,8 +2232,8 @@ emacs_metal_upload_cg_image (emacs_metal_context_t *ctx,
              mipmapLevel:0
                withBytes:pixels
              bytesPerRow:bpr];
-  render_stats.texture_uploads++;
-  render_stats.texture_upload_bytes += (uintmax_t) height * bpr;
+  METAL_STAT_INC (texture_uploads);
+  METAL_STAT_ADD (texture_upload_bytes, (uintmax_t) height * bpr);
   free (pixels);
 
   return (__bridge_retained void *)texture;
@@ -2038,7 +2296,8 @@ emacs_metal_draw_image_texture (emacs_metal_context_t *ctx,
                                 int src_x, int src_y, int src_w, int src_h,
                                 int dst_x, int dst_y, int dst_w, int dst_h)
 {
-  if (!ctx->in_frame || !texture_ptr)
+  emacs_metal_ensure_frame (ctx);
+  if (!ctx || !ctx->in_frame || !texture_ptr)
     return;
 
   id<MTLTexture> texture = (__bridge id<MTLTexture>)texture_ptr;

@@ -314,6 +314,10 @@ MSDOS_X_OBJ =
 MAC_OBJ=@MAC_OBJ@
 ## macappkit.o if HAVE_MACGUI, otherwise empty.
 MAC_OBJC_OBJ=@MAC_OBJC_OBJ@
+## -fobjc-arc if --with-metal-rendering, otherwise empty.  Only macmetal.o
+## is compiled with ARC; the other Objective-C sources use manual retain
+## and release.
+METAL_OBJC_CFLAGS=@METAL_OBJC_CFLAGS@
 
 NS_OBJ=@NS_OBJ@
 ## nsterm.o nsfns.o nsmenu.o nsselect.o nsimage.o ns_fontfile if HAVE_NS.
@@ -453,6 +457,13 @@ ALL_CXX_CFLAGS = $(EMACS_CFLAGS) \
 	$(AM_V_CC)$(CC) -c $(CPPFLAGS) $(ALL_OBJC_CFLAGS) $(PROFILING_CFLAGS) $<
 .cc.o:
 	$(AM_V_CXX)$(CXX) -c $(CPPFLAGS) $(ALL_CXX_CFLAGS) $(PROFILING_CFLAGS) $<
+
+## The Metal renderer uses ARC-only bridging casts and relies on ARC for
+## the lifetime of the Objective-C objects it stores in malloc'ed structs,
+## so it needs $(METAL_OBJC_CFLAGS) on top of the usual Objective-C flags.
+macmetal.o: macmetal.m
+	$(AM_V_CC)$(CC) -c $(CPPFLAGS) $(ALL_OBJC_CFLAGS) $(METAL_OBJC_CFLAGS) \
+	  $(PROFILING_CFLAGS) $<
 
 base_obj = dispnew.o frame.o scroll.o xdisp.o menu.o $(XMENU_OBJ) window.o     \
 	charset.o coding.o category.o ccl.o character.o chartab.o bidi.o       \

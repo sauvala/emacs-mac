@@ -15,6 +15,7 @@ struct emacs_metal_render_stats
   uintmax_t flushes;
   uintmax_t batches;
   uintmax_t vertices;
+  uintmax_t vertex_buffer_spills;
   uintmax_t scissor_draws;
   uintmax_t blits;
   uintmax_t blit_bytes;
@@ -63,6 +64,9 @@ extern bool emacs_metal_set_maximum_drawable_count (emacs_metal_context_t *ctx,
 /* Frame begin/end */
 extern void emacs_metal_frame_begin (emacs_metal_context_t *ctx);
 extern void emacs_metal_frame_end (emacs_metal_context_t *ctx);
+/* For drawing that happens outside update_begin/update_end.  */
+extern void emacs_metal_ensure_frame (emacs_metal_context_t *ctx);
+extern void emacs_metal_end_implicit_frame (emacs_metal_context_t *ctx);
 
 /* Drawing primitives */
 extern void emacs_metal_fill_rect (emacs_metal_context_t *ctx,
@@ -76,9 +80,6 @@ extern void emacs_metal_draw_line (emacs_metal_context_t *ctx,
                                    uint32_t color);
 
 /* Clipping */
-extern void emacs_metal_push_clip (emacs_metal_context_t *ctx,
-                                   int x, int y, int w, int h);
-extern void emacs_metal_pop_clip (emacs_metal_context_t *ctx);
 extern void emacs_metal_set_clip_rect (emacs_metal_context_t *ctx,
                                        int x, int y, int w, int h);
 extern void emacs_metal_set_clip_rects (emacs_metal_context_t *ctx,

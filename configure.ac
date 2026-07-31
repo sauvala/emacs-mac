@@ -2919,6 +2919,9 @@ AC_SUBST([LIBS_GNUSTEP])
 mac_self_contained=no
 MAC_OBJ=
 MAC_OBJC_OBJ=
+dnl Extra Objective C flags for macmetal.o only; set when Metal rendering
+dnl is enabled.  See the --with-metal-rendering handling below.
+METAL_OBJC_CFLAGS=
 if test "${HAVE_MACGUI}" = yes; then
   if test "${EN_MAC_SELF_CONTAINED}" = yes; then
      AC_DEFINE(MAC_SELF_CONTAINED, 1, [Build an Mac bundled app])
@@ -2945,6 +2948,7 @@ if test "${HAVE_MACGUI}" = yes; then
 fi
 AC_SUBST(MAC_OBJ)
 AC_SUBST(MAC_OBJC_OBJ)
+AC_SUBST(METAL_OBJC_CFLAGS)
 AC_SUBST(mac_self_contained)
 
 INSTALL_ARCH_INDEP_EXTRA=install-etc
@@ -7629,10 +7633,31 @@ fail;
          AC_MSG_RESULT([no])
          AC_MSG_ERROR([Metal framework not found (requires macOS SDK)])
        fi
+       dnl Test $CC rather than $OBJC: src/Makefile.in compiles macmetal.m
+       dnl with $(CC), and AC_PROG_OBJC only runs in the Nextstep branch.
+       AC_CACHE_CHECK([whether $CC supports -fobjc-arc], [emacs_cv_objc_arc],
+         [cat > conftest.m <<'_ACEOF'
+@%:@import <Foundation/Foundation.h>
+int main (void) { NSString *s = @"x"; (void) s; return 0; }
+_ACEOF
+          if $CC -c $CFLAGS -fobjc-arc conftest.m >&AS_MESSAGE_LOG_FD 2>&1; then
+            emacs_cv_objc_arc=yes
+          else
+            emacs_cv_objc_arc=no
+          fi
+          rm -f conftest.m conftest.o])
+       if test "$emacs_cv_objc_arc" != yes; then
+         AC_MSG_ERROR([--with-metal-rendering requires a compiler supporting -fobjc-arc])
+       fi
        AC_DEFINE(USE_METAL_RENDERING, 1,
          [Define to 1 if using Metal for all rendering.])
        libs_metal="-framework Metal -framework MetalKit"
        MAC_OBJC_OBJ="$MAC_OBJC_OBJ macmetal.o"
+       dnl macmetal.m uses __bridge_retained/__bridge_transfer and relies on
+       dnl ARC to manage the Objective-C objects it keeps in malloc'ed
+       dnl structs.  The remaining Objective-C sources use manual retain and
+       dnl release, so scope this to macmetal.o in src/Makefile.in.
+       METAL_OBJC_CFLAGS="-fobjc-arc"
      fi
 
      AC_MSG_CHECKING(Mac OS X version min required >= 11)
