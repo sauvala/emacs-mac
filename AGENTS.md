@@ -62,6 +62,37 @@ make -C test SELECTOR='test-name' check     # run tests matching selector
 
 Default selector excludes `:expensive-test` and `:unstable` tags.
 
+Note that a `.log` target is only rebuilt when it is older than the test file,
+so `rm -f test/lisp/foo-tests.log` before re-running a test you just
+investigated, or you will read a stale result.
+
+### Injecting settings into a test run
+
+Tests run with `--no-init-file --no-site-file --no-site-lisp`, so the
+developer's personal configuration never applies.  To set a variable for a run,
+use the `EMACS_EXTRAOPT` variable that `test/Makefile.in` splices into
+`EMACSOPT` — this needs no edits to tracked test files, and so creates no
+conflict surface against the weekly GNU master sync:
+
+```bash
+make -C test lisp/dired-tests.log \
+  EMACS_EXTRAOPT='--eval "(setq insert-directory-program \"gls\")"'
+```
+
+Prefer this over patching tests or `test/Makefile.in` when a failure is
+environmental rather than a real defect.
+
+### macOS `ls` and the dired tests
+
+macOS ships BSD `ls`, which has no `--dired`, so `dired-use-ls-dired`
+auto-detects to nil.  This is **not** a cause of test failures: upstream commit
+`abde2d1ed3b` made `dired-test-filename-with-newline-1`/`-2` BSD-aware via
+`dired--ls-accept-b-switch-p`, and the full `dired-tests.el` passes 23/23 with
+stock `/bin/ls`.  Do not "fix" these by installing GNU coreutils or by editing
+the tests.  (Installing coreutils and setting `insert-directory-program` to
+`gls` is a reasonable *interactive* preference, but it is unrelated to the
+suite.)
+
 ## Mac Port Architecture
 
 ### Preprocessor Guards
