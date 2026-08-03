@@ -3130,8 +3130,6 @@ Also respects the obsolete wrapper hook `completion-in-region-functions'.
       completion-in-region-functions (start end collection predicate)
     (let ((minibuffer-completion-table collection)
           (minibuffer-completion-predicate predicate))
-      ;; HACK: if the text we are completing is already in a field, we
-      ;; want the completion field to take priority (e.g. Bug#6830).
       (when completion-in-region-mode-predicate
         (setq completion-in-region--data
 	      `(,(if (markerp start) start (copy-marker start))
@@ -5127,24 +5125,12 @@ usual. Returns (ALL PAT PREFIX SUFFIX)."
 
 (defun completion-shorthand-try-completion (string table pred point)
   "Try completion with `read-symbol-shorthands' of original buffer."
-  (cl-loop with expanded
-           for (short . long) in
-           (with-current-buffer minibuffer--original-buffer
-             read-symbol-shorthands)
-           for probe =
-           (and (> point (length short))
-                (string-prefix-p short string)
-                (try-completion (setq expanded
-                                      (concat long
-                                              (substring
-                                               string
-                                               (length short))))
-                                table pred))
-           when probe
-           do (message "Shorthand expansion")
-           and return (cons expanded (max (length long)
-                                          (+ (- point (length short))
-                                             (length long))))))
+  (let ((expanded (with-current-buffer minibuffer--original-buffer
+                    (shorthands-to-longhand string))))
+    (when (and (not (equal expanded string))
+               (try-completion expanded table pred))
+      (cons expanded (+ (- point (length string))
+                        (length expanded))))))
 
 (defun completion-shorthand-all-completions (_string _table _pred _point)
   ;; no-op: For now, we don't want shorthands to list all the possible

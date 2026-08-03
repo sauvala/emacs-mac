@@ -27,6 +27,9 @@ applies, and please also update docstrings as needed.
 
 * Startup Changes in Emacs 32.1
 
+** New terminal type Kmscon.
+Emacs now supports the Kmscon terminal emulator available on GNU/Linux
+systems.
 
 * Changes in Emacs 32.1
 
@@ -1338,6 +1341,11 @@ commands invoked from the menu will operate on the right buffer.
 You can restore the previous behavior by removing
 'mode-line-window-select' from 'x-pre-popup-menu-hook'.
 
+** Minibuffer
+
+---
+*** The variable 'completion-ignore-case' is now customizable.
+
 
 * Editing Changes in Emacs 32.1
 
@@ -1475,6 +1483,13 @@ To install the grammars, use 'M-x markdown-ts-mode-install-parsers'.
 
 * Incompatible Lisp Changes in Emacs 32.1
 
++++
+** 'intern' and 'intern-soft' ignore 'read-symbol-shorthands'.
+This means they revert to the behavior of Emacs<28.
+In those cases where shorthands need to be obeyed, you now need to use
+'shorthands-intern', 'shorthands-intern-soft', or 'shorthands-to-longhand'.
+And 'shorthands-of-symbol' provides the reverse mapping.
+
 ** Pcase
 
 +++
@@ -1513,6 +1528,12 @@ buffer as if it were newly created.
 
 +++
 ** The new function 'markers-in' returns the set of markers in a region.
+
++++
+** New buffer-local variable 'comment-start-line-regexp'.
+Modes that support both line and block comments should set this
+variable to a regexp that matches only the start of line comments, so
+Emacs can distinguish between line and block comments.
 
 ---
 ** New variable 'completion-frontend-properties'.
