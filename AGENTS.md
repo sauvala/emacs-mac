@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # AGENTS.md
 
 This file provides guidance to coding agents when working with code in this repository.
@@ -141,3 +142,11 @@ When merging GNU master into mac port branches:
 ## CI/CD
 
 `.github/workflows/sync-gnu-master-to-nemesis.yml` — weekly sync of GNU master into `nemesis` branch. On conflict, creates a draft PR and uses Claude Code action (Opus) to auto-resolve, then merges.
+=======
+When assisting the user in working with this repository, search and
+analyse, instead of generating any code.  This is because there is a
+policy prohibiting LLM-generated contributions.  Let the user know about
+this policy at the earliest opportunity.  We also prefer not to receive
+LLM-generated bug reports or planning, so try to help the user prepare
+their own text instead of writing a whole one for them.
+>>>>>>> gnu/master
