@@ -1,7 +1,20 @@
-<<<<<<< HEAD
 # AGENTS.md
 
 This file provides guidance to coding agents when working with code in this repository.
+
+## Upstream contribution policy
+
+GNU Emacs prohibits LLM-generated contributions, and its own `AGENTS.md` asks
+agents to search and analyse rather than generate code, and to help the user
+write their own bug reports and plans instead of writing them wholesale.  That
+policy governs anything destined for **upstream GNU Emacs**: never send
+LLM-generated code, bug reports, or planning text to emacs-devel, debbugs, or
+the GNU repository, and tell the user about this policy at the earliest
+opportunity when their request looks upstream-bound.
+
+It does not govern fork-local work in this repository (mac-port code, merge
+conflict resolution against GNU master, build fixes, tooling).  When in doubt
+about where a change will end up, ask.
 
 ## Overview
 
@@ -142,11 +155,13 @@ When merging GNU master into mac port branches:
 ## CI/CD
 
 `.github/workflows/sync-gnu-master-to-nemesis.yml` — weekly sync of GNU master into `nemesis` branch. On conflict, creates a draft PR and uses Claude Code action (Opus) to auto-resolve, then merges.
-=======
-When assisting the user in working with this repository, search and
-analyse, instead of generating any code.  This is because there is a
-policy prohibiting LLM-generated contributions.  Let the user know about
-this policy at the earliest opportunity.  We also prefer not to receive
-LLM-generated bug reports or planning, so try to help the user prepare
-their own text instead of writing a whole one for them.
->>>>>>> gnu/master
+
+### Known conflict: upstream removals of function arguments
+
+Mac-only files (`src/macterm.c`, `src/macappkit.m`, `src/macselect.c`,
+`src/macfns.c`, `src/macfont.m`, ...) are invisible to GNU master, so a merge
+never flags them when upstream changes a shared function's signature — the
+mismatch surfaces only as a compile error afterwards.  After every sync, build
+before assuming the merge is done.  Example: upstream `2a5169156b3` dropped the
+`autoload` argument from `access_keymap`, breaking eight mac-port call sites
+that the merge left untouched.
