@@ -5360,7 +5360,9 @@ The net effect of making this non-nil is that if `quit-restore-window'
 doesn't find a suitable buffer previously shown in the window, it will
 rather try to delete the window (and maybe its frame) than show a buffer
 the window has never shown before."
-  :type 'boolean
+  :type '(choice (const :tag "Switch to previous buffer" nil)
+                 (const :tag "Skip previous buffer" skip-first)
+                 (const :tag "Try to delete window" t))
   :version "31.1"
   :group 'windows)
 
@@ -8084,9 +8086,9 @@ See `other-frame-prefix' for an example of use.")
 
 (defcustom display-buffer-alist nil
   "Alist of user-defined conditional actions for `display-buffer'.
-Its value takes effect before processing the ACTION argument of
-`display-buffer' and before `display-buffer-base-action' and
-`display-buffer-fallback-action', but after
+Its value takes effect before processing `display-buffer-default-alist',
+the ACTION argument of `display-buffer', `display-buffer-base-action'
+and `display-buffer-fallback-action', but after
 `display-buffer-overriding-action', which see.
 
 If non-nil, this is an alist of elements (CONDITION . ACTION),
@@ -8109,6 +8111,21 @@ and adds the associated ACTION to the list of actions it will try."
   :risky t
   :version "24.1"
   :group 'windows)
+
+(defvar display-buffer-default-alist nil
+  "Alist of conditional default actions for `display-buffer'.
+Its value takes effect before processing the ACTION argument of
+`display-buffer' and before `display-buffer-base-action' and
+`display-buffer-fallback-action', but after
+`display-buffer-overriding-action' and `display-buffer-alist', which
+see.
+
+Lisp programs may let-bind this variable to specify conditional actions
+for nested `display-buffer' calls.
+
+If non-nil, this is an alist of elements (CONDITION . ACTION) like
+`display-buffer-alist'.")
+(put 'display-buffer-default-alist 'risky-local-variable t)
 
 (defcustom display-buffer-base-action '(nil . nil)
   "User-specified default action for `display-buffer'.
@@ -8227,14 +8244,15 @@ window.  An action alist is an association list mapping symbols
 to values.  Action functions use the action alist passed to them
 to fine-tune their behaviors.
 
-`display-buffer' builds a list of action functions and an action
-alist by combining any action functions and alists specified by
-`display-buffer-overriding-action', `display-buffer-alist', the
-ACTION argument, `display-buffer-base-action', and
-`display-buffer-fallback-action' (in order).  Then it calls each
-function in the combined function list in turn, passing the
-buffer as the first argument and the combined action alist as the
-second argument, until one of the functions returns non-nil.
+`display-buffer' builds a list of action functions and an action alist
+by combining any action functions and alists specified by
+`display-buffer-overriding-action', `display-buffer-alist',
+`display-buffer-default-alist', the ACTION argument,
+`display-buffer-base-action', and `display-buffer-fallback-action' (in
+order).  Then it calls each function in the combined function list in
+turn, passing the buffer as the first argument and the combined action
+alist as the second argument, until one of the functions returns
+non-nil.
 
 See above for the action functions and the action they try to
 perform.
@@ -8359,9 +8377,9 @@ Action alist entries are:
     selected regardless of which windows were selected afterwards within
     this command.
  `category' -- If the caller of `display-buffer' passes an alist entry
-    `(category . symbol)' in its action argument, then you can match
-    the displayed buffer by using the same category in the condition
-    part of `display-buffer-alist' entries.
+    `(category . symbol)' in its action argument, then you can match the
+    displayed buffer by using the same category in the condition part of
+    `display-buffer-alist' and `display-buffer-default-alist' entries.
  `tab-name' -- If non-nil, specifies the name of the tab in which to
     display the buffer; see `display-buffer-in-new-tab'.
  \\+`tab-group' -- If non-nil, specifies the tab group to use when creating
@@ -8398,6 +8416,9 @@ specified by the ACTION argument."
             (display-buffer-assq-regexp
              buf-name display-buffer-alist action))
            (special-action (display-buffer--special-action buffer))
+           (default-action
+            (display-buffer-assq-regexp
+             buf-name display-buffer-default-alist action))
            ;; Extra actions from the arguments to this function:
            (extra-action
             (cons nil (append (if inhibit-same-window
@@ -8405,9 +8426,9 @@ specified by the ACTION argument."
                               (if frame
                                   `((reusable-frames . ,frame))))))
            ;; Construct action function list and action alist.
-           (actions (list display-buffer-overriding-action
-                          user-action special-action action extra-action
-                          display-buffer-base-action
+           (actions (list display-buffer-overriding-action user-action
+                          special-action default-action action
+                          extra-action display-buffer-base-action
                           display-buffer-fallback-action))
            (functions (apply #'append
                              (mapcar (lambda (x)

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # CLAUDE.md
 
 @AGENTS.md
@@ -107,3 +108,6 @@ When merging GNU master into mac port branches:
 ## CI/CD
 
 `.github/workflows/sync-gnu-master-to-nemesis.yml` — weekly sync of GNU master into `nemesis` branch. On conflict, creates a draft PR and uses Claude Code action (Opus) to auto-resolve, then merges.
+=======
+@AGENTS.md
+>>>>>>> gnu/master
