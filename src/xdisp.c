@@ -10403,6 +10403,8 @@ move_it_in_display_line_to (struct it *it,
   bool saw_smaller_pos = prev_pos < to_charpos;
   bool line_number_pending = false;
   int this_line_subject_to_line_prefix = 0;
+  bool moved_to_next = false;
+  bool saved_start_of_box_run = it->start_of_box_run_p;
 
 #ifdef GLYPH_DEBUG
   /* atx_flag, atpos_flag and wrap_flag are assigned but never used;
@@ -10483,6 +10485,8 @@ move_it_in_display_line_to (struct it *it,
 
   if (IT_CHARPOS (*it) < CHARPOS (this_line_min_pos))
     SET_TEXT_POS (this_line_min_pos, IT_CHARPOS (*it), IT_BYTEPOS (*it));
+
+  saved_start_of_box_run = it->start_of_box_run_p;
 
   while (true)
     {
@@ -10612,7 +10616,11 @@ move_it_in_display_line_to (struct it *it,
 	 line.  */
       x = it->current_x;
 
+      /* We will record the start_of_box_run_p flag to restore it before
+         exiting if we never move from this glyph.  */
+      saved_start_of_box_run = it->start_of_box_run_p;
       PRODUCE_GLYPHS (it);
+      moved_to_next = false;
 
       if (it->area != TEXT_AREA)
 	{
@@ -10620,6 +10628,7 @@ move_it_in_display_line_to (struct it *it,
 	  if (it->method == GET_FROM_BUFFER)
 	    prev_pos = IT_CHARPOS (*it);
 	  set_iterator_to_next (it, true);
+	  moved_to_next = true;
 	  if (IT_CHARPOS (*it) < CHARPOS (this_line_min_pos))
 	    SET_TEXT_POS (this_line_min_pos,
 			  IT_CHARPOS (*it), IT_BYTEPOS (*it));
@@ -10798,6 +10807,7 @@ move_it_in_display_line_to (struct it *it,
 			  if (it->method == GET_FROM_BUFFER)
 			    prev_pos = IT_CHARPOS (*it);
 			  set_iterator_to_next (it, true);
+			  moved_to_next = true;
 			  if (IT_CHARPOS (*it) < CHARPOS (this_line_min_pos))
 			    SET_TEXT_POS (this_line_min_pos,
 					  IT_CHARPOS (*it), IT_BYTEPOS (*it));
@@ -11003,6 +11013,7 @@ move_it_in_display_line_to (struct it *it,
       /* The current display element has been consumed.  Advance to
 	 the next.  */
       set_iterator_to_next (it, true);
+      moved_to_next = true;
 
       /* If IT has just finished producing glyphs for the wrap prefix
 	 and is proceeding to the next method, there might not be
@@ -11132,6 +11143,13 @@ move_it_in_display_line_to (struct it *it,
     bidi_unshelve_cache (wrap_data, true);
   if (ppos_data)
     bidi_unshelve_cache (ppos_data, true);
+
+  /* Restore the start_of_box_run_p flag, if we haven't moved from the
+     position where it might have been set by get_next_display_element.
+     This is so the following iteration picks up this flag instead of
+     losing it (because PRODUCE_GLYPHS resets it).   */
+  if (!moved_to_next)
+    it->start_of_box_run_p = saved_start_of_box_run;
 
   /* Restore the iterator settings altered at the beginning of this
      function.  */
@@ -11665,10 +11683,18 @@ move_it_vertically_backward (struct it *it, int dy)
      y-distance.  */
   SAVE_IT (it2, *it, it2data);
   it2.max_ascent = it2.max_descent = 0;
+  ptrdiff_t to_pos = start_pos;
   do
     {
-      move_it_to (&it2, start_pos, -1, -1, it2.vpos + 1,
-		  MOVE_TO_POS | MOVE_TO_VPOS);
+      move_it_to (&it2, to_pos, -1, -1, it2.vpos + 1,
+		  (to_pos > 0
+		    ? (MOVE_TO_POS | MOVE_TO_VPOS)
+		   : MOVE_TO_VPOS));
+      /* Avoid inflooping of there's a large display string with several
+         embedded newlines, which makes move_it_to stop after START_POS
+         but still inside a display or overlay string.  */
+      if (IT_CHARPOS (it2) >= start_pos)
+	to_pos = -1;
     }
   while (!(IT_POS_VALID_AFTER_MOVE_P (&it2)
 	   /* If we are in a display string which starts at START_POS,
@@ -33756,6 +33782,82 @@ append_stretch_glyph (struct it *it, Lisp_Object object,
     }
   else
     IT_EXPAND_MATRIX_WIDTH (it, area);
+}
+
+static void
+redraw_image_glyphs_window (struct window *w, Lisp_Object spec)
+{
+  if (w->current_matrix == NULL)
+    return;
+
+  struct frame* f = WINDOW_XFRAME (w);
+
+  if (w->must_be_updated_p)
+    {
+      SET_FRAME_GARBAGED (f);
+      return;
+    }
+
+  for (int area = LEFT_MARGIN_AREA; area < LAST_AREA; ++area)
+    {
+      for (int y = 0; y < w->current_matrix->nrows; ++y)
+	{
+	  struct glyph_row *row = w->current_matrix->rows + y;
+	  if (row->enabled_p)
+	    {
+	      int pos_x = area == TEXT_AREA ? row->x : 0;
+	      for (int x = 0; x < row->used[area]; ++x)
+		{
+		  struct glyph *glyph = row->glyphs[area] + x;
+		  if (glyph->type == IMAGE_GLYPH)
+		    {
+		      struct image* img =
+			IMAGE_OPT_FROM_ID (f, glyph->u.img_id);
+		      if (img && EQ (img->spec, spec))
+			{
+			  prepare_image_for_display (f, img);
+			  draw_glyphs (w, pos_x, row, area, x, x + 1,
+				       DRAW_NORMAL_TEXT, 0);
+			}
+		    }
+		  pos_x += glyph->pixel_width;
+		}
+	    }
+	}
+    }
+}
+
+static void
+redraw_image_glyphs_window_tree (struct window *w, Lisp_Object spec)
+{
+  while (w)
+    {
+      if (WINDOWP (w->contents))
+	redraw_image_glyphs_window_tree (XWINDOW (w->contents), spec);
+      else
+	redraw_image_glyphs_window (w, spec);
+      w = NILP (w->next) ? NULL : XWINDOW (w->next);
+    }
+}
+
+/* redraw_image_glyphs: Redraw only the image glyphs.  Image redrawing is similar to the
+   handling of Expose or GraphicsExpose events in xterm.c.
+   GraphicsExpose event
+      -> expose_frame -> expose_window_tree -> expose_window
+      -> expose_line -> expose_area -> draw_glyphs */
+
+void
+redraw_image_glyphs (Lisp_Object spec)
+{
+  Lisp_Object tail, frame;
+  FOR_EACH_FRAME (tail, frame)
+    {
+      /* When the frame is garbaged, wait for full redisplay.  Only use
+         the fast path when the frame is in a consistent state.  */
+      struct frame* f = XFRAME (frame);
+      if (!FRAME_GARBAGED_P (f))
+        redraw_image_glyphs_window_tree (XWINDOW (f->root_window), spec);
+    }
 }
 
 #endif	/* HAVE_WINDOW_SYSTEM */
