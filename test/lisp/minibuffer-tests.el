@@ -371,7 +371,7 @@
   ;; sequence of delimiters.
   (should (equal (completion-pcm-try-completion
                   "-x" '("-_.x" "-__x") nil 2)
-                 '("-_x" . 3))))
+                 '("-_x" . 2))))
 
 (ert-deftest completion-pcm-test-pattern->regex ()
   (should (equal (completion-pcm--pattern->regex
@@ -474,7 +474,7 @@
   ;; prefix is also a common suffix, it should be included.
   (should (equal
            (completion-pcm--merge-try '(prefix "b") '("ab" "sab") "" "")
-           '("ab" . 2)))
+           '("ab" . 0)))
   (should (equal
            (completion-pcm--merge-try '(prefix "b") '("ab" "ab") "" "")
            '("ab" . 2)))
@@ -482,16 +482,16 @@
   ;; should always be included.
   (should (equal
            (completion-pcm--merge-try '("a" prefix "b") '("axb" "ayb") "" "")
-           '("ab" . 2)))
+           '("ab" . 1)))
   ;; Letter-casing from the completions on the common prefix is still applied.
   (should (equal
            (let ((completion-ignore-case t))
              (completion-pcm--merge-try '("a" prefix "b") '("Axb" "Ayb") "" ""))
-           '("Ab" . 2)))
+           '("Ab" . 1)))
   (should (equal
            (let ((completion-ignore-case t))
              (completion-pcm--merge-try '("a" prefix "b") '("AAxb" "AAyb") "" ""))
-           '("Ab" . 2)))
+           '("Ab" . 1)))
   ;; substring completion should successfully complete the entire string
   (should (equal
            (completion-substring-try-completion "b" '("ab" "ab") nil 0)
@@ -638,6 +638,39 @@
                    (not (eq (current-buffer) (get-buffer "*Completions*")))))
       (execute-kbd-macro (kbd "TAB TAB"))
       (should (eq (current-buffer) (get-buffer "*Completions*"))))))
+
+(ert-deftest completion-auto-select-test-bug81635 ()
+  (let ((completion-auto-select t)
+        (completion-auto-wrap t))
+    (completing-read-with-minibuffer-setup
+        '("aa" "ab" "ac")
+      (cl-flet ((selected ()
+                  (and (eq (current-buffer) (get-buffer "*Completions*"))
+                       (get-text-property (point) 'completion--string))))
+        ;; TAB cycles forward through all candidates, then to the
+        ;; minibuffer, then back to the first candidate.
+        (execute-kbd-macro (kbd "a TAB"))
+        (should (equal (selected) "aa"))
+        (execute-kbd-macro (kbd "TAB"))
+        (should (equal (selected) "ab"))
+        (execute-kbd-macro (kbd "TAB"))
+        (should (equal (selected) "ac"))
+        (execute-kbd-macro (kbd "TAB"))
+        (should (minibufferp))
+        (execute-kbd-macro (kbd "TAB"))
+        (should (equal (selected) "aa"))
+        (execute-kbd-macro (kbd "TAB"))
+        (should (equal (selected) "ab"))
+        ;; S-TAB cycles backward, then to the minibuffer, then to the
+        ;; last candidate.
+        (execute-kbd-macro (kbd "<backtab>"))
+        (should (equal (selected) "aa"))
+        (execute-kbd-macro (kbd "<backtab>"))
+        (should (minibufferp))
+        (execute-kbd-macro (kbd "<backtab>"))
+        (should (equal (selected) "ac"))
+        (execute-kbd-macro (kbd "<backtab>"))
+        (should (equal (selected) "ab"))))))
 
 (ert-deftest completion-auto-wrap-test ()
   (let ((completion-auto-wrap nil))
