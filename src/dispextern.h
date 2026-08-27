@@ -3298,15 +3298,12 @@ struct image
      valid, respectively. */
   bool_bf background_valid : 1, background_transparent_valid : 1;
 
-<<<<<<< HEAD
 #ifdef HAVE_MACGUI
   /* Target backing scale factor (<= 2) that this image is dedicated
      to.  0 means it is not dedicated to any particular one.  */
   unsigned target_backing_scale : 2;
 #endif
 
-  /* Width and height of the image.  */
-=======
   /* Refresh counter reflecting the current version of the image.
      Always larger than zero for images which may need refreshing.
      Right now it is only used by canvas images.  */
@@ -3318,7 +3315,6 @@ struct image
 
   /* Width and height of the image.  These values depend on
      the :scale or :rotation image parameters.  */
->>>>>>> gnu/master
   int width, height;
 
   /* The scale factor applied to the image.  */
