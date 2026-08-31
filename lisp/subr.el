@@ -193,10 +193,7 @@ In some corner cases you may need to resort to
       ;; Can't use backquote here, it's too early in the bootstrap.
       (setq expr
             (cons
-             (list 'setq (car pairs)
-                   (list 'prog1
-                    (car (cdr pairs))
-                    (list 'make-local-variable (list 'quote (car pairs)))))
+             (list 'set-local (list 'quote (car pairs)) (car (cdr pairs)))
              expr))
       (setq pairs (cdr (cdr pairs))))
     (macroexp-progn (nreverse expr))))
@@ -6558,7 +6555,10 @@ If POS is outside the buffer's accessible portion, return nil."
     (let ((st (if parse-sexp-lookup-properties
 		  (get-char-property pos 'syntax-table))))
       (if (consp st) st
-	(aref (or st (syntax-table)) (char-after pos))))))
+	(let ((c (char-after pos)))
+	  (aref (or st (syntax-table))
+	        (if enable-multibyte-characters
+	            c (unibyte-char-to-multibyte c))))))))
 
 (defun syntax-class (syntax)
   "Return the code for the syntax class described by SYNTAX.
