@@ -87,42 +87,19 @@ static NodePair split_internal(Node *node, size_t offset) {
     size_t local_offset = offset - consumed;
     NodePair child_pair = node_split_at(node->as.internal.children[split_idx], local_offset);
 
-    /* Build left: children [0..split_idx-1] + child_pair.left */
-    Node *left = node_new_internal(node->height);
-    if (left) {
-        for (uint8_t i = 0; i < split_idx; ++i) {
-            left->as.internal.children[left->count] = node->as.internal.children[i];
-            left->count++;
-        }
-        if (!node_is_empty(child_pair.left)) {
-            left->as.internal.children[left->count] = child_pair.left;
-            left->count++;
-        } else {
-            node_free(child_pair.left);
-        }
-        node_refresh_summary(left);
-    }
+    /* Join the surviving subtrees rather than retaining the old height.
+       A split can leave only one child at several levels.  Keeping those
+       shells lets repeated edits grow the tree independently of its size.  */
+    Node *left = child_pair.left;
+    for (int i = split_idx - 1; i >= 0; --i)
+        left = node_concat(node->as.internal.children[i], left);
+    Node *right = child_pair.right;
+    for (int i = split_idx + 1; i < node->count; ++i)
+        right = node_concat(right, node->as.internal.children[i]);
 
-    /* Build right: child_pair.right + children [split_idx+1..count-1] */
-    Node *right = node_new_internal(node->height);
-    if (right) {
-        if (!node_is_empty(child_pair.right)) {
-            right->as.internal.children[right->count] = child_pair.right;
-            right->count++;
-        } else {
-            node_free(child_pair.right);
-        }
-        for (uint8_t i = split_idx + 1; i < node->count; ++i) {
-            right->as.internal.children[right->count] = node->as.internal.children[i];
-            right->count++;
-        }
-        node_refresh_summary(right);
-    }
-
-    /* Free the original node shell (children have been distributed) */
     node->count = 0;
     free(node);
-    return (NodePair){left ? left : node_new_leaf(), right ? right : node_new_leaf()};
+    return (NodePair){left, right};
 }
 
 NodePair node_split_at(Node *node, size_t offset) {
@@ -174,6 +151,36 @@ static Node *merge_same_height(Node *left, Node *right) {
         return left;
     }
 
+    /* Redistribute before making these roots into children.  Either root
+       may have fewer than MIN_CHILDREN entries after a split.  */
+    const uint8_t mid = total / 2;
+    if (h == 0) {
+        Chunk items[2 * MAX_CHILDREN];
+        memcpy(items, left->as.leaf.items, left->count * sizeof *items);
+        memcpy(items + left->count, right->as.leaf.items,
+               right->count * sizeof *items);
+        memcpy(left->as.leaf.items, items, mid * sizeof *items);
+        memcpy(right->as.leaf.items, items + mid, (total - mid) * sizeof *items);
+        left->count = mid;
+        right->count = total - mid;
+        for (int i = 0; i < left->count; ++i)
+            left->as.leaf.item_summaries[i] = chunk_summary(&left->as.leaf.items[i], 0);
+        for (int i = 0; i < right->count; ++i)
+            right->as.leaf.item_summaries[i] = chunk_summary(&right->as.leaf.items[i], 0);
+    } else {
+        Node *children[2 * MAX_CHILDREN];
+        memcpy(children, left->as.internal.children, left->count * sizeof *children);
+        memcpy(children + left->count, right->as.internal.children,
+               right->count * sizeof *children);
+        memcpy(left->as.internal.children, children, mid * sizeof *children);
+        memcpy(right->as.internal.children, children + mid,
+               (total - mid) * sizeof *children);
+        left->count = mid;
+        right->count = total - mid;
+    }
+    node_refresh_summary(left);
+    node_refresh_summary(right);
+
     /* Can't merge, wrap in a new parent */
     Node *parent = node_new_internal(h + 1);
     if (!parent) {
@@ -192,43 +199,6 @@ static Node *merge_same_height(Node *left, Node *right) {
  * tall->height > short_node->height. Consumes both.
  */
 static Node *concat_graft_right(Node *tall, Node *short_node) {
-    if (tall->height == short_node->height + 1) {
-        /* This is the level where short_node should be inserted */
-        if (tall->count < MAX_CHILDREN) {
-            tall->as.internal.children[tall->count] = short_node;
-            tall->count++;
-            node_refresh_summary(tall);
-            return tall;
-        }
-        /* Full: split tall, put overflow into a new parent */
-        Node *sibling = node_new_internal(tall->height);
-        if (!sibling) {
-            node_free(short_node);
-            return tall;
-        }
-        uint8_t mid = tall->count / 2;
-        for (uint8_t i = mid; i < tall->count; ++i) {
-            sibling->as.internal.children[sibling->count] = tall->as.internal.children[i];
-            sibling->count++;
-        }
-        sibling->as.internal.children[sibling->count] = short_node;
-        sibling->count++;
-        tall->count = mid;
-        node_refresh_summary(tall);
-        node_refresh_summary(sibling);
-
-        Node *parent = node_new_internal(tall->height + 1);
-        if (!parent) {
-            node_free(sibling);
-            return tall;
-        }
-        parent->as.internal.children[0] = tall;
-        parent->as.internal.children[1] = sibling;
-        parent->count = 2;
-        node_refresh_summary(parent);
-        return parent;
-    }
-
     /* Recurse into rightmost child */
     uint8_t last = tall->count - 1;
     uint8_t orig_height = tall->as.internal.children[last]->height;
@@ -289,50 +259,6 @@ static Node *concat_graft_right(Node *tall, Node *short_node) {
  * Mirror of concat_graft_right.
  */
 static Node *concat_graft_left(Node *tall, Node *short_node) {
-    if (tall->height == short_node->height + 1) {
-        if (tall->count < MAX_CHILDREN) {
-            /* Shift children right and insert at position 0 */
-            for (uint8_t i = tall->count; i > 0; --i) {
-                tall->as.internal.children[i] = tall->as.internal.children[i - 1];
-            }
-            tall->as.internal.children[0] = short_node;
-            tall->count++;
-            node_refresh_summary(tall);
-            return tall;
-        }
-        Node *sibling = node_new_internal(tall->height);
-        if (!sibling) {
-            node_free(short_node);
-            return tall;
-        }
-        sibling->as.internal.children[0] = short_node;
-        sibling->count = 1;
-        uint8_t mid = tall->count / 2;
-        for (uint8_t i = 0; i < mid; ++i) {
-            sibling->as.internal.children[sibling->count] = tall->as.internal.children[i];
-            sibling->count++;
-        }
-        /* Shift remaining children in tall to the front */
-        uint8_t new_count = tall->count - mid;
-        for (uint8_t i = 0; i < new_count; ++i) {
-            tall->as.internal.children[i] = tall->as.internal.children[mid + i];
-        }
-        tall->count = new_count;
-        node_refresh_summary(tall);
-        node_refresh_summary(sibling);
-
-        Node *parent = node_new_internal(tall->height + 1);
-        if (!parent) {
-            node_free(sibling);
-            return tall;
-        }
-        parent->as.internal.children[0] = sibling;
-        parent->as.internal.children[1] = tall;
-        parent->count = 2;
-        node_refresh_summary(parent);
-        return parent;
-    }
-
     /* Recurse into leftmost child */
     uint8_t orig_height = tall->as.internal.children[0]->height;
     Node *merged = node_concat(short_node, tall->as.internal.children[0]);

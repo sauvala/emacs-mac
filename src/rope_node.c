@@ -155,7 +155,9 @@ static Node **build_leaf_level(Chunk *chunks, TextSummary *summaries, size_t chu
             return NULL;
         }
 
-        while (chunk_ix < chunks_len && leaf->count < MAX_CHILDREN) {
+        /* Distribute the remainder instead of leaving an underfull last leaf.  */
+        size_t count = chunks_len / leaf_count + (i < chunks_len % leaf_count);
+        while (leaf->count < count) {
             const uint8_t slot = leaf->count++;
             leaf->as.leaf.items[slot] = chunks[chunk_ix];
             leaf->as.leaf.item_summaries[slot] = summaries[chunk_ix];
@@ -202,7 +204,8 @@ static Node **build_next_level(Node **children, size_t children_len, size_t *out
             return NULL;
         }
 
-        while (child_ix < children_len && parent->count < MAX_CHILDREN) {
+        size_t count = children_len / parents_len + (i < children_len % parents_len);
+        while (parent->count < count) {
             const uint8_t slot = parent->count++;
             parent->as.internal.children[slot] = children[child_ix];
             parent->as.internal.child_summaries[slot] = node_summary(children[child_ix]);
