@@ -2789,62 +2789,21 @@ current buffer is cleared.  */)
 #ifdef USE_ROPE
   if (current_buffer->text->using_rope)
     {
-      /* Rope buffers can't be modified in place.  Extract
-	 content, convert, and re-insert.  */
-      ptrdiff_t old_pt = PT;
-      Lisp_Object str = make_buffer_string_both (BEG, BEG_BYTE,
-						 Z, Z_BYTE, 0);
-
-      if (NILP (flag))
-	{
-	  /* Multibyte -> Unibyte.  */
-	  str = Fstring_to_unibyte (str);
-
-	  set_intervals_multibyte (false);
-	  set_overlays_multibyte (false);
-
-	  /* Delete all content and switch to unibyte.  */
-	  del_range_2 (BEG, BEG_BYTE, Z, Z_BYTE, 0);
-	  bset_enable_multibyte_characters (current_buffer, Qnil);
-
-	  /* Re-insert converted content.  */
-	  insert_from_string (str, 0, 0,
-			      SCHARS (str), SBYTES (str), 0);
-
-	  /* In unibyte, charpos == bytepos.  */
-	  Z = Z_BYTE;
-	  BEGV = BEGV_BYTE;
-	  ZV = ZV_BYTE;
-	  GPT = GPT_BYTE;
-	  if (old_pt <= Z)
-	    TEMP_SET_PT_BOTH (old_pt, old_pt);
-	  else
-	    TEMP_SET_PT_BOTH (Z, Z_BYTE);
-
-	  for (tail = BUF_MARKERS (current_buffer); tail; tail = tail->next)
-	    tail->charpos = tail->bytepos;
-	}
-      else
-	{
-	  /* Unibyte -> Multibyte.  */
-	  str = Fstring_to_multibyte (str);
-
-	  del_range_2 (BEG, BEG_BYTE, Z, Z_BYTE, 0);
-	  bset_enable_multibyte_characters (current_buffer, Qt);
-
-	  insert_from_string (str, 0, 0,
-			      SCHARS (str), SBYTES (str), 0);
-
-	  if (old_pt <= Z)
-	    TEMP_SET_PT_BOTH (old_pt, CHAR_TO_BYTE (old_pt));
-	  else
-	    TEMP_SET_PT_BOTH (Z, Z_BYTE);
-
-	  for (tail = BUF_MARKERS (current_buffer); tail; tail = tail->next)
-	    if (tail->bytepos > Z_BYTE)
-	      tail->bytepos = Z_BYTE;
-	}
-      goto rope_done;
+      /* Materialize the existing bytes without editing the buffer.  Use
+         the normal conversion below to preserve properties, markers,
+         overlays and the semantics of FLAG, including `to'.  Unibyte
+         storage uses the gap backend, since rope summaries count encoded
+         characters rather than arbitrary bytes.  Allocate before changing
+         storage so allocation failure leaves the text intact.  */
+      enlarge_buffer_text (current_buffer, 0);
+      rope_get_text_emacs (BEG_BYTE, Z_BYTE - BEG_BYTE,
+                          (char *) BEG_ADDR);
+      GPT = Z;
+      GPT_BYTE = Z_BYTE;
+      BEG_ADDR[Z_BYTE - BEG_BYTE] = 0;
+      BEG_ADDR[Z_BYTE - BEG_BYTE + GAP_SIZE] = 0;
+      rope_invalidate_cache ();
+      buffer_destroy_rope (current_buffer);
     }
 #endif
 
@@ -3047,9 +3006,6 @@ current buffer is cleared.  */)
       set_overlays_multibyte (true);
     }
 
-#ifdef USE_ROPE
- rope_done:
-#endif
 
   if (!EQ (old_undo, Qt))
     {

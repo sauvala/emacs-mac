@@ -300,22 +300,37 @@
       ;; Should have 3 lines (3 newlines).
       (should (= (car stats) 3)))))
 
-(ert-deftest rope-test-invalid-byte-insert-does-not-corrupt-buffer ()
-  "A rejected rope insertion must leave buffer state unchanged."
+(ert-deftest rope-test-multibyte-conversion-preserves-state ()
+  "Changing representation must preserve markers, overlays and properties."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (dolist (text '("hello" "aé😀z"))
+    (let (results)
+      (dolist (rope '(nil t))
+        (with-temp-buffer
+          (when rope (buffer-enable-rope))
+          (insert text)
+          (put-text-property 2 3 'test-property 'value)
+          (goto-char 3)
+          (let ((marker (copy-marker 3))
+                (overlay (make-overlay 2 4)))
+            (set-buffer-multibyte nil)
+            (push (list (buffer-string) (point) (marker-position marker)
+                        (overlay-start overlay) (overlay-end overlay)) results)
+            (set-buffer-multibyte t)
+            (push (list (buffer-string) (point) (marker-position marker)
+                        (overlay-start overlay) (overlay-end overlay)) results))))
+      (should (equal (nth 0 results) (nth 2 results)))
+      (should (equal (nth 1 results) (nth 3 results))))))
+
+(ert-deftest rope-test-unibyte-conversion-allows-binary-data ()
+  "A converted rope buffer must accept arbitrary unibyte data."
   (skip-unless (fboundp 'buffer-enable-rope))
   (with-temp-buffer
     (buffer-enable-rope)
+    (insert "hello")
     (set-buffer-multibyte nil)
-    (let ((before (list (buffer-string)
-                        (point-min) (point-max)
-                        (position-bytes (point-min))
-                        (position-bytes (point-max)))))
-      (should-error (insert (unibyte-string #xff)))
-      (should (equal (list (buffer-string)
-                           (point-min) (point-max)
-                           (position-bytes (point-min))
-                           (position-bytes (point-max)))
-                     before)))))
+    (insert (unibyte-string #xff))
+    (should (equal (buffer-string) (concat "hello" (unibyte-string #xff))))))
 
 (ert-deftest rope-test-search-quit-restores-rope-state ()
   "Plain string search must restore rope state after a quit."
