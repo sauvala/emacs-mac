@@ -361,3 +361,31 @@
 
 (provide 'rope-tests)
 ;;; rope-tests.el ends here
+
+(ert-deftest rope-test-emacs-internal-characters ()
+  "Ropes must accept Emacs characters outside standard UTF-8."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (let ((text (apply #'string '(#x80 #xff #xd800 #xffff #x10000 #x10ffff
+                               #x110000 #x1fffff #x200000 #x3fff7f
+                               #x3fff80 #x3fffff))))
+    (with-temp-buffer
+      (buffer-enable-rope)
+      ;; Cross chunk boundaries as well as exercising each encoding.
+      (dotimes (_ 40) (insert text))
+      (should (equal (buffer-string) (apply #'concat (make-list 40 text))))
+      (dotimes (i (length text))
+        (should (= (char-after (+ 1 i)) (aref text i)))
+        (should (= (position-bytes (+ 1 i))
+                   (1+ (string-bytes (substring text 0 i))))))
+      (delete-region 2 (+ 2 (length text)))
+      (should (= (buffer-size) (* 39 (length text)))))))
+
+(ert-deftest rope-test-enable-on-unibyte-buffer ()
+  "Unibyte buffers should retain byte-oriented gap storage."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (should-not (buffer-enable-rope))
+    (insert (unibyte-string #x80 #xff #xc3 #xa9))
+    (should (= (buffer-size) 4))
+    (should (= (char-after 4) #xa9))))

@@ -62,19 +62,10 @@ TextSummary summary_from_bytes(const char *text, size_t len, size_t row_base) {
             break;
         }
 
-        const uint32_t codepoint =
-            cp_len == 1 ? b :
-            cp_len == 2 ? ((b & 0x1Fu) << 6u) | ((unsigned char)text[i + 1] & 0x3Fu) :
-            cp_len == 3 ? ((b & 0x0Fu) << 12u) | (((unsigned char)text[i + 1] & 0x3Fu) << 6u) |
-                              ((unsigned char)text[i + 2] & 0x3Fu) :
-                          ((b & 0x07u) << 18u) | (((unsigned char)text[i + 1] & 0x3Fu) << 12u) |
-                              (((unsigned char)text[i + 2] & 0x3Fu) << 6u) |
-                              ((unsigned char)text[i + 3] & 0x3Fu);
-
         out.chars += 1;
-        out.chars_utf16 += (codepoint > 0xFFFFu) ? 2 : 1;
+        out.chars_utf16 += (cp_len >= 4) ? 2 : 1;
 
-        if (codepoint == '\n') {
+        if (b == '\n') {
             if (!saw_newline) {
                 out.first_line_chars = current_line_chars;
             }

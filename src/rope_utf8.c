@@ -20,6 +20,9 @@ size_t utf8_next_len(unsigned char first_byte) {
     if ((first_byte & 0xF8u) == 0xF0u) {
         return 4;
     }
+    if (first_byte == 0xF8) {
+        return 5;
+    }
     return 0;
 }
 
@@ -46,25 +49,17 @@ bool utf8_validate(const char *text, size_t len) {
             }
         }
 
-        if (n == 2) {
-            const uint32_t cp = ((b & 0x1Fu) << 6u) | ((unsigned char)text[i + 1] & 0x3Fu);
-            if (cp < 0x80u) {
-                return false;
-            }
-        } else if (n == 3) {
-            const uint32_t cp = ((b & 0x0Fu) << 12u) | (((unsigned char)text[i + 1] & 0x3Fu) << 6u) |
-                                ((unsigned char)text[i + 2] & 0x3Fu);
-            if (cp < 0x800u || (cp >= 0xD800u && cp <= 0xDFFFu)) {
-                return false;
-            }
-        } else {
-            const uint32_t cp = ((b & 0x07u) << 18u) | (((unsigned char)text[i + 1] & 0x3Fu) << 12u) |
-                                (((unsigned char)text[i + 2] & 0x3Fu) << 6u) |
-                                ((unsigned char)text[i + 3] & 0x3Fu);
-            if (cp < 0x10000u || cp > 0x10FFFFu) {
-                return false;
-            }
-        }
+        /* Emacs's internal encoding extends UTF-8: C0/C1 encode raw
+           eight-bit characters, surrogates are allowed, and F0..F8
+           cover character codes through 0x3fff7f (see character.h).  */
+        uint32_t cp = b & (n == 2 ? 0x1f : n == 3 ? 0x0f : n == 4 ? 0x07 : 0);
+        for (size_t k = 1; k < n; ++k)
+            cp = (cp << 6) | ((unsigned char)text[i + k] & 0x3f);
+        if ((n == 2 && b >= 0xc2 && cp < 0x80)
+            || (n == 3 && cp < 0x800)
+            || (n == 4 && cp < 0x10000)
+            || (n == 5 && (cp < 0x200000 || cp > 0x3fff7f)))
+            return false;
 
         i += n;
     }
@@ -92,7 +87,7 @@ size_t utf8_count_utf16(const char *text, size_t len) {
         if (n == 0 || i + n > len) {
             break;
         }
-        if (n == 4) {
+        if (n >= 4) {
             count += 2;
         } else {
             count += 1;

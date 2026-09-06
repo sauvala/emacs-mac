@@ -215,18 +215,19 @@ size_t chunk_byte_to_utf16(const Chunk *chunk, size_t byte_offset) {
         byte_offset = chunk->len;
     }
     /* Each character boundary in [0, byte_offset) is one UTF-16 code unit,
-     * except 4-byte sequences which produce 2 UTF-16 code units (surrogates).
+     * except 4/5-byte sequences, which count as two units.  The latter
+     * include Emacs extended characters, which have no Unicode encoding.
      * So: utf16_count = num_chars + num_4byte_chars
-     * A 4-byte UTF-8 char has a leading byte 0xF0-0xF4 (11110xxx). */
+     * Raw eight-bit characters encoded with C0/C1 count as one unit. */
     const rope_u128 mask = lower_mask(byte_offset);
     const size_t char_count = popcount_u128(chunk->chars & mask);
 
-    /* Count 4-byte lead bytes (0xF0-0xF4: bits 11110xxx) */
+    /* Count extended lead bytes (F0..F8).  */
     size_t four_byte_count = 0;
     rope_u128 boundaries = chunk->chars & mask;
     while (boundaries != 0) {
         const size_t idx = ctz_u128(boundaries);
-        if (((unsigned char)chunk->text[idx] & 0xF8) == 0xF0) {
+        if (utf8_next_len((unsigned char)chunk->text[idx]) >= 4) {
             four_byte_count++;
         }
         boundaries &= boundaries - 1;

@@ -3129,8 +3129,9 @@ DEFUN ("buffer-enable-rope", Fbuffer_enable_rope,
        doc: /* Enable rope storage for BUFFER.
 BUFFER defaults to the current buffer.  The buffer must be empty.
 This is an experimental feature for testing.
-Return t on success, nil if the buffer is not empty or already using
-rope.  */)
+Unibyte buffers retain gap storage.
+Return t on success, nil if the buffer is unibyte or already using
+rope.  Signal an error if the buffer is not empty.  */)
   (Lisp_Object buffer)
 {
   struct buffer *b;
@@ -3149,6 +3150,10 @@ rope.  */)
   /* Buffer must be empty for now.  */
   if (BUF_Z (b) > BUF_BEG (b))
     error ("Cannot enable rope on non-empty buffer");
+
+  /* Rope character summaries require Emacs's multibyte encoding.  */
+  if (NILP (BVAR (b, enable_multibyte_characters)))
+    return Qnil;
 
   /* Create an empty rope.  */
   buffer_create_rope (b, NULL, 0);
