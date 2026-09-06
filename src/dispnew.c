@@ -866,6 +866,8 @@ clear_window_matrices (struct window *w, bool desired_p)
 	  else
 	    {
 	      clear_glyph_matrix (w->current_matrix);
+	      /* Invalidating the current matrix invalidates visual line starts.  */
+	      w->wrap_cache.count = 0;
 	      w->window_end_valid = 0;
 	    }
 	}

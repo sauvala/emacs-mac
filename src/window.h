@@ -494,7 +494,9 @@ struct window
       int *cont_width;          /* continuation_lines_width at each start.  */
       ptrdiff_t count;          /* Number of entries.  */
       ptrdiff_t capacity;       /* Allocated capacity.  */
-      ptrdiff_t line_beg;       /* Logical line start this cache covers.  */
+      /* Non-owning identity; wset_buffer clears the cache on reassignment.  */
+      struct buffer *buffer;
+      ptrdiff_t begv, zv;       /* Accessible range when built.  */
       int window_body_width;    /* Window pixel width when cache was built.  */
       modiff_count modiff;      /* Buffer modiff when built.  */
       modiff_count overlay_modiff; /* Overlay modiff when built.  */

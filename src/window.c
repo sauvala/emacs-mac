@@ -298,6 +298,8 @@ adjust_window_count (struct window *w, int arg)
 void
 wset_buffer (struct window *w, Lisp_Object val)
 {
+  /* Modification counters are only meaningful within the same buffer.  */
+  w->wrap_cache.count = 0;
   adjust_window_count (w, -1);
   if (BUFFERP (val))
     /* Make sure that we do not assign the buffer

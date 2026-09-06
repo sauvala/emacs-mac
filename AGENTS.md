@@ -107,6 +107,22 @@ the tests.  (Installing coreutils and setting `insert-directory-program` to
 `gls` is a reasonable *interactive* preference, but it is unrelated to the
 suite.)
 
+### Standalone regression checks
+
+These focused checks do not require a completed Emacs executable:
+
+```bash
+sh test/manual/rope/check.sh             # rope edits and invariants; ASan/UBSan
+sh test/manual/macmetal/check.sh         # offscreen Metal blending; macOS GPU
+python3 test/manual/wrap-cache/check.py  # cache validity and lifecycle; ASan/UBSan
+```
+
+The Metal check needs a visible Metal GPU and may exit 77 when no device is
+available; treat that result as an environment skip.  The wrap-cache check
+compiles extracted production function bodies with a small fixture, so it does
+not replace live GUI scrolling or redisplay testing.  The scripts use `cc`
+(`clang` for Metal) by default and honor `CC` when set.
+
 ## Mac Port Architecture
 
 ### Preprocessor Guards

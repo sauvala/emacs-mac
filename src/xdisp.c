@@ -3854,17 +3854,44 @@ static bool
 wrap_cache_valid_p (struct window *w, struct buffer *buf)
 {
   return (w->wrap_cache.count > 0
+          && w->wrap_cache.buffer == buf
+          && w->wrap_cache.begv == BUF_BEGV (buf)
+          && w->wrap_cache.zv == BUF_ZV (buf)
+          && !buf->prevent_redisplay_optimizations_p
+          && !face_change && !XFRAME (w->frame)->face_change
 	  && w->wrap_cache.modiff == BUF_MODIFF (buf)
 	  && w->wrap_cache.overlay_modiff == BUF_OVERLAY_MODIFF (buf)
-	  && w->wrap_cache.window_body_width == window_body_width (w, true));
+          && w->wrap_cache.window_body_width == window_body_width (w, true));
 }
 
-/* Invalidate (clear) W's wrap cache.  */
+/* Invalidate BUF's wrap caches in the window tree rooted at W.  */
 
 static void
-wrap_cache_invalidate (struct window *w)
+invalidate_wrap_caches_in_window_tree (struct window *w, struct buffer *buf)
 {
-  w->wrap_cache.count = 0;
+  while (w)
+    {
+      if (WINDOWP (w->contents))
+	invalidate_wrap_caches_in_window_tree (XWINDOW (w->contents), buf);
+      else if (BUFFERP (w->contents) && XBUFFER (w->contents) == buf)
+	w->wrap_cache.count = 0;
+
+      w = NILP (w->next) ? 0 : XWINDOW (w->next);
+    }
+}
+
+/* The redisplay-prevention flag is shared across frames.  Clear caches
+   even on frames that did not take part in the completed redisplay.  */
+
+static void
+invalidate_wrap_caches_for_buffer (struct buffer *buf)
+{
+  Lisp_Object tail, frame;
+
+  FOR_EACH_FRAME (tail, frame)
+    if (!NILP (XFRAME (frame)->root_window))
+      invalidate_wrap_caches_in_window_tree
+        (XWINDOW (XFRAME (frame)->root_window), buf);
 }
 
 /* Record a visual line start position in W's wrap cache.
@@ -3880,22 +3907,28 @@ wrap_cache_record (struct window *w, struct glyph_row *row)
   int cont_width = row->continuation_lines_width;
   struct buffer *buf = XBUFFER (w->contents);
 
-  /* If the cache is stale, start fresh.  */
-  if (w->wrap_cache.count > 0
-      && (w->wrap_cache.modiff != BUF_MODIFF (buf)
-	  || w->wrap_cache.overlay_modiff != BUF_OVERLAY_MODIFF (buf)
-	  || w->wrap_cache.window_body_width != window_body_width (w, true)))
+  /* Do not retain a partial cache while redisplay shortcuts are disabled.
+     The cache can be rebuilt on the next accurate redisplay.  */
+  if (buf->prevent_redisplay_optimizations_p
+      || face_change || XFRAME (w->frame)->face_change)
+    {
+      w->wrap_cache.count = 0;
+      return;
+    }
+
+  /* Use the same validity rules for recording and lookup.  */
+  if (!wrap_cache_valid_p (w, buf))
     w->wrap_cache.count = 0;
 
   /* Initialize metadata for a fresh cache.  */
   if (w->wrap_cache.count == 0)
     {
+      w->wrap_cache.buffer = buf;
+      w->wrap_cache.begv = BUF_BEGV (buf);
+      w->wrap_cache.zv = BUF_ZV (buf);
       w->wrap_cache.modiff = BUF_MODIFF (buf);
       w->wrap_cache.overlay_modiff = BUF_OVERLAY_MODIFF (buf);
       w->wrap_cache.window_body_width = window_body_width (w, true);
-      /* Find the logical line start.  */
-      w->wrap_cache.line_beg = find_newline_no_quit (charpos, bytepos,
-						     -1, NULL);
     }
 
   /* Binary search for insertion point.  */
@@ -3953,7 +3986,10 @@ wrap_cache_find (struct window *w, ptrdiff_t target_charpos,
 		 struct buffer *buf)
 {
   if (!wrap_cache_valid_p (w, buf))
-    return -1;
+    {
+      w->wrap_cache.count = 0;
+      return -1;
+    }
 
   ptrdiff_t lo = 0, hi = w->wrap_cache.count;
   while (lo < hi)
@@ -19018,6 +19054,10 @@ mark_window_display_accurate_1 (struct window *w, bool accurate_p)
   if (accurate_p)
     {
       b->clip_changed = false;
+      if (b->prevent_redisplay_optimizations_p)
+	/* The flag is shared by all windows on all frames, but is reset
+	   one window tree at a time below.  Invalidate them before that.  */
+	invalidate_wrap_caches_for_buffer (b);
       b->prevent_redisplay_optimizations_p = false;
       eassert (buffer_window_count (b) > 0);
       /* Resetting b->text->redisplay is problematic!
