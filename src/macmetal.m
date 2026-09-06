@@ -192,7 +192,7 @@ static NSString *const metal_shader_source = @
 "}\n"
 "\n"
 "fragment float4 fragment_solid(VertexOut in [[stage_in]]) {\n"
-"    return in.color;\n"
+"    return float4(in.color.rgb * in.color.a, in.color.a);\n"
 "}\n"
 "\n"
 "fragment float4 fragment_textured(VertexOut in [[stage_in]],\n"
@@ -201,10 +201,11 @@ static NSString *const metal_shader_source = @
 "    float4 tex = atlas.sample(s, in.texcoord);\n"
 "    if (in.texture_id == 1) {\n"
 "        /* R8Unorm glyph atlas: alpha is in .r channel */\n"
-"        return float4(in.color.rgb, in.color.a * tex.r);\n"
+"        float alpha = in.color.a * tex.r;\n"
+"        return float4(in.color.rgb * alpha, alpha);\n"
 "    }\n"
 "    /* RGBA textures (color emoji, images): direct color */\n"
-"    return tex * in.color;\n"
+"    return tex * float4(in.color.rgb * in.color.a, in.color.a);\n"
 "}\n";
 
 /* Vertex and batch data structures.  */
@@ -515,11 +516,11 @@ create_pipelines (void)
     desc.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
     desc.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
     desc.colorAttachments[0].sourceRGBBlendFactor
-      = MTLBlendFactorSourceAlpha;
+      = MTLBlendFactorOne;
     desc.colorAttachments[0].destinationRGBBlendFactor
       = MTLBlendFactorOneMinusSourceAlpha;
     desc.colorAttachments[0].sourceAlphaBlendFactor
-      = MTLBlendFactorSourceAlpha;
+      = MTLBlendFactorOne;
     desc.colorAttachments[0].destinationAlphaBlendFactor
       = MTLBlendFactorOneMinusSourceAlpha;
 
@@ -532,7 +533,9 @@ create_pipelines (void)
       }
   }
 
-  /* Textured pipeline — alpha blending (srcAlpha / oneMinusSrcAlpha).  */
+  /* Both shaders output premultiplied color, matching CG image uploads.
+     Use source-over for RGB and alpha; multiplying by source alpha again
+     darkens image edges and makes opaque destinations translucent.  */
   {
     MTLRenderPipelineDescriptor *desc
       = [[MTLRenderPipelineDescriptor alloc] init];
@@ -543,11 +546,11 @@ create_pipelines (void)
     desc.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
     desc.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
     desc.colorAttachments[0].sourceRGBBlendFactor
-      = MTLBlendFactorSourceAlpha;
+      = MTLBlendFactorOne;
     desc.colorAttachments[0].destinationRGBBlendFactor
       = MTLBlendFactorOneMinusSourceAlpha;
     desc.colorAttachments[0].sourceAlphaBlendFactor
-      = MTLBlendFactorSourceAlpha;
+      = MTLBlendFactorOne;
     desc.colorAttachments[0].destinationAlphaBlendFactor
       = MTLBlendFactorOneMinusSourceAlpha;
 
