@@ -577,7 +577,8 @@ x_bitmap_stipple (struct frame *f, Pixmap pixmap)
 ptrdiff_t
 image_bitmap_pixmap (struct frame *f, ptrdiff_t id)
 {
-  /* HAVE_NTGUI needs the explicit cast here.  */
+  /* HAVE_NTGUI needs the explicit cast here because .pixmap is a handle,
+     i.e., a pointer to a struct (see w32gui.h), not an integer.  */
   return (ptrdiff_t) FRAME_DISPLAY_INFO (f)->bitmaps[id - 1].pixmap;
 }
 #endif
@@ -6971,7 +6972,7 @@ canvas_free_unused (void)
 static void
 canvas_apply_data (struct canvas *c, struct image_keyword *fmt)
 {
-  ptrdiff_t expected_size = (ptrdiff_t) c->width * c->height;
+  ptrdiff_t expected_size = (ptrdiff_t) {c->width} * c->height;
 
   Lisp_Object data = fmt[CANVAS_DATA].value;
   Lisp_Object file = fmt[CANVAS_FILE].value;

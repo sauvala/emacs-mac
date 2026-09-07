@@ -71,7 +71,7 @@ RUN apt-get update && \
 # Install clangd, tsserver, rust-analyzer.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends -o=Dpkg::Use-Pty=0 \
-      clangd npm node-typescript pipx rust-analyzer cargo \
+      clangd npm node-typescript pipx rust-analyzer cargo rust-src \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g typescript-language-server
@@ -82,7 +82,6 @@ RUN npm install -g vscode-json-languageserver
 RUN pipx install rassumfrassum
 RUN pipx install ruff
 RUN pipx install ty
-RUN pipx ensurepath
 
 # eclipse-jdt-ls is planned as Java language server.
 # See <https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1024246>.
@@ -92,13 +91,6 @@ WORKDIR /checkout
 RUN ./autogen.sh autoconf
 RUN ./configure
 RUN make -j `nproc` bootstrap
-
-# # Install company and yasnippet.
-# RUN mkdir /root/.emacs.d
-# RUN src/emacs --batch \
-#     --eval '(setq url-debug 0 debug-on-error t)' \
-#     --eval '(package-install (quote company))' \
-#     --eval '(package-install (quote yasnippet))'
 
 FROM emacs-base AS emacs-tree-sitter
 
