@@ -66,6 +66,21 @@ Must use clang (macOS `gcc` is aliased to clang). Real GCC cannot build this —
 
 ## Testing
 
+On macOS 27 and later, preserve the existing event-loop settings and register
+`NSWindowResizeNeedsTrackingLoop` before creating the application. Avoid
+synthetic release/press events during resize so a drag stays in one session.
+This combination passed an interactive continuous-resize check. Native menu
+activation/command selection also fails in the unchanged installed build
+under `-Q` on the tested macOS 27 system; treat that as a separate unresolved
+issue, not a regression established by the resize patch. Enabling the update
+cycle restored native resizing in experiments but did not resolve menus.
+These AppKit settings are undocumented;
+recheck after major OS updates. Validate each candidate in a fresh GUI process
+with edge/corner drags, actual menu commands, and `C-g`; programmatic
+`set-frame-size` alone is insufficient. When launching the development bundle
+directly, set `EMACSLOADPATH` to this checkout's absolute `lisp` directory if
+the bundle lacks `Contents/Resources/lisp`.
+
 ```bash
 make -C test check                          # run all tests
 make -C test check-maybe                    # run only outdated tests

@@ -1994,6 +1994,13 @@ install_application_handler (void)
 	    registerDefaults:@{@"NSEventConcurrentProcessingEnabled" : @"NO",
 	      @"NSApplicationUpdateCycleEnabled" : @"NO"}];
 
+      if (mac_operating_system_version.major >= 27)
+	/* Native resize gestures do not start with the application update
+	   cycle disabled.  Preserve the existing event-loop settings and
+	   select AppKit's tracking loop before it caches this setting.  */
+	[NSUserDefaults.standardUserDefaults
+	    registerDefaults:@{@"NSWindowResizeNeedsTrackingLoop" : @YES}];
+
       [EmacsApplication sharedApplication];
       emacsController = [[EmacsController alloc] init];
       [NSApp setDelegate:emacsController];
@@ -3462,6 +3469,10 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
     }
 
   if (leftMouseDragged
+      /* On macOS 27, keep a drag in one live-resize session instead of
+	 repeatedly ending and restarting tracking with synthetic events.
+	 Use the resize transition below, as for an Option-drag.  */
+      && mac_operating_system_version.major < 27
       /* Updating screen during resize by mouse dragging is
 	 implemented by generating fake release and press events.
 	 This seems to be too intrusive for "window snapping"
