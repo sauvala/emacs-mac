@@ -4,6 +4,15 @@ This is an opt-in manual regression fixture for the experimental native-menu
 path on macOS 27+. It does not enable the path itself. Start a fresh
 development GUI process from the checkout root:
 
+Building with `--enable-mac-native-menus` enables both native menus and worker
+preparation without launch flags. In that build, omit the menu environment
+flags below and in worker tests to verify the compiled default. Builds without
+the option retain the environment-based opt-in.
+
+The configured-on build passed a fresh GUI check with both menu environment
+variables absent: Lifecycle A command delivery and Help dismissal with C-g,
+with the optional Lisp worker running.
+
 ```sh
 EMACS_MAC_NATIVE_MENUS=1 \
 EMACSLOADPATH=/Users/janne/repos/emacs-mac-janne/lisp \

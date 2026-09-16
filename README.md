@@ -212,8 +212,27 @@ transition to avoid an initial flash, then rebuilt before reopening. Help search
 is restored, and `C-g` dismisses an open native menu without evaluating Lisp
 inside AppKit's tracking loop.
 
-To try it in a fresh development process, run from the checkout root after
-building:
+To enable both menu paths in the app, including normal Finder and Dock launches,
+add `--enable-mac-native-menus` to your configure command, then rebuild and
+install as usual. For example:
+
+```sh
+./autogen.sh
+CFLAGS="-O2 -mcpu=native" ./configure \
+  --with-native-compilation --with-tree-sitter \
+  --enable-mac-app=yes --enable-mac-self-contained \
+  --enable-mac-native-menus
+make -j6
+make install
+```
+
+The option is off by default and requires the Mac GUI port. Omit it or use
+`--disable-mac-native-menus` when rebuilding to return to opt-in behavior.
+It only activates the new menu path on macOS 27+. No launch environment
+variables are needed in an enabled build.
+
+Alternatively, to try it without enabling the build option, run from the
+checkout root after building:
 
 ```sh
 open -n -a "$PWD/mac/Emacs.app" \
@@ -223,10 +242,12 @@ open -n -a "$PWD/mac/Emacs.app" \
   --args -Q
 ```
 
-Both flags are enabled by their presence; unset them to disable them (setting
+In builds without the configure option, both flags are enabled by their
+presence; unset them to disable them (setting
 them to `0` still enables them). `EMACS_MAC_NATIVE_MENUS` selects the native
 path on macOS 27+, and `EMACS_MAC_WORKER_MENUS` additionally enables preparation
-when Lisp threads are present. Add `--env EMACS_MAC_TRACE_MENUS=1` before
+when Lisp threads are present. They do not disable a configured-on build.
+Add `--env EMACS_MAC_TRACE_MENUS=1` before
 `--args` for lifecycle diagnostics. The internal cancellation/reopen step remains
 and can add opening latency even when no blink is visible.
 

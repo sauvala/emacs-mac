@@ -87,7 +87,9 @@ with edge/corner drags, actual menu commands, and `C-g`; programmatic
 directly, set `EMACSLOADPATH` to this checkout's absolute `lisp` directory if
 the bundle lacks `Contents/Resources/lisp`.
 
-The experimental macOS 27 native-menu path is opt-in via the presence of
+Configure with `--enable-mac-native-menus` to enable both experimental menu
+paths for normal Dock/Finder launches on macOS 27+. Otherwise the native-menu
+path is opt-in via the presence of
 `EMACS_MAC_NATIVE_MENUS` (unset it to disable); `EMACS_MAC_TRACE_MENUS`
 enables lifecycle diagnostics. Run `python3 test/manual/mac-menu/check.py`
 for snapshot ownership checks and use `test/manual/mac-menu/README.md` for

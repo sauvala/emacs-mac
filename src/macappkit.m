@@ -128,6 +128,28 @@ static void mac_draw_queue_sync(void);
 static bool mac_select_allow_lisp_evaluation;
 #endif
 
+/* A configured default enables both paths for Finder/Dock launches.
+   Environment flags remain available for opt-in testing of other builds.  */
+static bool
+mac_native_menus_enabled_p (void)
+{
+#ifdef MAC_NATIVE_MENUS_DEFAULT
+  return true;
+#else
+  return getenv ("EMACS_MAC_NATIVE_MENUS") != NULL;
+#endif
+}
+
+static bool
+mac_worker_menus_enabled_p (void)
+{
+#ifdef MAC_NATIVE_MENUS_DEFAULT
+  return true;
+#else
+  return getenv ("EMACS_MAC_WORKER_MENUS") != NULL;
+#endif
+}
+
 /* Opt-in diagnostics for native menu activation.  Do not log menu titles
    or Lisp contents: only lifecycle ordering and callback eligibility.  */
 static void
@@ -11125,7 +11147,7 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 {
   if (self != NSApp.mainMenu || !nativeTracking || popup_activated ()
       || mac_operating_system_version.major < 27
-      || !getenv ("EMACS_MAC_NATIVE_MENUS")
+      || !mac_native_menus_enabled_p ()
       || event.type != NSEventTypeKeyDown
       || !mac_keydown_cgevent_quit_p (event.coreGraphicsEvent))
     return NO;
@@ -11432,7 +11454,7 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 - (void)update
 {
   mac_trace_menu_lifecycle ("update", self, 0);
-  if (getenv ("EMACS_MAC_WORKER_MENUS") && getenv ("EMACS_MAC_NATIVE_MENUS")
+  if (mac_worker_menus_enabled_p () && mac_native_menus_enabled_p ()
       && mac_operating_system_version.major >= 27
       && self == NSApp.mainMenu && !nativePreparing && !nativeTracking
       && !popup_activated () && !mac_select_allow_lisp_evaluation)
@@ -11450,7 +11472,7 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 	  mac_trace_menu_lifecycle ("suppress-help-search", self, 0);
 	}
     }
-  if (getenv ("EMACS_MAC_NATIVE_MENUS")
+  if (mac_native_menus_enabled_p ()
       && mac_operating_system_version.major >= 27
       && self == [NSApp mainMenu] && !nativePreparing && !nativeTracking
       && !popup_activated () && mac_select_allow_lisp_evaluation)
@@ -11830,7 +11852,7 @@ mac_press_native_menubar (struct frame *f, NSInteger index, NSString *title,
 			      && [(EmacsMenu *) menu nativeGeneration]
 			      && ![(EmacsMenu *) menu nativeNeedsPreparation])))
 		    {
-		      if (getenv ("EMACS_MAC_WORKER_MENUS")
+		      if (mac_worker_menus_enabled_p ()
 			  && [menu isKindOfClass:EmacsMenu.class])
 			[(EmacsMenu *) menu setNativeActivationPrepared];
 		      pressed = [item accessibilityPerformPress];
@@ -11857,7 +11879,7 @@ bool
 mac_focus_native_menubar (struct frame *f)
 {
   if (mac_operating_system_version.major < 27
-      || !getenv ("EMACS_MAC_NATIVE_MENUS"))
+      || !mac_native_menus_enabled_p ())
     return false;
   mac_press_native_menubar (f, 0, nil, nil, nil);
   return true;
@@ -11997,7 +12019,7 @@ mac_fill_menubar (widget_value *first_wv, bool deep_p)
 
 	  submenu = [[NSMenu alloc] initWithTitle:title];
 	  [submenu setAutoenablesItems:NO];
-	  if (getenv ("EMACS_MAC_WORKER_MENUS"))
+	  if (mac_worker_menus_enabled_p ())
 	    [submenu setDelegate:emacsController];
 
 	  if (title == localizedMenuTitleForHelp)
@@ -12065,7 +12087,7 @@ mac_fill_menubar (widget_value *first_wv, bool deep_p)
 	     Cancel before detaching any part of the old tree, while its
 	     observers are still registered, to avoid a stranded popup.  */
 	  if (mac_operating_system_version.major >= 27
-	      && getenv ("EMACS_MAC_NATIVE_MENUS"))
+	      && mac_native_menus_enabled_p ())
 	    {
 	      mac_trace_menu_lifecycle ("cancel-before-replace", mainMenu, 0);
 	      [mainMenu cancelTracking];
