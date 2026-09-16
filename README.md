@@ -197,6 +197,52 @@ The `nemesis` branch tracks GNU Emacs master and adds the following on top of th
 - **Wrap position cache**: Per-window cache of visual line start positions for O(1) movement within long wrapped continuation lines, replacing the O(buffer_size) scan from logical line start.
 - **WrapMap module**: Centralized visual line estimation for long wrapped lines, consolidating duplicated formulas across the display engine. For rope buffers, uses O(log n) tree operations for precise estimation.
 
+### macOS 27 menus and window controls
+
+Nemesis includes a macOS 27+ workaround for the yellow minimize button, alongside
+the continuous-resize workaround. These apply automatically at startup while
+preserving the existing application event-loop settings. They rely on
+undocumented AppKit defaults and should be rechecked after major OS updates.
+
+An experimental native-menu path is available separately. It restores mouse
+command delivery and keyboard opening via `M-x mac-menu-bar-open-internal`.
+With worker support enabled, menus defer Lisp preparation until native tracking
+has returned. Stale menu contents and Help search are suppressed during that
+transition to avoid an initial flash, then rebuilt before reopening. Help search
+is restored, and `C-g` dismisses an open native menu without evaluating Lisp
+inside AppKit's tracking loop.
+
+To try it in a fresh development process, run from the checkout root after
+building:
+
+```sh
+open -n -a "$PWD/mac/Emacs.app" \
+  --env EMACSLOADPATH="$PWD/lisp" \
+  --env EMACS_MAC_NATIVE_MENUS=1 \
+  --env EMACS_MAC_WORKER_MENUS=1 \
+  --args -Q
+```
+
+Both flags are enabled by their presence; unset them to disable them (setting
+them to `0` still enables them). `EMACS_MAC_NATIVE_MENUS` selects the native
+path on macOS 27+, and `EMACS_MAC_WORKER_MENUS` additionally enables preparation
+when Lisp threads are present. Add `--env EMACS_MAC_TRACE_MENUS=1` before
+`--args` for lifecycle diagnostics. The internal cancellation/reopen step remains
+and can add opening latency even when no blink is visible.
+
+Interactive checks passed on the tested macOS 27 system for mouse and keyboard
+command delivery, changed menus, buffer/frame switching, worker stop/start,
+Help search, Window-menu frame selection, Services submenu display, Edit Undo,
+Escape and `C-g` dismissal, normal `C-g` prefix cancellation outside menus,
+minimize/restore, and continuous edge/corner resizing. Checks were performed
+across successive candidates; this is not a complete automated compatibility
+suite. Services command execution, real-GC/error recovery, remapped quit keys,
+and cancellation during retry still need broader coverage.
+
+See the [manual menu fixture and validation notes](test/manual/mac-menu/README.md).
+Run `python3 test/manual/mac-menu/check.py` for standalone snapshot ownership
+checks; these do not exercise AppKit or real Lisp garbage collection.
+
 ## Debugging
 
 If you get crashes or just want to help with debugging, it would be very useful to run emacs-mac under `lldb`, the clang debugger.  Here's how:

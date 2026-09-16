@@ -552,9 +552,13 @@ extern void cleanup_all_suspended_apple_events (void);
 
 /* Defined in macmenu.c */
 extern void mac_menu_set_in_use (bool);
+extern unsigned long mac_prepare_native_menubar (void);
+extern void mac_native_menubar_selection (unsigned long, int);
+extern void mac_release_native_menubar (unsigned long);
 extern Lisp_Object mac_popup_dialog (struct frame *, Lisp_Object, Lisp_Object);
 extern bool name_is_separator (const char *);
-extern void mac_fill_menubar (widget_value *, bool);
+extern bool mac_fill_menubar (widget_value *, bool);
+extern bool mac_focus_native_menubar (struct frame *);
 extern int create_and_show_popup_menu (struct frame *, widget_value *,
 				       int, int, bool);
 extern int create_and_show_dialog (struct frame *, widget_value *);

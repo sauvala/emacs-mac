@@ -1095,6 +1095,21 @@ typedef NSInteger NSGlyphProperty;
 @end
 
 @interface EmacsMenu : NSMenu
+{
+  BOOL nativePreparing, nativeTracking;
+  BOOL nativeNeedsPreparation, nativeActivationPrepared;
+  BOOL nativeRetryPending, nativeRetryCancelling;
+  __unsafe_unretained NSMenu *nativeRetryMenu;
+  NSMenu *nativeSavedHelpMenu, *nativeHelpPlaceholder;
+  unsigned long nativeGeneration;
+}
+- (BOOL)nativeTracking;
+- (BOOL)nativePreparing;
+- (unsigned long)nativeGeneration;
+- (BOOL)nativeNeedsPreparation;
+- (void)setNativeActivationPrepared;
+- (void)scheduleNativeRetry:(NSMenu *)menu;
+- (BOOL)cancelNativeTrackingForQuitEvent:(NSEvent *)event;
 @end
 
 /* Lisp_Object wrapper that does not protect the contents from GC.  */

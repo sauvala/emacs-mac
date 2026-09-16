@@ -128,6 +128,17 @@ static void mac_draw_queue_sync(void);
 static bool mac_select_allow_lisp_evaluation;
 #endif
 
+/* Opt-in diagnostics for native menu activation.  Do not log menu titles
+   or Lisp contents: only lifecycle ordering and callback eligibility.  */
+static void
+mac_trace_menu_lifecycle (const char *phase, NSMenu *menu, NSInteger tag)
+{
+  if (getenv ("EMACS_MAC_TRACE_MENUS"))
+    NSLog (@"Emacs menu: %s menu=%p main=%d popup=%d lisp=%d tag=%ld",
+           phase, menu, menu == [NSApp mainMenu], popup_activated (),
+           mac_select_allow_lisp_evaluation, (long) tag);
+}
+
 @implementation NSData (Emacs)
 
 /* Return a unibyte Lisp string.  */
@@ -1139,6 +1150,22 @@ static bool handling_queued_nsevents_p;
 
 @implementation EmacsApplication
 
+- (NSEvent *)nextEventMatchingMask:(NSEventMask)mask
+			untilDate:(NSDate *)expiration
+			   inMode:(NSRunLoopMode)mode
+			  dequeue:(BOOL)dequeue
+{
+  NSEvent *event = [super nextEventMatchingMask:mask untilDate:expiration
+				       inMode:mode dequeue:dequeue];
+  /* Native tracking can consume keys without asking menu key-equivalent
+     delegates.  Do not intercept peeks or evaluate Lisp in this loop.  */
+  if (dequeue && event.type == NSEventTypeKeyDown
+      && [self.mainMenu isKindOfClass:EmacsMenu.class]
+      && [(EmacsMenu *) self.mainMenu cancelNativeTrackingForQuitEvent:event])
+    return nil;
+  return event;
+}
+
 /* Don't use the "applicationShouldTerminate: - NSTerminateLater -
    replyToApplicationShouldTerminate:" mechanism provided by
    -[NSApplication terminate:] for deferring the termination, as it
@@ -1170,15 +1197,25 @@ static bool handling_queued_nsevents_p;
 
   if (![mainMenu isEqual:currentMainMenu])
     {
+      mac_trace_menu_lifecycle ("replace-root-old", currentMainMenu, 0);
+      mac_trace_menu_lifecycle ("replace-root-new", mainMenu, 0);
       if ([currentMainMenu isKindOfClass:EmacsMenu.class])
 	[[NSNotificationCenter defaultCenter] removeObserver:currentMainMenu];
       if ([mainMenu isKindOfClass:EmacsMenu.class])
-	[[NSNotificationCenter defaultCenter]
+	{
+	  [[NSNotificationCenter defaultCenter]
 	  addObserver:mainMenu
 	     selector:@selector(menuDidBeginTracking:)
 		 name:NSMenuDidBeginTrackingNotification
 	       object:mainMenu];
+	  [[NSNotificationCenter defaultCenter]
+	    addObserver:mainMenu
+	       selector:@selector(menuDidEndTracking:)
+		   name:NSMenuDidEndTrackingNotification
+		 object:mainMenu];
+	}
       [super setMainMenu:mainMenu];
+      mac_trace_menu_lifecycle ("replace-root-done", mainMenu, 0);
     }
 }
 
@@ -1425,6 +1462,24 @@ static bool handling_queued_nsevents_p;
 
 - (void)setMenuItemSelectionToTag:(id)sender
 {
+  mac_trace_menu_lifecycle ("action", [sender menu], [sender tag]);
+  NSMenu *root = [sender menu];
+  while ([root supermenu])
+    root = [root supermenu];
+  if ([root isKindOfClass:EmacsMenu.class]
+      && [(EmacsMenu *) root nativeNeedsPreparation] && !popup_activated ())
+    return;
+  if ([root isKindOfClass:EmacsMenu.class]
+      && [(EmacsMenu *) root nativeGeneration] && !popup_activated ())
+    {
+      unsigned long generation = [(EmacsMenu *) root nativeGeneration];
+      int selection = [sender tag];
+      mac_within_lisp_deferred_if_gui_thread (^{
+          mac_native_menubar_selection (generation, selection);
+        });
+      [NSApp postDummyEvent];
+      return;
+    }
   menuItemSelection = [sender tag];
 }
 
@@ -1995,11 +2050,13 @@ install_application_handler (void)
 	      @"NSApplicationUpdateCycleEnabled" : @"NO"}];
 
       if (mac_operating_system_version.major >= 27)
-	/* Native resize gestures do not start with the application update
-	   cycle disabled.  Preserve the existing event-loop settings and
-	   select AppKit's tracking loop before it caches this setting.  */
+	/* Native resize and titlebar control gestures fail with the
+	   application update cycle disabled.  Preserve the existing
+	   event-loop settings and select traditional tracking before
+	   AppKit caches these settings.  */
 	[NSUserDefaults.standardUserDefaults
-	    registerDefaults:@{@"NSWindowResizeNeedsTrackingLoop" : @YES}];
+	    registerDefaults:@{@"NSWindowResizeNeedsTrackingLoop" : @YES,
+	      @"NSControlPrefersGestureRecognizerTracking" : @NO}];
 
       [EmacsApplication sharedApplication];
       emacsController = [[EmacsController alloc] init];
@@ -10933,6 +10990,8 @@ mac_font_dialog (struct frame *f)
 
 static void update_services_menu_types (void);
 static void mac_fake_menu_bar_click (EventPriority);
+static void mac_press_native_menubar (struct frame *, NSInteger, NSString *,
+				     EmacsMenu *, NSWindow *);
 
 static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localizedMenuTitleForWindow;
 
@@ -11056,6 +11115,132 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 
 @implementation EmacsMenu
 
+- (BOOL)nativeTracking { return nativeTracking; }
+- (BOOL)nativePreparing { return nativePreparing; }
+- (unsigned long)nativeGeneration { return nativeGeneration; }
+- (BOOL)nativeNeedsPreparation { return nativeNeedsPreparation; }
+- (void)setNativeActivationPrepared { nativeActivationPrepared = YES; }
+
+- (BOOL)cancelNativeTrackingForQuitEvent:(NSEvent *)event
+{
+  if (self != NSApp.mainMenu || !nativeTracking || popup_activated ()
+      || mac_operating_system_version.major < 27
+      || !getenv ("EMACS_MAC_NATIVE_MENUS")
+      || event.type != NSEventTypeKeyDown
+      || !mac_keydown_cgevent_quit_p (event.coreGraphicsEvent))
+    return NO;
+
+  mac_trace_menu_lifecycle ("native-keyboard-quit", self, 0);
+  if (nativeRetryMenu)
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+		selector:@selector(cancelAndRetryNativeMenu:)
+		object:nativeRetryMenu];
+  nativeRetryMenu = nil;
+  nativeRetryPending = NO;
+  nativeActivationPrepared = NO;
+  /* Cancel the attached submenus as well as the root: cancelling only
+     the root has not reliably ended AppKit's native tracking loop.  */
+  for (NSMenuItem *item in self.itemArray)
+    [item.submenu cancelTrackingWithoutAnimation];
+  [self cancelTrackingWithoutAnimation];
+  [NSApp postDummyEvent];
+  return YES;
+}
+
+- (void)restoreNativeHelpMenu
+{
+  if (!nativeHelpPlaceholder)
+    return;
+  /* A newer root may already have installed its own Help menu.  */
+  if (NSApp.helpMenu == nativeHelpPlaceholder)
+    NSApp.helpMenu = nativeSavedHelpMenu;
+  MRC_RELEASE (nativeSavedHelpMenu);
+  nativeSavedHelpMenu = nil;
+  MRC_RELEASE (nativeHelpPlaceholder);
+  nativeHelpPlaceholder = nil;
+  mac_trace_menu_lifecycle ("restore-help-search", self, 0);
+}
+
+- (void)scheduleNativeRetry:(NSMenu *)menu
+{
+  if (!nativeNeedsPreparation || nativeRetryPending
+      || self != NSApp.mainMenu || menu.supermenu != self)
+    return;
+  nativeRetryPending = YES;
+  nativeRetryMenu = menu; /* Retained by the delayed perform request.  */
+  /* menuNeedsUpdate: permits changing items before AppKit displays them.
+     Do not flash the previous Lisp snapshot while waiting for the safe
+     preparation context.  Keep the submenu itself attached so that the
+     tracking-mode callback can still cancel the actual tracking session.
+     The retry performs a deep rebuild before pressing this heading.  */
+  mac_trace_menu_lifecycle ("hide-worker-submenu", menu, menu.numberOfItems);
+  [menu removeAllItems];
+  [self performSelector:@selector(cancelAndRetryNativeMenu:)
+	     withObject:menu afterDelay:0
+		inModes:@[NSEventTrackingRunLoopMode]];
+}
+
+- (void)cancelAndRetryNativeMenu:(NSMenu *)menu
+{
+  nativeRetryMenu = nil;
+  NSInteger index = [self indexOfItemWithSubmenu:menu];
+  if (self != NSApp.mainMenu || !nativeTracking
+      || !nativeNeedsPreparation || index < 0)
+    {
+      nativeRetryPending = NO;
+      return;
+    }
+  NSString *title = [self itemAtIndex:index].title;
+  /* Help's search field can make its popup the key window by this point.
+     Capture the owning document window, then require it to regain key
+     status and still match the selected frame before retrying.  */
+  NSWindow *window = NSApp.mainWindow;
+  if (getenv ("EMACS_MAC_TRACE_MENUS"))
+    NSLog (@"Emacs worker menu: capture index=%ld owner=%p (%@) key=%p (%@)",
+	   (long) index, window, NSStringFromClass (window.class),
+	   NSApp.keyWindow, NSStringFromClass (NSApp.keyWindow.class));
+  nativeRetryCancelling = YES;
+  mac_trace_menu_lifecycle ("cancel-worker-submenu", menu, index);
+  [menu cancelTrackingWithoutAnimation];
+  [NSApp postDummyEvent];
+  /* This runs only after native tracking has returned.  The copied
+     block retains native request objects, not an unrooted Lisp frame.  */
+  mac_within_lisp_deferred_if_gui_thread (^{
+      if (getenv ("EMACS_MAC_TRACE_MENUS"))
+	NSLog (@"Emacs worker menu: Lisp resumed gui=%d", pthread_main_np ());
+      @try
+	{
+	  BOOL __block retry;
+	  mac_within_gui (^{ retry = nativeRetryPending; });
+	  if (retry)
+	    mac_press_native_menubar (SELECTED_FRAME (), index, title, self, window);
+	}
+      @finally
+	{
+	  mac_within_gui (^{
+	      nativeRetryPending = NO;
+	      nativeRetryCancelling = NO;
+	    });
+	}
+    });
+}
+
+- (void)dealloc
+{
+  [self restoreNativeHelpMenu];
+  /* Queue cleanup behind any selection already captured from this root.
+     The block must not retain SELF while it is being deallocated.  */
+  unsigned long generation = nativeGeneration;
+  mac_trace_menu_lifecycle ("dealloc-root", self, generation);
+  if (generation)
+    mac_within_lisp_deferred_if_gui_thread (^{
+        mac_release_native_menubar (generation);
+      });
+#if !USE_ARC
+  [super dealloc];
+#endif
+}
+
 /* Forward unprocessed shortcut key events to the first responder of
    the key window.  */
 
@@ -11063,6 +11248,9 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 {
   NSWindow *window;
   NSResponder *firstResponder;
+
+  if ([self cancelNativeTrackingForQuitEvent:theEvent])
+    return YES;
 
   if ([super performKeyEquivalent:theEvent])
     return YES;
@@ -11210,11 +11398,88 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 
 - (void)menuDidBeginTracking:(NSNotification *)notification
 {
+  mac_trace_menu_lifecycle ("begin", self, 0);
+  if (nativeTracking)
+    return;
+  if ((nativeGeneration || nativeNeedsPreparation) && !popup_activated ())
+    {
+      nativeTracking = YES;
+      nativeActivationPrepared = NO;
+      return;
+    }
   if (!popup_activated ())
     {
       NSLog (@"Canceling unexpected menu tracking: %@", [NSApp currentEvent]);
       [self cancelTracking];
     }
+}
+
+- (void)menuDidEndTracking:(NSNotification *)notification
+{
+  mac_trace_menu_lifecycle ("end", self, 0);
+  nativeTracking = NO;
+  [self restoreNativeHelpMenu];
+  if (nativeRetryPending && !nativeRetryCancelling)
+    {
+      [NSObject cancelPreviousPerformRequestsWithTarget:self
+		    selector:@selector(cancelAndRetryNativeMenu:)
+		    object:nativeRetryMenu];
+      nativeRetryMenu = nil;
+      nativeRetryPending = NO;
+    }
+}
+
+- (void)update
+{
+  mac_trace_menu_lifecycle ("update", self, 0);
+  if (getenv ("EMACS_MAC_WORKER_MENUS") && getenv ("EMACS_MAC_NATIVE_MENUS")
+      && mac_operating_system_version.major >= 27
+      && self == NSApp.mainMenu && !nativePreparing && !nativeTracking
+      && !popup_activated () && !mac_select_allow_lisp_evaluation)
+    {
+      nativeNeedsPreparation = !(nativeActivationPrepared && nativeGeneration);
+      if (nativeNeedsPreparation && !nativeHelpPlaceholder
+	  && NSApp.helpMenu.supermenu == self)
+	{
+	  /* AppKit adds Help search independently of our submenu items.
+	     An off-bar Help menu suppresses that UI during the unprepared
+	     tracking attempt; nil would let AppKit choose a menu itself.  */
+	  nativeSavedHelpMenu = MRC_RETAIN (NSApp.helpMenu);
+	  nativeHelpPlaceholder = [[NSMenu alloc] initWithTitle:@""];
+	  NSApp.helpMenu = nativeHelpPlaceholder;
+	  mac_trace_menu_lifecycle ("suppress-help-search", self, 0);
+	}
+    }
+  if (getenv ("EMACS_MAC_NATIVE_MENUS")
+      && mac_operating_system_version.major >= 27
+      && self == [NSApp mainMenu] && !nativePreparing && !nativeTracking
+      && !popup_activated () && mac_select_allow_lisp_evaluation)
+    {
+      unsigned long previousGeneration = nativeGeneration;
+      [self restoreNativeHelpMenu];
+      nativeNeedsPreparation = NO;
+      nativeActivationPrepared = NO;
+      nativePreparing = YES;
+      @try
+        {
+          mac_within_lisp (^{
+              nativeGeneration = mac_prepare_native_menubar ();
+            });
+        }
+      @finally
+        {
+          nativePreparing = NO;
+        }
+      /* A selection may already be queued when this update prepares a
+         newer command table.  Retire the old table on the same FIFO,
+         rather than replacing its Lisp roots during preparation.  */
+      if (previousGeneration)
+        mac_within_lisp_deferred_if_gui_thread (^{
+            mac_release_native_menubar (previousGeneration);
+          });
+      mac_trace_menu_lifecycle ("prepared", self, nativeGeneration);
+    }
+  [super update];
 }
 
 @end				// EmacsMenu
@@ -11241,6 +11506,12 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 
 @implementation EmacsController (Menu)
 
+- (void)menuNeedsUpdate:(NSMenu *)menu
+{
+  if ([NSApp.mainMenu isKindOfClass:EmacsMenu.class])
+    [(EmacsMenu *) NSApp.mainMenu scheduleNativeRetry:menu];
+}
+
 - (void)menu:(NSMenu *)menu willHighlightItem:(NSMenuItem *)item
 {
   if (!popup_activated ())
@@ -11266,6 +11537,7 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 - (void)trackMenuBar
 {
   mac_within_app (^{
+      mac_trace_menu_lifecycle ("pump-enter", [NSApp mainMenu], 0);
       /* Mac OS X 10.2 doesn't regard untilDate:nil as polling.  */
       NSDate *expiration = [NSDate distantPast];
 
@@ -11302,6 +11574,7 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 	    break;
 	}
 
+      mac_trace_menu_lifecycle ("pump-exit", [NSApp mainMenu], 0);
       [emacsController updatePresentationOptions];
     });
 }
@@ -11505,6 +11778,91 @@ mac_activate_menubar (struct frame *f)
 				  (void *) (intptr_t) selection);
 }
 
+/* Press a native menu item using a bridge that permits menu preparation.
+   A deferred retry must still belong to the same root, heading and window.  */
+
+static void
+mac_press_native_menubar (struct frame *f, NSInteger index, NSString *title,
+			 EmacsMenu *expectedMenu, NSWindow *expectedWindow)
+{
+  if (expectedMenu)
+    {
+      bool __block current;
+      mac_within_gui (^{
+	  current = expectedMenu == NSApp.mainMenu
+	    && expectedWindow == NSApp.keyWindow
+	    && FRAME_LIVE_P (f) && FRAME_MAC_P (f)
+	    && FRAME_MAC_WINDOW_OBJECT (f) == expectedWindow;
+	  if (getenv ("EMACS_MAC_TRACE_MENUS"))
+	    NSLog (@"Emacs worker menu: ownership current=%d root=%d key=%d frame=%d expected=%p key-now=%p main-now=%p",
+		   current, expectedMenu == NSApp.mainMenu,
+		   expectedWindow == NSApp.keyWindow,
+		   FRAME_LIVE_P (f) && FRAME_MAC_P (f)
+		   && FRAME_MAC_WINDOW_OBJECT (f) == expectedWindow,
+		   expectedWindow, NSApp.keyWindow, NSApp.mainWindow);
+	});
+      if (!current)
+	return;
+    }
+
+  set_frame_menubar (f, true);
+  mac_within_gui_allowing_inner_lisp (^{
+      /* Menu preparation can synchronously call Lisp during the press.
+         This bridge permits it even outside the select event loop.  */
+      bool saved_allow_lisp = mac_select_allow_lisp_evaluation;
+      mac_select_allow_lisp_evaluation = true;
+      @try
+	{
+	  mac_within_app (^{
+	      [emacsController showMenuBar];
+	      [[NSApp mainMenu] update];
+	      NSMenu *menu = [NSApp mainMenu];
+	      NSMenuItem *item = index >= 0 && index < menu.numberOfItems
+		? MRC_RETAIN ([menu itemAtIndex:index]) : nil;
+	      @try
+		{
+		  BOOL pressed = NO;
+		  if (item && item.enabled && !item.hidden
+		      && (!title || [item.title isEqualToString:title])
+		      && (!expectedWindow || NSApp.keyWindow == expectedWindow)
+		      && (!expectedMenu
+			  || ([menu isKindOfClass:EmacsMenu.class]
+			      && [(EmacsMenu *) menu nativeGeneration]
+			      && ![(EmacsMenu *) menu nativeNeedsPreparation])))
+		    {
+		      if (getenv ("EMACS_MAC_WORKER_MENUS")
+			  && [menu isKindOfClass:EmacsMenu.class])
+			[(EmacsMenu *) menu setNativeActivationPrepared];
+		      pressed = [item accessibilityPerformPress];
+		    }
+		  mac_trace_menu_lifecycle ("keyboard-press", [NSApp mainMenu],
+				    pressed);
+		}
+	      @finally
+		{
+		  MRC_RELEASE (item);
+		}
+	    });
+	}
+      @finally
+	{
+	  mac_select_allow_lisp_evaluation = saved_allow_lisp;
+	}
+    });
+}
+
+/* Return false only outside the native opt-in: a failed native press
+   may already have changed menu tracking state.  */
+bool
+mac_focus_native_menubar (struct frame *f)
+{
+  if (mac_operating_system_version.major < 27
+      || !getenv ("EMACS_MAC_NATIVE_MENUS"))
+    return false;
+  mac_press_native_menubar (f, 0, nil, nil, nil);
+  return true;
+}
+
 /* Set up the initial menu bar.  */
 
 static void
@@ -11580,15 +11938,23 @@ init_menu_bar (void)
 
 /* Fill menu bar with the items defined by FIRST_WV.  If DEEP_P,
    consider the entire menu trees we supply, rather than just the menu
-   bar item names.  */
+   bar item names.  Return false if native tracking prevented the update,
+   so the caller can invalidate its display cache and retry.  */
 
-void
+bool
 mac_fill_menubar (widget_value *first_wv, bool deep_p)
 {
+  bool __block applied = false;
   mac_within_gui (^{
-      NSMenu *newMenu, *mainMenu = [NSApp mainMenu], *helpMenu, *windowMenu = nil;
+      NSMenu *newMenu, *mainMenu = [NSApp mainMenu];
+      NSMenu *helpMenu = nil, *windowMenu = nil;
       NSInteger index = 1, nitems = [mainMenu numberOfItems];
       bool needs_update_p = deep_p;
+
+      /* Redisplay must not replace a menu currently owned by AppKit.  */
+      if ([mainMenu isKindOfClass:EmacsMenu.class]
+          && [(EmacsMenu *) mainMenu nativeTracking])
+        return;
 
       newMenu = [[EmacsMenu alloc] init];
       [newMenu setAutoenablesItems:NO];
@@ -11631,6 +11997,8 @@ mac_fill_menubar (widget_value *first_wv, bool deep_p)
 
 	  submenu = [[NSMenu alloc] initWithTitle:title];
 	  [submenu setAutoenablesItems:NO];
+	  if (getenv ("EMACS_MAC_WORKER_MENUS"))
+	    [submenu setDelegate:emacsController];
 
 	  if (title == localizedMenuTitleForHelp)
 	    helpMenu = submenu;
@@ -11652,13 +12020,66 @@ mac_fill_menubar (widget_value *first_wv, bool deep_p)
 
       if (needs_update_p)
 	{
+
+          if ([mainMenu isKindOfClass:EmacsMenu.class]
+              && [(EmacsMenu *) mainMenu nativePreparing])
+            {
+              /* Keep the root, and matching top-level items/submenus,
+                 alive across AppKit's update-to-tracking transition.  */
+              NSInteger count = [newMenu numberOfItems];
+              for (NSInteger i = 0; i < count; i++)
+                {
+                  NSMenuItem *item = MRC_RETAIN ([newMenu itemAtIndex:0]);
+                  [newMenu removeItem:item];
+                  NSMenuItem *old = i + 1 < [mainMenu numberOfItems]
+                    ? [mainMenu itemAtIndex:i + 1] : nil;
+                  if (old && [old.title isEqualToString:item.title]
+                      && old.submenu && item.submenu)
+                    {
+                      NSMenu *source = item.submenu, *target = old.submenu;
+                      [target removeAllItems];
+                      while ([source numberOfItems])
+                        {
+                          NSMenuItem *child = MRC_RETAIN ([source itemAtIndex:0]);
+                          [source removeItem:child];
+                          [target addItem:child];
+                          MRC_RELEASE (child);
+                        }
+                      [target setDelegate:emacsController];
+                      if (source == helpMenu) helpMenu = target;
+                      if (source == windowMenu) windowMenu = target;
+                    }
+                  else
+                    {
+                      if (old) [mainMenu removeItemAtIndex:i + 1];
+                      [mainMenu insertItem:item atIndex:i + 1];
+                    }
+                  MRC_RELEASE (item);
+                }
+              while ([mainMenu numberOfItems] > count + 1)
+                [mainMenu removeItemAtIndex:[mainMenu numberOfItems] - 1];
+            }
+          else
+            {
+	  /* Tracking-end can precede visual dismissal on macOS 27.
+	     Cancel before detaching any part of the old tree, while its
+	     observers are still registered, to avoid a stranded popup.  */
+	  if (mac_operating_system_version.major >= 27
+	      && getenv ("EMACS_MAC_NATIVE_MENUS"))
+	    {
+	      mac_trace_menu_lifecycle ("cancel-before-replace", mainMenu, 0);
+	      [mainMenu cancelTracking];
+	      mac_trace_menu_lifecycle ("cancel-before-replace-done", mainMenu, 0);
+	    }
 	  NSMenuItem *appleMenuItem = MRC_RETAIN ([mainMenu itemAtIndex:0]);
 
+	  mac_trace_menu_lifecycle ("detach-apple-item", mainMenu, 0);
 	  [mainMenu removeItem:appleMenuItem];
 	  [newMenu insertItem:appleMenuItem atIndex:0];
 	  MRC_RELEASE (appleMenuItem);
 
 	  [NSApp setMainMenu:newMenu];
+            }
 
 	  if (windowMenu && [windowMenu numberOfItems])
 	    [NSApp setWindowsMenu:windowMenu];
@@ -11668,7 +12089,9 @@ mac_fill_menubar (widget_value *first_wv, bool deep_p)
 	}
 
       MRC_RELEASE (newMenu);
+      applied = true;
     });
+  return applied;
 }
 
 static void

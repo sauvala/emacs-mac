@@ -50,6 +50,133 @@ along with GNU Emacs Mac port.  If not, see <https://www.gnu.org/licenses/>.  */
 /* Nonzero means a menu is currently active.  */
 static int popup_activated_flag;
 
+/* Root command tables independently of redisplay's current menu vector.
+   Native AppKit actions can arrive after a later menu preparation.  Each
+   entry is (GENERATION . [FRAME VECTOR ITEMS-USED]); AppKit releases an entry
+   when the corresponding native menu generation can no longer issue an
+   action.  */
+static Lisp_Object native_menu_snapshots;
+static unsigned long native_menu_generation;
+
+enum native_menu_snapshot_slot
+  {
+    NATIVE_MENU_SNAPSHOT_FRAME,
+    NATIVE_MENU_SNAPSHOT_VECTOR,
+    NATIVE_MENU_SNAPSHOT_ITEMS_USED,
+    NATIVE_MENU_SNAPSHOT_SIZE
+  };
+
+static Lisp_Object
+native_menu_snapshot_entry (unsigned long generation)
+{
+  return Fassq (make_fixnum (generation), native_menu_snapshots);
+}
+
+static void
+release_native_menu_snapshot (unsigned long generation)
+{
+  Lisp_Object previous = Qnil;
+
+  for (Lisp_Object tail = native_menu_snapshots; CONSP (tail);
+       previous = tail, tail = XCDR (tail))
+    {
+      Lisp_Object entry = XCAR (tail);
+      if (CONSP (entry)
+          && FIXNATP (XCAR (entry))
+          && (unsigned long) XFIXNAT (XCAR (entry)) == generation)
+	{
+	  if (NILP (previous))
+	    native_menu_snapshots = XCDR (tail);
+	  else
+	    XSETCDR (previous, XCDR (tail));
+	  return;
+	}
+    }
+}
+
+static unsigned long
+next_native_menu_generation (void)
+{
+  do
+    native_menu_generation
+      = (native_menu_generation == MOST_POSITIVE_FIXNUM
+	 ? 1 : native_menu_generation + 1);
+  while (!NILP (native_menu_snapshot_entry (native_menu_generation)));
+
+  return native_menu_generation;
+}
+
+static Lisp_Object
+prepare_native_menubar (Lisp_Object frame)
+{
+  struct frame *f = XFRAME (frame);
+  if (!FRAME_LIVE_P (f) || !FRAME_MAC_P (f))
+    return Qnil;
+  set_frame_menubar (f, true);
+  if (!FRAME_LIVE_P (f))
+    return Qnil;
+
+  Lisp_Object snapshot = make_vector (NATIVE_MENU_SNAPSHOT_SIZE, Qnil);
+  unsigned long generation = next_native_menu_generation ();
+
+  ASET (snapshot, NATIVE_MENU_SNAPSHOT_FRAME, frame);
+  ASET (snapshot, NATIVE_MENU_SNAPSHOT_VECTOR,
+	Fcopy_sequence (f->menu_bar_vector));
+  ASET (snapshot, NATIVE_MENU_SNAPSHOT_ITEMS_USED,
+	make_fixnum (f->menu_bar_items_used));
+  native_menu_snapshots
+    = Fcons (Fcons (make_fixnum (generation), snapshot),
+	     native_menu_snapshots);
+  return make_fixnum (generation);
+}
+
+static Lisp_Object
+native_menubar_error (Lisp_Object error)
+{
+  (void) error;
+  return Qnil;
+}
+
+unsigned long
+mac_prepare_native_menubar (void)
+{
+  /* Never unwind past the synchronous GUI/Lisp bridge on a Lisp error.  */
+  Lisp_Object generation
+    = internal_condition_case_1 (prepare_native_menubar, selected_frame, Qt,
+				 native_menubar_error);
+  return FIXNATP (generation) ? XFIXNAT (generation) : 0;
+}
+
+void
+mac_native_menubar_selection (unsigned long generation, int selection)
+{
+  Lisp_Object entry = native_menu_snapshot_entry (generation);
+  if (!CONSP (entry))
+    return;
+
+  Lisp_Object snapshot = XCDR (entry);
+  if (!VECTORP (snapshot) || ASIZE (snapshot) != NATIVE_MENU_SNAPSHOT_SIZE)
+    return;
+
+  Lisp_Object frame = AREF (snapshot, NATIVE_MENU_SNAPSHOT_FRAME);
+  Lisp_Object vector = AREF (snapshot, NATIVE_MENU_SNAPSHOT_VECTOR);
+  Lisp_Object items_used
+    = AREF (snapshot, NATIVE_MENU_SNAPSHOT_ITEMS_USED);
+  if (selection > 0 && FRAMEP (frame) && FRAME_LIVE_P (XFRAME (frame))
+      && VECTORP (vector) && FIXNATP (items_used)
+      && selection < XFIXNAT (items_used)
+      && XFIXNAT (items_used) <= ASIZE (vector))
+    find_and_call_menu_selection (XFRAME (frame), XFIXNAT (items_used), vector,
+				 (void *) (intptr_t) selection);
+}
+
+void
+mac_release_native_menubar (unsigned long generation)
+{
+  if (generation)
+    release_native_menu_snapshot (generation);
+}
+
 
 /* Set menu_items_inuse so no other popup menu or dialog is created.  */
 
@@ -86,7 +213,8 @@ If FRAME is nil or not given, use the selected frame.  */)
 {
   struct frame *f = decode_window_system_frame (frame);
 
-  mac_activate_menubar (f);
+  if (!mac_focus_native_menubar (f))
+    mac_activate_menubar (f);
 
   return Qnil;
 }
@@ -307,7 +435,11 @@ set_frame_menubar (struct frame *f, bool deep_p)
   /* Non-null value to indicate menubar has already been "created".  */
   f->output_data.mac->menubar_widget = 1;
 
-  mac_fill_menubar (first_wv->contents, deep_p);
+  if (!mac_fill_menubar (first_wv->contents, deep_p))
+    /* The Lisp vector was rebuilt, but AppKit kept the menu it is currently
+       tracking.  Invalidate the comparison cache so the next deep update
+       retries applying these contents.  */
+    f->menu_bar_items_used = 0;
 
   free_menubar_widget_value_tree (first_wv);
 
@@ -849,6 +981,8 @@ DEFUN ("menu-or-popup-active-p", Fmenu_or_popup_active_p, Smenu_or_popup_active_
 void
 syms_of_macmenu (void)
 {
+  staticpro (&native_menu_snapshots);
+  native_menu_snapshots = Qnil;
   DEFSYM (Qdebug_on_next_call, "debug-on-next-call");
   defsubr (&Smenu_or_popup_active_p);
 

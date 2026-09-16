@@ -67,7 +67,13 @@ Must use clang (macOS `gcc` is aliased to clang). Real GCC cannot build this —
 ## Testing
 
 On macOS 27 and later, preserve the existing event-loop settings and register
-`NSWindowResizeNeedsTrackingLoop` before creating the application. Avoid
+`NSWindowResizeNeedsTrackingLoop` before creating the application. Also register
+`NSControlPrefersGestureRecognizerTracking=NO`: on the tested macOS 27 system,
+the yellow button's gesture recognizer intercepted clicks without dispatching
+`miniaturize:`, while traditional control tracking restored minimization.
+The integrated build passed interactive minimize/restore, mouse menu command
+delivery, and continuous edge resizing together. Other titlebar controls and
+the broader menu matrix still need checking. Avoid
 synthetic release/press events during resize so a drag stays in one session.
 This combination passed an interactive continuous-resize check. Native menu
 activation/command selection also fails in the unchanged installed build
@@ -80,6 +86,28 @@ with edge/corner drags, actual menu commands, and `C-g`; programmatic
 `set-frame-size` alone is insufficient. When launching the development bundle
 directly, set `EMACSLOADPATH` to this checkout's absolute `lisp` directory if
 the bundle lacks `Contents/Resources/lisp`.
+
+The experimental macOS 27 native-menu path is opt-in via the presence of
+`EMACS_MAC_NATIVE_MENUS` (unset it to disable); `EMACS_MAC_TRACE_MENUS`
+enables lifecycle diagnostics. Run `python3 test/manual/mac-menu/check.py`
+for snapshot ownership checks and use `test/manual/mac-menu/README.md` for
+the interactive fixture. The standalone check does not exercise AppKit or
+real Lisp GC. Menu actions can arrive after tracking ends, so snapshot
+cleanup must preserve queued actions. Do not use the legacy popup-active
+flag to represent native tracking: it also authorizes synchronous Lisp
+callbacks, which are unsafe in some event-loop contexts.
+The separate `EMACS_MAC_WORKER_MENUS` experiment cancels the actual submenu
+in tracking run-loop mode before deferring preparation to Lisp. Initial
+command/lifecycle checks passed. Clearing stale submenu contents and temporarily
+redirecting Help search to an off-bar menu removed visible blinking in tested
+openings. Capture the main window for retry ownership: Help's popup can become
+the key window. Cancelling only the root previously froze in AppKit's
+tracking loop despite end notifications. Do not rely on those notifications
+to prove that the native event loop has returned.
+Native menu tracking can bypass menu key-equivalent callbacks. The opt-in
+C-g handler intercepts dequeued key events in `EmacsApplication`, uses the
+existing quit-key recognizer, and cancels tracking without evaluating Lisp.
+It passed Edit/Help dismissal and ordinary prefix cancellation outside menus.
 
 ```bash
 make -C test check                          # run all tests
