@@ -2381,7 +2381,7 @@ HCURSOR
 w32_load_cursor (LPCTSTR name)
 {
   /* Try first to load cursor from application resource.  */
-  HCURSOR cursor = LoadImage ((HINSTANCE) GetModuleHandle (NULL),
+  HCURSOR cursor = LoadImage (GetModuleHandle (NULL),
                               name, IMAGE_CURSOR, 0, 0,
                               LR_DEFAULTCOLOR | LR_DEFAULTSIZE | LR_SHARED);
   if (!cursor)
@@ -2397,7 +2397,7 @@ static LRESULT CALLBACK w32_wnd_proc (HWND, UINT, WPARAM, LPARAM);
 
 #define INIT_WINDOW_CLASS(WC)			  \
   (WC).style = CS_HREDRAW | CS_VREDRAW;		  \
-  (WC).lpfnWndProc = (WNDPROC) w32_wnd_proc;      \
+  (WC).lpfnWndProc = w32_wnd_proc;      	  \
   (WC).cbClsExtra = 0;                            \
   (WC).cbWndExtra = WND_EXTRA_BYTES;              \
   (WC).hInstance = hinst;                         \
@@ -2541,7 +2541,7 @@ Lisp_Object
 w32_process_dnd_data (int format, void *hGlobal)
 {
   Lisp_Object result = Qnil;
-  HGLOBAL hg = (HGLOBAL) hGlobal;
+  HGLOBAL hg = hGlobal;
 
   switch (format)
     {
@@ -3808,19 +3808,23 @@ w32_msg_pump (deferred_msg * msg_buf)
 
 		set_ime_open_status_fn (context, msg.wParam != 0);
 		release_ime_context_fn (focus_window, context);
-		break;
+
+		goto dispatch;
 	      }
 
+	    default:
 #ifdef MSG_DEBUG
 	      /* Broadcast messages make it here, so you need to be looking
 		 for something in particular for this to be useful.  */
-	    default:
 	      DebPrint (("msg %x not expected by w32_msg_pump\n", msg.message));
 #endif
+	      /* Handle extra events for compatibility, preventing not dispatch.  */
+	      goto dispatch;
 	    }
 	}
       else
 	{
+	dispatch:
 	  if (w32_unicode_gui)
 	    DispatchMessageW (&msg);
 	  else
@@ -10782,7 +10786,14 @@ DEFUN ("w32-get-ime-open-status",
        doc: /* Return non-nil if IME is active, otherwise return nil.
 
 IME, the MS-Windows Input Method Editor, can be active or inactive.
-This function returns non-nil if the IME is active, otherwise nil.  */)
+This function returns non-nil if the IME is active, otherwise nil.
+
+Caveat: on Windows 11 and later, this function might return non-nil
+even when IME is not active, or nil when it's active.  This is due to
+"new" TSF-based IME which have known compatibility issues with
+IME-related APIs which Emacs uses.  A workaround is to switch to the
+legacy IME mode, a.k.a. the "previous version of Microsoft IME", in
+the IME Compatibility settings.  */)
   (void)
 {
   struct frame *sf =
@@ -12126,9 +12137,9 @@ typedef USHORT (WINAPI * CaptureStackBackTrace_proc) (ULONG, ULONG, PVOID *,
    -Wl,-image-base switch we use in LD_SWITCH_SYSTEM_TEMACS, see
    configure.ac.  */
 #if defined MINGW_W64 && EMACS_INT_MAX > LONG_MAX
-# define DEFAULT_IMAGE_BASE (ptrdiff_t)0x400000000
+# define DEFAULT_IMAGE_BASE 0x400000000
 #elif !defined CYGWIN	/* 32-bit MinGW build */
-# define DEFAULT_IMAGE_BASE (ptrdiff_t)0x01000000
+# define DEFAULT_IMAGE_BASE 0x01000000
 #endif
 
 static int
