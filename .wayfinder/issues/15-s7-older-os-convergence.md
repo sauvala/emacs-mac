@@ -10,7 +10,8 @@ assignee: null
 ## Scope
 
 The user decided on 2026-09-23 not to validate in UTM or other virtual
-machines; runtime validation uses macOS 27 only. Earlier systems keep the old
+machines or on Intel Macs; runtime validation uses macOS 27 on Apple
+silicon only. Earlier systems keep the old
 loop as their default, marked unverified, with the new loop available by
 launch opt-in. This ticket has work only if the user later supplies evidence
 for another OS (flipping that OS's default) or explicitly drops older

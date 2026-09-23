@@ -175,3 +175,9 @@ under the existing rules, which stay unchanged:
   in the source for older systems.
 - Workarounds still leave the new loop in their stage (M8), so macOS 27 runs
   without them once S3/S4 are accepted.
+
+User decision, same day: no Intel Mac testing either. Apple announced macOS 26
+as the last release for Intel Macs, so macOS 27 validation is Apple silicon
+only in any case; Intel systems run macOS 26 or earlier and keep the old loop
+as their unverified default. This relaxes the acceptance contract's "cover
+Intel and Apple silicon where supported" requirement for this effort.
