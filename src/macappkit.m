@@ -161,6 +161,24 @@ static void mac_loop_complete_launch (void);
 static void mac_loop_note_menu_selection (NSInteger);
 static void mac_loop_with_access_now_or_later (void (^) (void));
 
+/* Use at the start of a query method (accessibility, text input) that
+   reads Lisp or buffer state and returns a value of TYPE.  Without Lisp
+   access it takes access by try-lock for CALL, or returns FALLBACK
+   when Lisp is busy.  */
+#define MAC_LOOP_QUERY_NEEDS_LISP(type, fallback, call)			\
+  do {									\
+    if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())	\
+      {									\
+	int token_ = mac_loop_begin_lisp_access ();			\
+									\
+	if (token_ == MAC_LOOP_NO_ACCESS)				\
+	  return fallback;						\
+	type result_ = call;						\
+	mac_loop_end_lisp_access (token_);				\
+	return result_;							\
+      }									\
+  } while (false)
+
 /* Use at the start of an AppKit callback that touches Lisp or
    redisplay state.  Without Lisp access, re-run the callback later on
    the GUI thread with access and return.  */
@@ -7662,6 +7680,11 @@ event_phase_to_symbol (NSEventPhase phase)
 
 - (void)insertText:(id)aString replacementRange:(NSRange)replacementRange
 {
+  /* Input methods may call this outside key event handling, for
+     example from a candidate window.  */
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self insertText:aString
+			       replacementRange:replacementRange]);
+
   struct frame *f = [self emacsFrame];
   NSString *charactersForASCIIKeystroke = nil;
   Lisp_Object arg = Qnil;
@@ -7773,6 +7796,10 @@ event_phase_to_symbol (NSEventPhase phase)
 - (void)setMarkedText:(id)aString selectedRange:(NSRange)selectedRange
      replacementRange:(NSRange)replacementRange
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self setMarkedText:aString
+				      selectedRange:selectedRange
+				   replacementRange:replacementRange]);
+
   struct frame *f = [self emacsFrame];
   Lisp_Object arg = Qnil;
 
@@ -7829,6 +7856,10 @@ event_phase_to_symbol (NSEventPhase phase)
 - (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)aRange
 						actualRange:(NSRangePointer)actualRange
 {
+  MAC_LOOP_QUERY_NEEDS_LISP (NSAttributedString *, nil,
+			     [self attributedSubstringForProposedRange:aRange
+							  actualRange:actualRange]);
+
   NSRange markedRange = [self markedRange];
   NSAttributedString *result = nil;
 
@@ -7953,6 +7984,9 @@ event_phase_to_symbol (NSEventPhase phase)
 
 - (NSRange)markedRange
 {
+  MAC_LOOP_QUERY_NEEDS_LISP (NSRange, NSMakeRange (NSNotFound, 0),
+			     [self markedRange]);
+
   NSUInteger location = NSNotFound;
 
   if (![self hasMarkedText])
@@ -7970,6 +8004,9 @@ event_phase_to_symbol (NSEventPhase phase)
 
 - (NSRange)selectedRange
 {
+  MAC_LOOP_QUERY_NEEDS_LISP (NSRange, NSMakeRange (NSNotFound, 0),
+			     [self selectedRange]);
+
   struct frame *f = [self emacsFrame];
   NSRange result;
 
@@ -8015,6 +8052,10 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
 - (NSRect)firstRectForCharacterRange:(NSRange)aRange
 			 actualRange:(NSRangePointer)actualRange
 {
+  MAC_LOOP_QUERY_NEEDS_LISP (NSRect, NSZeroRect,
+			     [self firstRectForCharacterRange:aRange
+						  actualRange:actualRange]);
+
   NSRect rect = NSZeroRect;
   struct frame *f = NULL;
 
@@ -8098,6 +8139,9 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
 
 - (NSUInteger)characterIndexForPoint:(NSPoint)thePoint
 {
+  MAC_LOOP_QUERY_NEEDS_LISP (NSUInteger, NSNotFound,
+			     [self characterIndexForPoint:thePoint]);
+
   NSUInteger result = NSNotFound;
   NSPoint point;
   Lisp_Object window;
@@ -16485,6 +16529,9 @@ ax_get_selected_text_ranges (EmacsMainView *emacsView)
 
 - (id)accessibilityAttributeValue:(NSAccessibilityAttributeName)attribute
 {
+  MAC_LOOP_QUERY_NEEDS_LISP (id, nil,
+			     [self accessibilityAttributeValue:attribute]);
+
   NSUInteger index = [ax_attribute_names indexOfObject:attribute];
 
   if (index != NSNotFound)
@@ -16497,6 +16544,9 @@ ax_get_selected_text_ranges (EmacsMainView *emacsView)
 
 - (BOOL)accessibilityIsAttributeSettable:(NSAccessibilityAttributeName)attribute
 {
+  MAC_LOOP_QUERY_NEEDS_LISP (BOOL, NO,
+			     [self accessibilityIsAttributeSettable:attribute]);
+
   NSUInteger index = [ax_attribute_names indexOfObject:attribute];
 
   if (index != NSNotFound)
@@ -16518,6 +16568,9 @@ ax_get_selected_text_ranges (EmacsMainView *emacsView)
 - (void)accessibilitySetValue:(id)value
 		 forAttribute:(NSAccessibilityAttributeName)attribute
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self accessibilitySetValue:value
+					       forAttribute:attribute]);
+
   NSUInteger index = [ax_attribute_names indexOfObject:attribute];
 
   if (index != NSNotFound)
@@ -16705,6 +16758,10 @@ ax_get_attributed_string_for_range (EmacsMainView *emacsView, id parameter)
 - (id)accessibilityAttributeValue:(NSAccessibilityParameterizedAttributeName)attribute
 		     forParameter:(id)parameter
 {
+  MAC_LOOP_QUERY_NEEDS_LISP (id, nil,
+			     [self accessibilityAttributeValue:attribute
+						  forParameter:parameter]);
+
   NSUInteger index = [ax_parameterized_attribute_names indexOfObject:attribute];
 
   if (index != NSNotFound)
@@ -16726,6 +16783,8 @@ ax_get_attributed_string_for_range (EmacsMainView *emacsView, id parameter)
 
 - (void)accessibilityPerformAction:(NSAccessibilityActionName)theAction
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self accessibilityPerformAction:theAction]);
+
   NSUInteger index = [ax_action_names indexOfObject:theAction];
 
   if (index != NSNotFound)
