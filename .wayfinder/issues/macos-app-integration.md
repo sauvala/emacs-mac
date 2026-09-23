@@ -32,14 +32,14 @@ version, with explicit validation and retirement criteria for existing workaroun
 - Source baseline: `1b08291ec0350cec8fbd1447fe869185f486097d`.
   The [initial audit](../research/initial-audit.md) is source inspection plus
   recorded historical tests, not a fresh GUI validation.
-- No architecture is selected yet. A continuously running AppKit event loop is
-  a candidate to evaluate, not an accepted solution.
+- Event-loop ownership is selected (ticket 04), pending its decisive prototype.
 
 ## Decisions so far
 
 - [Establish documented AppKit lifecycle and tracking contracts](01-appkit-contracts.md): public mechanisms exist; callback safety and tracking responsiveness still require design and prototype evidence.
 - [Establish upstream direction and supported macOS baseline](02-upstream-baseline.md): existing thread separation needs new coordination; preserve the declared 10.10 floor and distinguish it from renderer requirements and tested coverage.
 - [Define native responsiveness and acceptance scenarios](03-native-behavior.md): native operations and menus respond while Lisp is busy, with deferred save/quit, context-bound single-execution commands, 100/250 ms targets, and per-OS runtime evidence before retiring legacy paths.
+- [Choose application event-loop ownership and Lisp scheduling](04-event-loop-ownership.md): persistent `NSApplication.run` with Lisp on its own thread; the GUI never waits unbounded on Lisp, using safe-point lock acquisition or snapshots; synchronous mode-classed Lisp-to-GUI requests; launch-selected opt-in and a busy-Lisp macOS 27 prototype.
 
 ## Not yet specified
 
