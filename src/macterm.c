@@ -486,6 +486,111 @@ This function is only active in Metal rendering builds.  */)
   return Qnil;
 }
 
+DEFUN ("mac-loop-test-schedule", Fmac_loop_test_schedule,
+       Smac_loop_test_schedule, 1, 2, 0,
+       doc: /* Schedule native test ACTIONS on FRAME's window.
+Internal test support for the persistent event loop; see
+test/manual/mac-app-loop.  Each action is a list (DELAY KIND . ARGS)
+where DELAY is seconds from now and KIND is one of:
+  key CODE CHAR MODS   post key down/up; CODE is the virtual key code,
+                       CHAR the character, MODS a list of shift,
+                       control, option or command.
+  down X Y, drag X Y, up X Y
+                       post a left mouse event at window point X,Y
+                       (top-left origin).
+  miniaturize, deminiaturize, zoom, fullscreen, close, activate,
+  terminate            invoke the native window or application operation.
+  set-size W H         set the window size natively.
+  probe N              only record a timestamp.
+The actions run on the GUI thread even while Lisp is busy.  */)
+  (Lisp_Object actions, Lisp_Object frame)
+{
+  struct frame *f = decode_window_system_frame (frame);
+  ptrdiff_t n = list_length (actions), i = 0;
+  struct mac_loop_test_action *a = xzalloc ((n ? n : 1) * sizeof *a);
+  Lisp_Object tail;
+
+  for (tail = actions; CONSP (tail); tail = XCDR (tail), i++)
+    {
+      Lisp_Object spec = XCAR (tail), kind;
+      struct { const char *name; int kind; } kinds[] =
+	{{"key", MAC_LOOP_TEST_KEY}, {"down", MAC_LOOP_TEST_MOUSE_DOWN},
+	 {"drag", MAC_LOOP_TEST_MOUSE_DRAG}, {"up", MAC_LOOP_TEST_MOUSE_UP},
+	 {"miniaturize", MAC_LOOP_TEST_MINIATURIZE},
+	 {"deminiaturize", MAC_LOOP_TEST_DEMINIATURIZE},
+	 {"zoom", MAC_LOOP_TEST_ZOOM}, {"fullscreen", MAC_LOOP_TEST_FULLSCREEN},
+	 {"close", MAC_LOOP_TEST_CLOSE}, {"activate", MAC_LOOP_TEST_ACTIVATE},
+	 {"set-size", MAC_LOOP_TEST_SET_SIZE}, {"probe", MAC_LOOP_TEST_PROBE},
+	 {"terminate", MAC_LOOP_TEST_TERMINATE}};
+      int k;
+
+      CHECK_CONS (spec);
+      a[i].delay = extract_float (XCAR (spec));
+      spec = XCDR (spec);
+      CHECK_CONS (spec);
+      kind = XCAR (spec);
+      CHECK_SYMBOL (kind);
+      spec = XCDR (spec);
+      for (k = 0; k < countof (kinds); k++)
+	if (!strcmp (SSDATA (SYMBOL_NAME (kind)), kinds[k].name))
+	  break;
+      if (k == countof (kinds))
+	{
+	  xfree (a);
+	  error ("Unknown test action %s", SSDATA (SYMBOL_NAME (kind)));
+	}
+      a[i].kind = kinds[k].kind;
+      if (a[i].kind == MAC_LOOP_TEST_KEY)
+	{
+	  a[i].key_code = XFIXNUM (Fcar (spec));
+	  a[i].character = XFIXNUM (Fcar (Fcdr (spec)));
+	  for (Lisp_Object m = Fcar (Fcdr (Fcdr (spec))); CONSP (m);
+	       m = XCDR (m))
+	    {
+	      const char *name = SSDATA (SYMBOL_NAME (XCAR (m)));
+
+	      if (!strcmp (name, "shift"))
+		a[i].modifiers |= 1UL << 17;
+	      else if (!strcmp (name, "control"))
+		a[i].modifiers |= 1UL << 18;
+	      else if (!strcmp (name, "option"))
+		a[i].modifiers |= 1UL << 19;
+	      else if (!strcmp (name, "command"))
+		a[i].modifiers |= 1UL << 20;
+	    }
+	}
+      else if (CONSP (spec))
+	{
+	  a[i].x = extract_float (XCAR (spec));
+	  if (CONSP (XCDR (spec)))
+	    a[i].y = extract_float (XCAR (XCDR (spec)));
+	}
+    }
+  mac_loop_test_schedule (f, a, n);
+  xfree (a);
+
+  return Qnil;
+}
+
+DEFUN ("mac-loop-test-results", Fmac_loop_test_results,
+       Smac_loop_test_results, 0, 1, 0,
+       doc: /* Return persistent-loop test records as (MAX-GAP LONG-GAPS RECORDS).
+MAX-GAP is the longest interval in seconds between GUI-thread heartbeats
+(every 5 ms) since the first schedule or last reset, LONG-GAPS counts
+gaps over 100 ms, and RECORDS is a list of (UPTIME . LABEL).  Non-nil
+RESET clears them.  Internal test support.  */)
+  (Lisp_Object reset)
+{
+  return mac_loop_test_results (!NILP (reset));
+}
+
+DEFUN ("mac-loop-uptime", Fmac_loop_uptime, Smac_loop_uptime, 0, 0, 0,
+       doc: /* Return the system uptime in seconds used by test records.  */)
+  (void)
+{
+  return make_float (mac_system_uptime ());
+}
+
 /* X display function emulation */
 
 static void
@@ -6572,6 +6677,9 @@ syms_of_macterm (void)
   defsubr (&Smac_metal_render_stats);
   defsubr (&Smac_metal_set_display_sync_enabled);
   defsubr (&Smac_metal_set_maximum_drawable_count);
+  defsubr (&Smac_loop_test_schedule);
+  defsubr (&Smac_loop_test_results);
+  defsubr (&Smac_loop_uptime);
 
   DEFSYM (Qcontrol, "control");
   DEFSYM (Qmeta, "meta");

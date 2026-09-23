@@ -532,6 +532,7 @@ typedef NSInteger NSGlyphProperty;
 @end
 
 @interface EmacsApplication : NSApplication
+- (void)sendEventToAppKit:(NSEvent *)event;
 @end
 
 @interface EmacsPosingWindow : NSWindow
@@ -606,6 +607,9 @@ typedef NSInteger NSGlyphProperty;
 - (void)setTrackingResumeBlock:(void (^)(void))block;
 - (NSTimeInterval)minimumIntervalForReadSocket;
 - (int)handleQueuedNSEventsWithHoldingQuitIn:(struct input_event *)bufp;
+- (int)handleNSEventWithHoldingQuitIn:(struct input_event *)bufp
+				event:(NSEvent *)event;
+- (void)setHoldQuit:(struct input_event *)bufp;
 - (void)cancelHelpEchoForEmacsFrame:(struct frame *)f;
 - (BOOL)conflictingKeyBindingsDisabled;
 - (void)setConflictingKeyBindingsDisabled:(BOOL)flag;

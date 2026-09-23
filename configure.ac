@@ -700,6 +700,14 @@ AC_ARG_ENABLE([mac-native-menus],
 AS_CASE([$enable_mac_native_menus], [yes|no], [],
   [AC_MSG_ERROR([--enable-mac-native-menus accepts only yes or no])])
 
+AC_ARG_ENABLE([mac-persistent-loop],
+  [AS_HELP_STRING([--enable-mac-persistent-loop],
+    [make the experimental persistent AppKit event loop the default
+     (EMACS_MAC_PERSISTENT_LOOP=0 or 1 overrides it at launch)])],
+  [], [enable_mac_persistent_loop=no])
+AS_CASE([$enable_mac_persistent_loop], [yes|no], [],
+  [AC_MSG_ERROR([--enable-mac-persistent-loop accepts only yes or no])])
+
 AC_ARG_WITH([gnustep-conf],
 [AS_HELP_STRING([--with-gnustep-conf=FILENAME],
    [name of GNUstep configuration file to use on systems where the command
@@ -5671,6 +5679,11 @@ AS_IF([test "$enable_mac_native_menus" = yes],
      [AC_MSG_ERROR([--enable-mac-native-menus requires the Mac GUI port])])
    AC_DEFINE([MAC_NATIVE_MENUS_DEFAULT], [1],
      [Define to 1 to enable native menus and worker preparation by default.])])
+AS_IF([test "$enable_mac_persistent_loop" = yes],
+  [AS_IF([test "$HAVE_MACGUI" != yes],
+     [AC_MSG_ERROR([--enable-mac-persistent-loop requires the Mac GUI port])])
+   AC_DEFINE([MAC_PERSISTENT_LOOP_DEFAULT], [1],
+     [Define to 1 to use the persistent AppKit event loop by default.])])
 ### Use macOS GUI.
 if test "${HAVE_MACGUI}" = "yes"; then
   AC_DEFINE(HAVE_MACGUI, 1, [Define to 1 if you are using GUI on macOS.])

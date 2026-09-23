@@ -123,6 +123,73 @@ static void mac_within_lisp_deferred_unless_popup (void (^) (void));
 
 static void mac_draw_queue_sync(void);
 
+/* True if the persistent event loop is selected for this process.
+   The GUI thread then runs -[NSApplication run] for the process
+   lifetime and touches Lisp state only with "Lisp access"; see the
+   "Persistent event loop" section.  Decided once in `main'.  */
+static bool mac_persistent_loop_p;
+static bool mac_trace_loop_p;
+
+#define MAC_TRACE_LOOP(...)						\
+  do { if (mac_trace_loop_p) fprintf (stderr, "mac-loop: " __VA_ARGS__); } \
+  while (false)
+
+/* Kinds of Lisp access of the GUI thread.  */
+enum
+  {
+    MAC_LOOP_NO_ACCESS = 0,
+    MAC_LOOP_BORROWED_ACCESS = 1,
+    MAC_LOOP_LOCKED_ACCESS = 2
+  };
+
+static int mac_loop_begin_lisp_access (void);
+static void mac_loop_end_lisp_access (int);
+static bool mac_loop_gui_has_lisp_access (void);
+static void mac_loop_with_lisp_access_or_defer (void (^) (void));
+static void mac_loop_send_event (NSEvent *);
+static void mac_loop_queue_input_event (const struct input_event *);
+static void mac_loop_wake_lisp (void);
+static int mac_loop_read_socket_events (struct input_event *);
+static void mac_loop_complete_launch (void);
+static void mac_loop_note_menu_selection (NSInteger);
+static void mac_loop_with_access_now_or_later (void (^) (void));
+
+/* Use at the start of an AppKit callback that touches Lisp or
+   redisplay state.  Without Lisp access, re-run the callback later on
+   the GUI thread with access and return.  */
+#define MAC_LOOP_CALLBACK_NEEDS_LISP(call)				\
+  do {									\
+    if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())	\
+      {									\
+	mac_loop_with_access_now_or_later (^{call;});			\
+	return;								\
+      }									\
+  } while (false)
+static void mac_loop_within_gui (void (^) (void));
+static bool mac_loop_within_lisp (void (^) (void));
+static bool mac_loop_defer_to_request (void (^) (void));
+static void mac_loop_queue_lisp_block (void (^) (void));
+
+/* Nonzero while the GUI thread handles an event with Lisp access, so
+   that nested -[NSApplication sendEvent:] calls go to AppKit.  */
+static int mac_loop_dispatch_depth;
+
+/* Holds a quit event met while the GUI thread handles events outside
+   read_socket; forwarded to the Lisp thread afterwards.  */
+static struct input_event mac_loop_gui_hold_quit;
+static struct input_event *mac_loop_lisp_hold_quit;
+static int mac_loop_request_depth;
+static bool mac_loop_test_recording_p;
+static void mac_loop_test_record (const char *, ...);
+
+/* Access tokens of nested mac_try_buffer_and_glyph_matrix_access.  */
+static int mac_loop_access_tokens[16];
+static int mac_loop_access_token_depth;
+
+static int mac_loop_select (int, fd_set *, fd_set *, fd_set *,
+			    struct timespec *, sigset_t *);
+static void mac_loop_begin_launch (void);
+
 #define MAC_SELECT_ALLOW_LISP_EVALUATION 1
 #if MAC_SELECT_ALLOW_LISP_EVALUATION
 static bool mac_select_allow_lisp_evaluation;
@@ -133,6 +200,9 @@ static bool mac_select_allow_lisp_evaluation;
 static bool
 mac_native_menus_enabled_p (void)
 {
+  /* The persistent loop does not use the native-menu experiments.  */
+  if (mac_persistent_loop_p)
+    return false;
 #ifdef MAC_NATIVE_MENUS_DEFAULT
   return true;
 #else
@@ -143,6 +213,8 @@ mac_native_menus_enabled_p (void)
 static bool
 mac_worker_menus_enabled_p (void)
 {
+  if (mac_persistent_loop_p)
+    return false;
 #ifdef MAC_NATIVE_MENUS_DEFAULT
   return true;
 #else
@@ -567,6 +639,15 @@ mac_cgevent_set_unicode_string_from_event_ref (CGEventRef cgevent,
 static void
 mac_within_app (void (^block) (void))
 {
+  if (mac_persistent_loop_p)
+    {
+      /* The application is always running.  */
+      if (!pthread_main_np ())
+	mac_within_gui (block);
+      else
+	block ();
+      return;
+    }
   if (!pthread_main_np ())
     mac_within_gui (^{[NSApp runTemporarilyWithBlock:block];});
   else if (![NSApp isRunning])
@@ -1172,6 +1253,21 @@ static bool handling_queued_nsevents_p;
 
 @implementation EmacsApplication
 
+- (void)sendEvent:(NSEvent *)event
+{
+  if (mac_persistent_loop_p && mac_loop_dispatch_depth == 0)
+    mac_loop_send_event (event);
+  else
+    [super sendEvent:event];
+}
+
+/* Dispatch EVENT to AppKit without Emacs's event handling.  */
+
+- (void)sendEventToAppKit:(NSEvent *)event
+{
+  [super sendEvent:event];
+}
+
 - (NSEvent *)nextEventMatchingMask:(NSEventMask)mask
 			untilDate:(NSDate *)expiration
 			   inMode:(NSRunLoopMode)mode
@@ -1347,6 +1443,13 @@ static bool handling_queued_nsevents_p;
       setrlimit (RLIMIT_NOFILE, &rlim);
     }
 
+  if (mac_persistent_loop_p)
+    {
+      /* Keep running; let the waiting Lisp thread continue.  */
+      mac_loop_complete_launch ();
+      return;
+    }
+
   /* Exit from the main event loop.  */
   [NSApp stop:nil];
   [NSApp postDummyEvent];
@@ -1369,6 +1472,8 @@ static bool handling_queued_nsevents_p;
 #if HAVE_MAC_METAL || defined (USE_METAL_RENDERING)
 - (void)applicationDidChangeScreenParameters:(NSNotification *)notification
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self applicationDidChangeScreenParameters:notification]);
+
   Lisp_Object tail, frame;
 
   FOR_EACH_FRAME (tail, frame)
@@ -1441,6 +1546,11 @@ static bool handling_queued_nsevents_p;
                         change:(NSDictionaryOf (NSKeyValueChangeKey, id) *)change
                        context:(void *)context
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self observeValueForKeyPath:keyPath
+					       ofObject:object
+						 change:change
+						context:context]);
+
   if ([observedKeyPaths containsObject:keyPath])
     {
       struct input_event inev;
@@ -1502,6 +1612,13 @@ static bool handling_queued_nsevents_p;
       [NSApp postDummyEvent];
       return;
     }
+  if (mac_persistent_loop_p && !popup_activated ())
+    {
+      /* Menu-bar tracking is not intercepted by the persistent loop,
+	 so nothing polls menuItemSelection.  */
+      mac_loop_note_menu_selection ([sender tag]);
+      return;
+    }
   menuItemSelection = [sender tag];
 }
 
@@ -1537,6 +1654,33 @@ static EventRef peek_if_next_event_activates_menu_bar (void);
 
 - (void)storeEvent:(struct input_event *)bufp
 {
+  if (mac_persistent_loop_p)
+    {
+      if (!pthread_main_np ())
+	{
+	  /* A callback queued to the Lisp thread.  */
+	  if (bufp->kind != HELP_EVENT)
+	    kbd_buffer_store_event_hold (bufp, mac_loop_lisp_hold_quit);
+	  return;
+	}
+      if (!mac_loop_gui_has_lisp_access ())
+	{
+	  /* Only events without fresh Lisp objects are stored without
+	     access; help echo needs Lisp and is dropped.  */
+	  if (bufp->kind != HELP_EVENT)
+	    mac_loop_queue_input_event (bufp);
+	  return;
+	}
+      if (hold_quit == NULL && bufp->kind != HELP_EVENT)
+	{
+	  /* Never call handle_interrupt on the GUI thread.  */
+	  kbd_buffer_store_event_hold (bufp, &mac_loop_gui_hold_quit);
+	  count++;
+	  if (mac_loop_request_depth == 0)
+	    mac_loop_wake_lisp ();
+	  return;
+	}
+    }
   if (bufp->kind == HELP_EVENT)
     {
       do_help = 1;
@@ -1547,6 +1691,34 @@ static EventRef peek_if_next_event_activates_menu_bar (void);
       kbd_buffer_store_event_hold (bufp, hold_quit);
       count++;
     }
+}
+
+/* Handle EVENT with holding a quit event in BUFP (or the GUI-thread
+   holder if BUFP and the current holder are NULL).  Return the number
+   of stored Emacs events.  Used by the persistent loop.  */
+
+- (int)handleNSEventWithHoldingQuitIn:(struct input_event *)bufp
+				event:(NSEvent *)event
+{
+  struct input_event *savedHoldQuit = hold_quit;
+  int savedCount = count, result;
+
+  if (bufp)
+    hold_quit = bufp;
+  else if (hold_quit == NULL)
+    hold_quit = &mac_loop_gui_hold_quit;
+  count = 0;
+  [self handleOneNSEvent:event];
+  result = count;
+  hold_quit = savedHoldQuit;
+  count = savedCount;
+
+  return result;
+}
+
+- (void)setHoldQuit:(struct input_event *)bufp
+{
+  hold_quit = bufp;
 }
 
 - (void)setTrackingResumeBlock:(void (^)(void))block
@@ -1630,7 +1802,15 @@ static BOOL extendReadSocketIntervalOnce;
 
     default:
     OTHER:
-      [NSApp sendEvent:event];
+      if (mac_loop_test_recording_p && [NSApp keyWindow] == nil
+	  && event.window
+	  && (event.type == NSEventTypeKeyDown
+	      || event.type == NSEventTypeKeyUp))
+	/* Scheduled test input while the application cannot become
+	   active: deliver to the target window's first responder.  */
+	[event.window sendEvent:event];
+      else
+	[NSApp sendEvent:event];
       break;
     }
 
@@ -1873,11 +2053,42 @@ emacs_windows_need_display_p (void)
 /* Some key bindings in mac_apple_event_map are regarded as methods in
    the application delegate.  */
 
+/* Kinds of selectors bound dynamically in mac-apple-event-map.  */
+enum { MAC_SELECTOR_NONE, MAC_SELECTOR_ACTION, MAC_SELECTOR_SERVICES };
+
+/* Return the kind of SELECTOR.  Looking it up reads keymaps.  Under
+   the persistent loop the GUI thread may do that only with Lisp
+   access, so remember answers and reuse them while Lisp is busy.  */
+
+static int
+mac_selector_kind (SEL selector)
+{
+  static NSMutableDictionary *cache;
+  NSString *key = NSStringFromSelector (selector);
+  int token = mac_loop_begin_lisp_access ();
+
+  if (token == MAC_LOOP_NO_ACCESS)
+    return [cache[key] intValue];
+
+  int kind = (is_action_selector (selector) ? MAC_SELECTOR_ACTION
+	      : is_services_handler_selector (selector)
+	      ? MAC_SELECTOR_SERVICES : MAC_SELECTOR_NONE);
+
+  mac_loop_end_lisp_access (token);
+  if (mac_persistent_loop_p && pthread_main_np ())
+    {
+      if (cache == nil)
+	cache = [[NSMutableDictionary alloc] init];
+      cache[key] = @(kind);
+    }
+
+  return kind;
+}
+
 - (BOOL)respondsToSelector:(SEL)aSelector
 {
   return ([super respondsToSelector:aSelector]
-	  || is_action_selector (aSelector)
-	  || is_services_handler_selector (aSelector));
+	  || mac_selector_kind (aSelector) != MAC_SELECTOR_NONE);
 }
 
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)aSelector
@@ -1886,23 +2097,34 @@ emacs_windows_need_display_p (void)
 
   if (signature)
     return signature;
-  else if (is_action_selector (aSelector))
-    return action_signature ();
-  else if (is_services_handler_selector (aSelector))
-    return services_handler_signature ();
-  else
-    return nil;
+  switch (mac_selector_kind (aSelector))
+    {
+    case MAC_SELECTOR_ACTION:
+      return action_signature ();
+    case MAC_SELECTOR_SERVICES:
+      return services_handler_signature ();
+    default:
+      return nil;
+    }
 }
 
 - (void)forwardInvocation:(NSInvocation *)anInvocation
 {
+  if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())
+    {
+      /* The handlers build Lisp events; run them with access.  */
+      [anInvocation retainArguments];
+      MAC_LOOP_CALLBACK_NEEDS_LISP ([self forwardInvocation:anInvocation]);
+    }
+
   SEL selector = [anInvocation selector];
   NSMethodSignature *signature = [anInvocation methodSignature];
+  int kind = mac_selector_kind (selector);
 
-  if (is_action_selector (selector)
+  if (kind == MAC_SELECTOR_ACTION
       && [signature isEqual:(action_signature ())])
     handle_action_invocation (anInvocation);
-  else if (is_services_handler_selector (selector)
+  else if (kind == MAC_SELECTOR_SERVICES
 	   && [signature isEqual:(services_handler_signature ())])
     handle_services_invocation (anInvocation);
   else
@@ -1913,7 +2135,8 @@ emacs_windows_need_display_p (void)
 {
   SEL action = [anItem action];
 
-  return action == @selector(activate:) || is_action_selector (action);
+  return (action == @selector(activate:)
+	  || mac_selector_kind (action) == MAC_SELECTOR_ACTION);
 }
 
 - (void)updatePresentationOptions
@@ -2055,11 +2278,51 @@ emacs_windows_need_display_p (void)
 
 @end				// EmacsController
 
+/* The persistent loop registers none of the old loop's undocumented
+   event-loop preferences.  For validation, EMACS_MAC_LOOP_PREFS may
+   name some of them (comma-separated, or "all") to register anyway on
+   the OS versions where the old loop would.  */
+
+static void
+mac_loop_register_event_loop_preferences (void)
+{
+  static const struct
+  {
+    NSString *key;
+    id value;
+    int min_major;
+  } prefs[] =
+    {
+      {@"NSEventConcurrentProcessingEnabled", @"NO", 26},
+      {@"NSApplicationUpdateCycleEnabled", @"NO", 26},
+      {@"NSWindowResizeNeedsTrackingLoop", @YES, 27},
+      {@"NSControlPrefersGestureRecognizerTracking", @NO, 27},
+    };
+  const char *spec = getenv ("EMACS_MAC_LOOP_PREFS");
+  NSArray *names = (spec
+		    ? [@(spec) componentsSeparatedByString:@","] : @[]);
+  bool all_p = [names containsObject:@"all"];
+  NSMutableDictionary *defaults = [NSMutableDictionary dictionary];
+
+  for (int i = 0; i < countof (prefs); i++)
+    if ((all_p || [names containsObject:prefs[i].key])
+	&& mac_operating_system_version.major >= prefs[i].min_major)
+      {
+	defaults[prefs[i].key] = prefs[i].value;
+	MAC_TRACE_LOOP ("registering preference %s\n",
+			prefs[i].key.UTF8String);
+      }
+  if (defaults.count)
+    [NSUserDefaults.standardUserDefaults registerDefaults:defaults];
+}
+
 OSStatus
 install_application_handler (void)
 {
   mac_within_gui (^{
-      if (mac_operating_system_version.major >= 26)
+      if (mac_persistent_loop_p)
+	mac_loop_register_event_loop_preferences ();
+      else if (mac_operating_system_version.major >= 26)
 	/* Disable some event-related macOS 26 features so as to avoid
 	   the following problems:
 	   1. Can't get events from the Carbon main event queue.
@@ -2071,7 +2334,8 @@ install_application_handler (void)
 	    registerDefaults:@{@"NSEventConcurrentProcessingEnabled" : @"NO",
 	      @"NSApplicationUpdateCycleEnabled" : @"NO"}];
 
-      if (mac_operating_system_version.major >= 27)
+      if (!mac_persistent_loop_p
+	  && mac_operating_system_version.major >= 27)
 	/* Native resize and titlebar control gestures fail with the
 	   application update cycle disabled.  Preserve the existing
 	   event-loop settings and select traditional tracking before
@@ -2084,9 +2348,14 @@ install_application_handler (void)
       emacsController = [[EmacsController alloc] init];
       [NSApp setDelegate:emacsController];
 
-      /* Will be stopped at applicationDidFinishLaunching: in the
-	 delegate.  */
-      [NSApp run];
+      if (mac_persistent_loop_p)
+	/* `main' runs the application after this request, which
+	   completes at applicationDidFinishLaunching:.  */
+	mac_loop_begin_launch ();
+      else
+	/* Will be stopped at applicationDidFinishLaunching: in the
+	   delegate.  */
+	[NSApp run];
     });
 
   return noErr;
@@ -3380,6 +3649,8 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidBecomeKey:(NSNotification *)notification
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidBecomeKey:notification]);
+
   struct frame *f = emacsFrame;
 
   mac_within_lisp_deferred_unless_popup (^{
@@ -3403,6 +3674,8 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidResignKey:(NSNotification *)notification
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidResignKey:notification]);
+
   struct frame *f = emacsFrame;
 
   mac_within_lisp_deferred_unless_popup (^{
@@ -3422,6 +3695,8 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidMove:(NSNotification *)notification
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidMove:notification]);
+
   struct frame *f = emacsFrame;
 
   mac_handle_origin_change (f);
@@ -3429,6 +3704,8 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidResize:(NSNotification *)notification
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidResize:notification]);
+
   struct frame *f = emacsFrame;
 
   /* `windowDidMove:' above is not called when both size and location
@@ -3440,6 +3717,8 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidMiniaturize:(NSNotification *)notification
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidMiniaturize:notification]);
+
   struct frame *f = emacsFrame;
 
   mac_handle_visibility_change (f);
@@ -3447,6 +3726,8 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidDeminiaturize:(NSNotification *)notification
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidDeminiaturize:notification]);
+
   struct frame *f = emacsFrame;
 
   mac_handle_visibility_change (f);
@@ -3454,6 +3735,8 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidChangeScreen:(NSNotification *)notification
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidChangeScreen:notification]);
+
   /* We used to update the presentation options for the key window
      here.  But it makes application switching impossible in Split
      View on macOS 10.14 and later.  */
@@ -3468,6 +3751,8 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidChangeBackingProperties:(NSNotification *)notification
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidChangeBackingProperties:notification]);
+
   [self updateBackingScaleFactor];
 }
 
@@ -3552,6 +3837,9 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 	 repeatedly ending and restarting tracking with synthetic events.
 	 Use the resize transition below, as for an Option-drag.  */
       && mac_operating_system_version.major < 27
+      /* The persistent loop lets Lisp draw during one live-resize
+	 session on every OS.  */
+      && !mac_persistent_loop_p
       /* Updating screen during resize by mouse dragging is
 	 implemented by generating fake release and press events.
 	 This seems to be too intrusive for "window snapping"
@@ -4000,6 +4288,8 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)storeFullScreenFrameParameter
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self storeFullScreenFrameParameter]);
+
   Lisp_Object value;
 
   switch (fullscreenFrameParameterAfterTransition)
@@ -4023,6 +4313,8 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)storeParentFrameFrameParameter
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self storeParentFrameFrameParameter]);
+
   struct frame *f = emacsFrame;
 
   if (!NILP (f->parent_frame))
@@ -6509,6 +6801,9 @@ static BOOL emacsViewUpdateLayerDisabled;
   int x = NSMinX (aRect), y = NSMinY (aRect);
   int width = NSWidth (aRect), height = NSHeight (aRect);
 
+  if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())
+    /* Keep the last presentation; Lisp redraws when it can.  */
+    return;
   if (FRAME_METAL_CTX (f))
     {
       emacs_metal_frame_begin (FRAME_METAL_CTX (f));
@@ -6522,6 +6817,9 @@ static BOOL emacsViewUpdateLayerDisabled;
   int x = NSMinX (aRect), y = NSMinY (aRect);
   int width = NSWidth (aRect), height = NSHeight (aRect);
 
+  if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())
+    /* Keep the last presentation; Lisp redraws when it can.  */
+    return;
   set_global_focus_view_frame (f);
   mac_clear_area (f, x, y, width, height);
   mac_begin_scale_mismatch_detection (f);
@@ -7860,6 +8158,8 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
 
 - (void)viewDidEndLiveResize
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self viewDidEndLiveResize]);
+
   struct frame *f = [self emacsFrame];
   NSRect frameRect = [self frame];
 
@@ -7878,6 +8178,8 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
 
 - (void)viewFrameDidChange:(NSNotification *)notification
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self viewFrameDidChange:notification]);
+
   if (![self inLiveResize]
       && ([self autoresizingMask] & (NSViewWidthSizable | NSViewHeightSizable)))
     {
@@ -10596,7 +10898,10 @@ mac_read_socket (struct terminal *terminal, struct input_event *hold_quit)
 
       mac_draw_queue_sync ();
       handling_queued_nsevents_p = true;
-      count = [emacsController handleQueuedNSEventsWithHoldingQuitIn:hold_quit];
+      if (mac_persistent_loop_p)
+	count = mac_loop_read_socket_events (hold_quit);
+      else
+	count = [emacsController handleQueuedNSEventsWithHoldingQuitIn:hold_quit];
       handling_queued_nsevents_p = false;
 
       /* If the focus was just given to an autoraising frame,
@@ -11429,7 +11734,7 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
       nativeActivationPrepared = NO;
       return;
     }
-  if (!popup_activated ())
+  if (!popup_activated () && !mac_persistent_loop_p)
     {
       NSLog (@"Canceling unexpected menu tracking: %@", [NSApp currentEvent]);
       [self cancelTracking];
@@ -13117,8 +13422,9 @@ static NSMutableSetOf (NSNumber *) *registered_apple_event_specs;
 
 @implementation EmacsController (AppleEvent)
 
-- (void)handleAppleEvent:(NSAppleEventDescriptor *)event
-	  withReplyEvent:(NSAppleEventDescriptor *)replyEvent
+static OSErr
+mac_handle_apple_event_descriptors (NSAppleEventDescriptor *event,
+				    NSAppleEventDescriptor *replyEvent)
 {
   OSErr err;
   AEDesc reply;
@@ -13132,6 +13438,50 @@ static NSMutableSetOf (NSNumber *) *registered_apple_event_specs;
 	err = mac_handle_apple_event (event_ptr, &reply, 0);
       AEDisposeDesc (&reply);
     }
+
+  return err;
+}
+
+- (void)handleAppleEvent:(NSAppleEventDescriptor *)event
+	  withReplyEvent:(NSAppleEventDescriptor *)replyEvent
+{
+  if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())
+    {
+      int token = mac_loop_begin_lisp_access ();
+
+      if (token != MAC_LOOP_NO_ACCESS)
+	{
+	  mac_handle_apple_event_descriptors (event, replyEvent);
+	  mac_loop_end_lisp_access (token);
+	  mac_loop_wake_lisp ();
+	  return;
+	}
+
+      /* Lisp is busy: suspend the event and handle it later with
+	 access, as if it had just arrived.  */
+      NSAppleEventManager *manager =
+	[NSAppleEventManager sharedAppleEventManager];
+      NSAppleEventManagerSuspensionID suspensionID =
+	[manager suspendCurrentAppleEvent];
+
+      if (suspensionID == NULL)
+	return;
+      MAC_TRACE_LOOP ("Apple event suspended until Lisp access\n");
+      mac_loop_with_access_now_or_later (^{
+	  [manager setCurrentAppleEventAndReplyEventWithSuspensionID:
+		     suspensionID];
+	  mac_apple_event_suspended_by_caller = true;
+	  OSErr err = (mac_handle_apple_event_descriptors
+		       (manager.currentAppleEvent,
+			manager.currentReplyAppleEvent));
+	  mac_apple_event_suspended_by_caller = false;
+	  if (err != noErr)
+	    [manager resumeWithSuspensionID:suspensionID];
+	});
+      return;
+    }
+
+  mac_handle_apple_event_descriptors (event, replyEvent);
 }
 
 @end				// EmacsController (AppleEvent)
@@ -17389,6 +17739,15 @@ static void
 mac_within_gui_and_here (void (^block_gui) (void),
 			 void (^block_here) (void))
 {
+  if (mac_persistent_loop_p)
+    {
+      /* Only mac_select uses BLOCK_HERE, and the persistent loop
+	 has its own select emulation.  */
+      eassert (!block_here);
+      mac_loop_within_gui (block_gui);
+      return;
+    }
+
   eassert (!pthread_main_np ());
   eassert (mac_gui_queue.count <= 1);
 
@@ -17425,6 +17784,13 @@ static void
 mac_within_gui_allowing_inner_lisp (void (^block) (void))
 {
   eassert (!pthread_main_np ());
+  if (mac_persistent_loop_p)
+    {
+      /* Every persistent-loop request services inner Lisp blocks.  */
+      mac_loop_within_gui (block);
+      return;
+    }
+
   bool __block completed_p = false;
 
   mac_within_gui (^{
@@ -17451,6 +17817,18 @@ static void
 mac_within_lisp (void (^block) (void))
 {
   eassert (pthread_main_np ());
+  if (mac_persistent_loop_p)
+    {
+      /* Synchronous only while the Lisp thread is parked on a
+	 request; otherwise the GUI thread must not wait for Lisp, so
+	 queue the block instead.  */
+      if (!mac_loop_within_lisp (block))
+	{
+	  MAC_TRACE_LOOP ("within-lisp deferred (no parked request)\n");
+	  mac_loop_queue_lisp_block (block);
+	}
+      return;
+    }
   eassert (mac_lisp_queue.count == 0);
   eassert (block);
 
@@ -17469,6 +17847,13 @@ mac_within_lisp_deferred (void (^block) (void))
 {
   eassert (pthread_main_np ());
   eassert (block);
+
+  if (mac_persistent_loop_p)
+    {
+      if (!mac_loop_defer_to_request (block))
+	mac_loop_queue_lisp_block (block);
+      return;
+    }
 
   [mac_deferred_lisp_queue enqueue:(MRC_AUTORELEASE ([block copy]))];
 }
@@ -17638,6 +18023,17 @@ mac_set_buffer_and_glyph_matrix_access_restricted (bool flag)
 static bool
 mac_try_buffer_and_glyph_matrix_access (void)
 {
+  if (mac_persistent_loop_p && pthread_main_np ())
+    {
+      /* Nested accesses end in reverse order on the GUI thread.  */
+      int token = mac_loop_begin_lisp_access ();
+
+      if (token == MAC_LOOP_NO_ACCESS)
+	return false;
+      eassert (mac_loop_access_token_depth < countof (mac_loop_access_tokens));
+      mac_loop_access_tokens[mac_loop_access_token_depth++] = token;
+      return true;
+    }
   if (mac_buffer_and_glyph_matrix_access_restricted_p)
     return !thread_try_acquire_global_lock ();
 
@@ -17647,6 +18043,13 @@ mac_try_buffer_and_glyph_matrix_access (void)
 static void
 mac_end_buffer_and_glyph_matrix_access (void)
 {
+  if (mac_persistent_loop_p && pthread_main_np ())
+    {
+      eassert (mac_loop_access_token_depth > 0);
+      mac_loop_end_lisp_access
+	(mac_loop_access_tokens[--mac_loop_access_token_depth]);
+      return;
+    }
   if (mac_buffer_and_glyph_matrix_access_restricted_p)
     thread_release_global_lock ();
 }
@@ -17657,6 +18060,9 @@ mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 {
   bool __block has_event_p, thread_may_switch_p;
   int __block r;
+
+  if (mac_persistent_loop_p && initialized)
+    return mac_loop_select (nfds, rfds, wfds, efds, timeout, sigmask);
 
   if (!initialized)
     return thread_select (pselect, nfds, rfds, wfds, efds, timeout, sigmask);
@@ -17888,6 +18294,1147 @@ mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 
 
 /***********************************************************************
+			 Persistent event loop
+***********************************************************************/
+
+/* With EMACS_MAC_PERSISTENT_LOOP=1 (or the configured default), the
+   GUI thread runs -[NSApplication run] for the process lifetime
+   instead of running AppKit only while Lisp waits in mac_select or
+   calls read_socket.
+
+   Lisp-to-GUI requests (mac_within_gui) are queued, delivered through
+   a run-loop source in the common modes, and completed individually.
+   The Lisp thread services synchronous inner-Lisp blocks from the GUI
+   thread while it waits for its request.
+
+   The GUI thread touches Lisp or redisplay state only with "Lisp
+   access": either it is executing a request, so that the requesting
+   Lisp thread is parked, or it holds the global Lisp lock taken by
+   try-lock while Lisp waits for input.  Without access, Emacs-bound
+   NSEvents are deferred in order (except the quit key, which becomes
+   a queued input event), native events go to AppKit, and callbacks
+   that need Lisp are queued for the Lisp thread.  */
+
+@interface EmacsGUIRequest : NSObject
+{
+@public
+  void (^block) (void);
+  /* Blocks deferred to the Lisp thread while executing BLOCK.  */
+  NSMutableArray *deferredLispBlocks;
+  bool done;
+}
+@end
+
+@implementation EmacsGUIRequest
+
+- (void)dealloc
+{
+  MRC_RELEASE (block);
+  MRC_RELEASE (deferredLispBlocks);
+#if !USE_ARC
+  [super dealloc];
+#endif
+}
+
+@end
+
+/* Guards the three queues below.  */
+static pthread_mutex_t mac_loop_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Pending Lisp-to-GUI requests (EmacsGUIRequest).  */
+static NSMutableArray *mac_loop_requests;
+
+/* Synchronous GUI-to-Lisp blocks for the parked Lisp thread.  */
+static NSMutableArray *mac_loop_inner_lisp_blocks;
+
+/* Asynchronous GUI-to-Lisp items, in order: NSData holding a struct
+   input_event, or a block.  */
+static NSMutableArray *mac_loop_lisp_items;
+
+static dispatch_semaphore_t mac_loop_gui_semaphore, mac_loop_lisp_semaphore;
+static CFRunLoopSourceRef mac_loop_request_source, mac_loop_retry_source;
+static CFRunLoopRef mac_loop_main_run_loop;
+
+/* GUI thread state.  */
+static EmacsGUIRequest *mac_loop_current_request;
+static int mac_loop_request_depth;
+static bool mac_loop_gui_owns_lock;
+static NSMutableArray *mac_loop_deferred_events;
+static struct input_event mac_loop_gui_hold_quit;
+
+/* The request that launched the application; completed from
+   -applicationDidFinishLaunching:.  */
+static EmacsGUIRequest *mac_loop_launch_request;
+static bool mac_loop_launch_requested_p;
+
+/* Shared flags.  */
+static int mac_loop_deferred_count;	/* Number of deferred NSEvents.  */
+static bool mac_loop_lisp_waiting_p;	/* Lisp is inside thread_select.  */
+
+/* Lisp thread: hold_quit of the drain in progress, if any.  */
+static struct input_event *mac_loop_lisp_hold_quit;
+
+static void
+mac_loop_lock (void)
+{
+  pthread_mutex_lock (&mac_loop_mutex);
+}
+
+static void
+mac_loop_unlock (void)
+{
+  pthread_mutex_unlock (&mac_loop_mutex);
+}
+
+/* Remove and return the first element of ARRAY under the mutex, or
+   nil.  The result is autoreleased.  */
+
+static id
+mac_loop_pop (NSMutableArray *array)
+{
+  id obj = nil;
+
+  mac_loop_lock ();
+  if (array.count)
+    {
+      obj = MRC_AUTORELEASE (MRC_RETAIN (array[0]));
+      [array removeObjectAtIndex:0];
+    }
+  mac_loop_unlock ();
+
+  return obj;
+}
+
+static void
+mac_loop_push (NSMutableArray *array, id obj)
+{
+  mac_loop_lock ();
+  [array addObject:obj];
+  mac_loop_unlock ();
+}
+
+/* Wake the main run loop so that a signalled source fires.  */
+
+static void
+mac_loop_signal_source (CFRunLoopSourceRef source)
+{
+  if (source)
+    {
+      CFRunLoopSourceSignal (source);
+      CFRunLoopWakeUp (mac_loop_main_run_loop);
+    }
+}
+
+/* GUI thread: execute pending requests, including requests issued by
+   inner Lisp blocks while an outer request waits for them.  */
+
+static void
+mac_loop_run_requests (void)
+{
+  eassert (pthread_main_np ());
+
+  while (true)
+    {
+      EmacsGUIRequest *request = mac_loop_pop (mac_loop_requests);
+
+      if (request == nil)
+	break;
+
+      EmacsGUIRequest *saved = mac_loop_current_request;
+
+      mac_loop_current_request = request;
+      mac_loop_request_depth++;
+      BEGIN_AUTORELEASE_POOL;
+      if (request->block)
+	request->block ();
+      END_AUTORELEASE_POOL;
+      mac_loop_request_depth--;
+      mac_loop_current_request = saved;
+
+      if (request == mac_loop_launch_request)
+	/* Completed by -applicationDidFinishLaunching:.  */
+	continue;
+      __atomic_store_n (&request->done, true, __ATOMIC_RELEASE);
+      dispatch_semaphore_signal (mac_loop_lisp_semaphore);
+    }
+}
+
+static void
+mac_loop_request_source_perform (void *info)
+{
+  BEGIN_AUTORELEASE_POOL;
+  mac_loop_run_requests ();
+  END_AUTORELEASE_POOL;
+}
+
+/* Lisp thread: run synchronous blocks queued by the GUI thread.  */
+
+static void
+mac_loop_run_inner_lisp_blocks (void)
+{
+  while (true)
+    {
+      void (^block) (void) = mac_loop_pop (mac_loop_inner_lisp_blocks);
+
+      if (block == nil)
+	break;
+      block ();
+    }
+}
+
+/* Lisp thread: ask the GUI thread to execute BLOCK and wait for it,
+   servicing inner Lisp blocks meanwhile.  */
+
+static void
+mac_loop_within_gui (void (^block) (void))
+{
+  eassert (!pthread_main_np ());
+
+  EmacsGUIRequest *request = [[EmacsGUIRequest alloc] init];
+
+  request->block = [block copy];
+  mac_loop_push (mac_loop_requests, request);
+  dispatch_semaphore_signal (mac_loop_gui_semaphore);
+  mac_loop_signal_source (mac_loop_request_source);
+
+  while (!__atomic_load_n (&request->done, __ATOMIC_ACQUIRE))
+    {
+      dispatch_semaphore_wait (mac_loop_lisp_semaphore, DISPATCH_TIME_FOREVER);
+      mac_loop_run_inner_lisp_blocks ();
+    }
+
+  for (void (^deferred) (void) in request->deferredLispBlocks)
+    deferred ();
+  MRC_RELEASE (request);
+}
+
+/* GUI thread: run BLOCK synchronously in the Lisp thread if it is
+   parked on a request.  Return false (without running BLOCK) if not.  */
+
+static bool
+mac_loop_within_lisp (void (^block) (void))
+{
+  eassert (pthread_main_np ());
+
+  if (mac_loop_request_depth == 0)
+    return false;
+
+  bool __block finished = false;
+  void (^wrapper) (void) = ^{
+    block ();
+    __atomic_store_n (&finished, true, __ATOMIC_RELEASE);
+    dispatch_semaphore_signal (mac_loop_gui_semaphore);
+  };
+
+  mac_loop_push (mac_loop_inner_lisp_blocks,
+		 MRC_AUTORELEASE ([wrapper copy]));
+  dispatch_semaphore_signal (mac_loop_lisp_semaphore);
+  while (!__atomic_load_n (&finished, __ATOMIC_ACQUIRE))
+    {
+      dispatch_semaphore_wait (mac_loop_gui_semaphore, DISPATCH_TIME_FOREVER);
+      mac_loop_run_requests ();
+    }
+
+  return true;
+}
+
+/* GUI thread: defer BLOCK to the end of the current request, as the
+   old loop does.  Return false if no request is being executed.  */
+
+static bool
+mac_loop_defer_to_request (void (^block) (void))
+{
+  if (mac_loop_current_request == nil)
+    return false;
+  if (mac_loop_current_request->deferredLispBlocks == nil)
+    mac_loop_current_request->deferredLispBlocks =
+      [[NSMutableArray alloc] initWithCapacity:1];
+  [mac_loop_current_request->deferredLispBlocks
+      addObject:MRC_AUTORELEASE ([block copy])];
+
+  return true;
+}
+
+/* Wake the Lisp thread: from its input wait via the select fd, and
+   from busy computation via pending_signals, which makes maybe_quit
+   call read_socket.  */
+
+static void
+mac_loop_wake_lisp (void)
+{
+  pending_signals = true;
+  write_one_byte_to_fd (mac_select_fds[0]);
+}
+
+static void
+mac_loop_queue_lisp_block (void (^block) (void))
+{
+  mac_loop_push (mac_loop_lisp_items, MRC_AUTORELEASE ([block copy]));
+  mac_loop_wake_lisp ();
+}
+
+static void
+mac_loop_queue_input_event (const struct input_event *event)
+{
+  mac_loop_push (mac_loop_lisp_items,
+		 [NSData dataWithBytes:event length:(sizeof *event)]);
+  mac_loop_wake_lisp ();
+}
+
+static bool
+mac_loop_lisp_items_pending_p (void)
+{
+  bool result;
+
+  mac_loop_lock ();
+  result = mac_loop_lisp_items.count != 0;
+  mac_loop_unlock ();
+
+  return result;
+}
+
+/* Lisp thread: return true if the frame of EVENT, if any, is live.
+   Frames are compared by identity so that a frame deleted after the
+   event was queued is not dereferenced.  */
+
+static bool
+mac_loop_event_target_live_p (const struct input_event *event)
+{
+  Lisp_Object target = event->frame_or_window, tail, frame;
+
+  if (NILP (target) || WINDOWP (target))
+    return true;
+  FOR_EACH_FRAME (tail, frame)
+    if (EQ (frame, target))
+      return true;
+
+  return false;
+}
+
+/* Lisp thread, holding the global lock: move queued GUI-to-Lisp items
+   into the keyboard buffer or run them.  Return the number of stored
+   events.  */
+
+static int
+mac_loop_drain_lisp_items (struct input_event *hold_quit)
+{
+  int count = 0;
+  struct input_event *saved = mac_loop_lisp_hold_quit;
+
+  eassert (!pthread_main_np ());
+  mac_loop_lisp_hold_quit = hold_quit;
+  for (bool more = true; more; )
+    {
+      BEGIN_AUTORELEASE_POOL;
+      id item = mac_loop_pop (mac_loop_lisp_items);
+
+      if (item == nil)
+	more = false;
+      else if ([item isKindOfClass:NSData.class])
+	{
+	  struct input_event event;
+
+	  memcpy (&event, [item bytes], sizeof event);
+	  if (mac_loop_event_target_live_p (&event))
+	    {
+	      kbd_buffer_store_event_hold (&event, hold_quit);
+	      count++;
+	    }
+	  else
+	    MAC_TRACE_LOOP ("dropped event for deleted frame\n");
+	}
+      else
+	((void (^) (void)) item) ();
+      END_AUTORELEASE_POOL;
+    }
+  mac_loop_lisp_hold_quit = saved;
+
+  return count;
+}
+
+/* Take the global Lisp lock from the GUI thread.  Wait at most 50 ms,
+   and only while Lisp is waiting for input: it then releases the lock
+   within the wait and must not be kept from redisplay for long.  */
+
+static bool
+mac_loop_try_global_lock (void)
+{
+  double start = 0;
+
+  while (true)
+    {
+      if (thread_try_acquire_global_lock () == 0)
+	return true;
+      if (!__atomic_load_n (&mac_loop_lisp_waiting_p, __ATOMIC_ACQUIRE))
+	return false;
+      double now = mac_system_uptime ();
+      if (start == 0)
+	start = now;
+      else if (now - start > 0.05)
+	return false;
+      usleep (200);
+    }
+}
+
+/* Begin Lisp access from the GUI thread.  Return a token for
+   mac_loop_end_lisp_access, or MAC_LOOP_NO_ACCESS.  Under the old
+   loop the GUI thread runs only while Lisp is parked, so access is
+   always granted.  */
+
+static int
+mac_loop_begin_lisp_access (void)
+{
+  if (!mac_persistent_loop_p || !pthread_main_np ())
+    return MAC_LOOP_BORROWED_ACCESS;
+  if (mac_loop_request_depth > 0 || mac_loop_gui_owns_lock)
+    return MAC_LOOP_BORROWED_ACCESS;
+  if (!mac_loop_try_global_lock ())
+    return MAC_LOOP_NO_ACCESS;
+  mac_loop_gui_owns_lock = true;
+
+  return MAC_LOOP_LOCKED_ACCESS;
+}
+
+static void
+mac_loop_end_lisp_access (int token)
+{
+  if (token == MAC_LOOP_LOCKED_ACCESS)
+    {
+      eassert (mac_loop_gui_owns_lock);
+      mac_loop_gui_owns_lock = false;
+      thread_release_global_lock ();
+    }
+}
+
+static bool
+mac_loop_gui_has_lisp_access (void)
+{
+  return (!mac_persistent_loop_p || !pthread_main_np ()
+	  || mac_loop_request_depth > 0 || mac_loop_gui_owns_lock);
+}
+
+/* Run BLOCK with Lisp access on the GUI thread if possible, and
+   otherwise queue it for the Lisp thread.  */
+
+static void
+mac_loop_with_lisp_access_or_defer (void (^block) (void))
+{
+  int token = mac_loop_begin_lisp_access ();
+
+  if (token == MAC_LOOP_NO_ACCESS)
+    {
+      MAC_TRACE_LOOP ("callback deferred to Lisp thread\n");
+      mac_loop_queue_lisp_block (block);
+      return;
+    }
+  block ();
+  mac_loop_end_lisp_access (token);
+  if (token == MAC_LOOP_LOCKED_ACCESS)
+    mac_loop_wake_lisp ();
+}
+
+/* GUI thread: pass a quit request held while handling events to the
+   Lisp thread, which quits at its next read_socket.  */
+
+static void
+mac_loop_forward_gui_hold_quit (void)
+{
+  if (mac_loop_gui_hold_quit.kind != NO_EVENT)
+    {
+      MAC_TRACE_LOOP ("quit forwarded to Lisp thread\n");
+      mac_loop_queue_input_event (&mac_loop_gui_hold_quit);
+      EVENT_INIT (mac_loop_gui_hold_quit);
+    }
+}
+
+/* Return true if EVENT is handled by Emacs views rather than by
+   AppKit-owned window chrome.  */
+
+static bool
+mac_loop_event_emacs_bound_p (NSEvent *event)
+{
+  switch (event.type)
+    {
+    case NSEventTypeKeyDown:
+    case NSEventTypeKeyUp:
+    case NSEventTypeFlagsChanged:
+      return true;
+
+    case NSEventTypeLeftMouseDown:
+    case NSEventTypeLeftMouseUp:
+    case NSEventTypeRightMouseDown:
+    case NSEventTypeRightMouseUp:
+    case NSEventTypeOtherMouseDown:
+    case NSEventTypeOtherMouseUp:
+    case NSEventTypeLeftMouseDragged:
+    case NSEventTypeRightMouseDragged:
+    case NSEventTypeOtherMouseDragged:
+    case NSEventTypeMouseMoved:
+    case NSEventTypeMouseEntered:
+    case NSEventTypeMouseExited:
+    case NSEventTypeCursorUpdate:
+    case NSEventTypeScrollWheel:
+    case NSEventTypeMagnify:
+    case NSEventTypeSwipe:
+    case NSEventTypeRotate:
+    case NSEventTypeBeginGesture:
+    case NSEventTypeEndGesture:
+    case NSEventTypeSmartMagnify:
+    case NSEventTypePressure:
+    case NSEventTypeTabletPoint:
+    case NSEventTypeTabletProximity:
+      {
+	NSWindow *window = event.window;
+	NSView *contentView = window.contentView;
+
+	if (![window isKindOfClass:EmacsWindow.class] || contentView == nil)
+	  return false;
+
+	/* Hit-test from the frame view so that titlebar controls and
+	   resize edges over a full-size content view are recognized
+	   as window chrome.  */
+	NSView *frameView = contentView.superview;
+	NSView *hitView;
+
+	if (frameView)
+	  hitView = [frameView hitTest:[frameView.superview
+					  convertPoint:event.locationInWindow
+					      fromView:nil]];
+	else
+	  hitView = [contentView hitTest:event.locationInWindow];
+
+	return hitView && [hitView isDescendantOf:contentView];
+      }
+
+    default:
+      return false;
+    }
+}
+
+/* GUI thread, with Lisp access: handle the deferred NSEvents and then
+   EVENT (if non-nil) as the old loop's read_socket would.  Return the
+   number of stored events.  */
+
+static int
+mac_loop_handle_events_with_access (NSEvent *event)
+{
+  int count = 0;
+
+  /* The FIFO holds NSEvents and callback blocks.  */
+
+  mac_loop_dispatch_depth++;
+  while (mac_loop_deferred_events.count)
+    {
+      id deferred = MRC_AUTORELEASE (MRC_RETAIN
+				     (mac_loop_deferred_events[0]));
+
+      [mac_loop_deferred_events removeObjectAtIndex:0];
+      __atomic_store_n (&mac_loop_deferred_count,
+			mac_loop_deferred_events.count, __ATOMIC_RELEASE);
+      if ([deferred isKindOfClass:NSEvent.class])
+	count += [emacsController handleNSEventWithHoldingQuitIn:NULL
+							   event:deferred];
+      else
+	/* A callback that needed Lisp access.  */
+	((void (^) (void)) deferred) ();
+    }
+  if (event)
+    count += [emacsController handleNSEventWithHoldingQuitIn:NULL
+						       event:event];
+  mac_loop_dispatch_depth--;
+
+  return count;
+}
+
+/* GUI thread: -[EmacsApplication sendEvent:] under the persistent
+   loop.  */
+
+static void
+mac_loop_send_event (NSEvent *event)
+{
+  bool record_p = (mac_loop_test_recording_p
+		   && event.type != NSEventTypeAppKitDefined
+		   && event.type != NSEventTypeSystemDefined);
+
+  if (!mac_loop_event_emacs_bound_p (event))
+    {
+      [(EmacsApplication *) NSApp sendEventToAppKit:event];
+      mac_loop_forward_gui_hold_quit ();
+      return;
+    }
+
+  int token = mac_loop_begin_lisp_access ();
+
+  if (record_p)
+    mac_loop_test_record ("dispatch %ld access %d", (long) event.type, token);
+  if (token == MAC_LOOP_NO_ACCESS)
+    {
+      if (event.type == NSEventTypeKeyDown
+	  && mac_keydown_cgevent_quit_p (event.coreGraphicsEvent))
+	{
+	  struct input_event inev;
+
+	  EVENT_INIT (inev);
+	  inev.arg = Qnil;
+	  inev.frame_or_window = mac_event_frame ();
+	  mac_cgevent_to_input_event (event.coreGraphicsEvent, &inev);
+	  MAC_TRACE_LOOP ("quit key while Lisp is busy\n");
+	  mac_loop_queue_input_event (&inev);
+	  return;
+	}
+
+      id last = mac_loop_deferred_events.lastObject;
+
+      if ([last isKindOfClass:NSEvent.class]
+	  && ((NSEvent *) last).type == NSEventTypeMouseMoved
+	  && event.type == NSEventTypeMouseMoved)
+	[mac_loop_deferred_events removeLastObject];
+      [mac_loop_deferred_events addObject:event];
+      __atomic_store_n (&mac_loop_deferred_count,
+			mac_loop_deferred_events.count, __ATOMIC_RELEASE);
+      MAC_TRACE_LOOP ("deferred event type %ld (%lu pending)\n",
+		      (long) event.type,
+		      (unsigned long) mac_loop_deferred_events.count);
+      /* Let a busy Lisp thread dispatch them from read_socket.  */
+      mac_loop_wake_lisp ();
+      return;
+    }
+
+  int count = mac_loop_handle_events_with_access (event);
+
+  mac_loop_end_lisp_access (token);
+  mac_loop_forward_gui_hold_quit ();
+  if (count > 0 && token == MAC_LOOP_LOCKED_ACCESS)
+    mac_loop_wake_lisp ();
+}
+
+/* GUI thread: run BLOCK now if Lisp access is available, after the
+   deferred items; otherwise append it to the deferred FIFO so that it
+   runs, in order, the next time the GUI thread has access.  */
+
+static void
+mac_loop_with_access_now_or_later (void (^block) (void))
+{
+  int token = mac_loop_begin_lisp_access ();
+
+  if (token == MAC_LOOP_NO_ACCESS)
+    {
+      [mac_loop_deferred_events addObject:MRC_AUTORELEASE ([block copy])];
+      __atomic_store_n (&mac_loop_deferred_count,
+			mac_loop_deferred_events.count, __ATOMIC_RELEASE);
+      MAC_TRACE_LOOP ("callback deferred (%lu pending)\n",
+		      (unsigned long) mac_loop_deferred_events.count);
+      mac_loop_wake_lisp ();
+      if (__atomic_load_n (&mac_loop_lisp_waiting_p, __ATOMIC_ACQUIRE))
+	mac_loop_signal_source (mac_loop_retry_source);
+      return;
+    }
+
+  if (mac_loop_deferred_events.count)
+    mac_loop_handle_events_with_access (nil);
+  block ();
+  mac_loop_end_lisp_access (token);
+  mac_loop_forward_gui_hold_quit ();
+  if (token == MAC_LOOP_LOCKED_ACCESS)
+    mac_loop_wake_lisp ();
+}
+
+/* GUI thread: retry deferred events when Lisp reaches its input wait.  */
+
+static void
+mac_loop_retry_source_perform (void *info)
+{
+  if (mac_loop_deferred_events.count == 0)
+    return;
+
+  int token = mac_loop_begin_lisp_access ();
+
+  if (token == MAC_LOOP_NO_ACCESS)
+    return;
+
+  int count;
+
+  BEGIN_AUTORELEASE_POOL;
+  count = mac_loop_handle_events_with_access (nil);
+  END_AUTORELEASE_POOL;
+
+  mac_loop_end_lisp_access (token);
+  mac_loop_forward_gui_hold_quit ();
+  if (count > 0 && token == MAC_LOOP_LOCKED_ACCESS)
+    mac_loop_wake_lisp ();
+}
+
+/* Lisp thread (read_socket): dispatch deferred NSEvents on the GUI
+   thread while this thread is parked, then drain queued items.  */
+
+static int
+mac_loop_read_socket_events (struct input_event *hold_quit)
+{
+  int __block count = 0;
+
+  if (__atomic_load_n (&mac_loop_deferred_count, __ATOMIC_ACQUIRE))
+    mac_within_gui (^{
+	[emacsController setHoldQuit:hold_quit];
+	count = mac_loop_handle_events_with_access (nil);
+	[emacsController setHoldQuit:NULL];
+      });
+  count += mac_loop_drain_lisp_items (hold_quit);
+
+  return count;
+}
+
+/* GUI thread: complete the launch request once the application has
+   finished launching.  The GUI thread then stays in -[NSApp run].  */
+
+static void
+mac_loop_complete_launch (void)
+{
+  EmacsGUIRequest *request = mac_loop_launch_request;
+
+  if (request == nil)
+    return;
+  mac_loop_launch_request = nil;
+  mac_loop_request_depth--;
+  mac_loop_current_request = nil;
+  __atomic_store_n (&request->done, true, __ATOMIC_RELEASE);
+  dispatch_semaphore_signal (mac_loop_lisp_semaphore);
+  MRC_RELEASE (request);
+}
+
+/* GUI thread, inside the install_application_handler request: keep
+   the request open until launching finishes, and leave the pre-launch
+   loop so that `main' can run the application.  */
+
+static void
+mac_loop_begin_launch (void)
+{
+  mac_loop_launch_request = MRC_RETAIN (mac_loop_current_request);
+  mac_loop_launch_requested_p = true;
+}
+
+/* Menu-bar item selection under the persistent loop.  Menu tracking
+   is not intercepted, so deliver the classic selection through the
+   Lisp thread.  */
+
+static void
+mac_loop_note_menu_selection (NSInteger tag)
+{
+  mac_loop_with_lisp_access_or_defer (^{
+      struct frame *f = SELECTED_FRAME ();
+
+      if (FRAME_LIVE_P (f) && FRAME_MAC_P (f)
+	  && 0 < tag && tag < f->menu_bar_items_used
+	  && VECTORP (f->menu_bar_vector)
+	  && f->menu_bar_items_used <= ASIZE (f->menu_bar_vector))
+	find_and_call_menu_selection (f, f->menu_bar_items_used,
+				      f->menu_bar_vector,
+				      (void *) (intptr_t) tag);
+      else
+	MAC_TRACE_LOOP ("stale menu selection %ld dropped\n", (long) tag);
+    });
+}
+
+/* Lisp thread: select emulation under the persistent loop.  The wait
+   goes through thread_select so that the global lock is released,
+   which is what lets the GUI thread take Lisp access at safe points.  */
+
+static int
+mac_loop_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
+		 struct timespec *timeout, sigset_t *sigmask)
+{
+  fd_set rfds_fallback;
+  bool keyboard_p = (rfds && nfds > mac_select_fds[1]
+		     && FD_ISSET (mac_select_fds[1], rfds));
+  int r;
+
+  read_all_from_nonblocking_fd (mac_select_fds[0]);
+  if (keyboard_p)
+    {
+      read_all_from_nonblocking_fd (mac_select_fds[1]);
+      if (mac_loop_lisp_items_pending_p ()
+	  || __atomic_load_n (&mac_loop_deferred_count, __ATOMIC_ACQUIRE))
+	{
+	  /* read_socket, reached through detect_input_pending, takes
+	     the items and deferred events.  */
+	  if (__atomic_load_n (&mac_loop_deferred_count, __ATOMIC_ACQUIRE)
+	      && !mac_loop_lisp_items_pending_p ())
+	    /* Only deferred NSEvents: let the GUI take them at the
+	       wait below instead of a round trip.  */
+	    ;
+	  else
+	    {
+	      errno = EINTR;
+	      return -1;
+	    }
+	}
+    }
+
+  if (rfds == NULL)
+    {
+      FD_ZERO (&rfds_fallback);
+      rfds = &rfds_fallback;
+    }
+  FD_SET (mac_select_fds[0], rfds);
+  if (nfds <= mac_select_fds[0])
+    nfds = mac_select_fds[0] + 1;
+
+  __atomic_store_n (&mac_loop_lisp_waiting_p, true, __ATOMIC_RELEASE);
+  if (__atomic_load_n (&mac_loop_deferred_count, __ATOMIC_ACQUIRE))
+    mac_loop_signal_source (mac_loop_retry_source);
+  r = thread_select (pselect, nfds, rfds, wfds, efds, timeout, sigmask);
+  __atomic_store_n (&mac_loop_lisp_waiting_p, false, __ATOMIC_RELEASE);
+
+  if (r > 0 && FD_ISSET (mac_select_fds[0], rfds))
+    {
+      /* SIGALRM is delivered.  */
+      read_all_from_nonblocking_fd (mac_select_fds[0]);
+      errno = EINTR;
+      return -1;
+    }
+  if (r > 0 && keyboard_p && FD_ISSET (mac_select_fds[1], rfds))
+    {
+      /* The GUI thread stored events or queued items.  */
+      read_all_from_nonblocking_fd (mac_select_fds[1]);
+      errno = EINTR;
+      return -1;
+    }
+
+  return r;
+}
+
+/* GUI thread entry point under the persistent loop.  Execute requests
+   until Lisp asks for the application, then run it for the process
+   lifetime.  Daemon, -nw and batch sessions never leave the first
+   loop.  */
+
+static void
+mac_loop_gui_main (void)
+{
+  mac_loop_main_run_loop = CFRunLoopGetCurrent ();
+
+  CFRunLoopSourceContext context = {0};
+
+  context.perform = mac_loop_request_source_perform;
+  mac_loop_request_source = CFRunLoopSourceCreate (NULL, 0, &context);
+  context.perform = mac_loop_retry_source_perform;
+  mac_loop_retry_source = CFRunLoopSourceCreate (NULL, 1, &context);
+  CFRunLoopAddSource (mac_loop_main_run_loop, mac_loop_request_source,
+		      kCFRunLoopCommonModes);
+  CFRunLoopAddSource (mac_loop_main_run_loop, mac_loop_retry_source,
+		      kCFRunLoopDefaultMode);
+
+  while (!mac_loop_launch_requested_p)
+    {
+      BEGIN_AUTORELEASE_POOL;
+      dispatch_semaphore_wait (mac_loop_gui_semaphore, DISPATCH_TIME_FOREVER);
+      mac_loop_run_requests ();
+      END_AUTORELEASE_POOL;
+    }
+
+  /* The launch request stays open, so the GUI thread keeps borrowed
+     Lisp access until -applicationDidFinishLaunching:.  */
+  mac_loop_current_request = mac_loop_launch_request;
+  mac_loop_request_depth++;
+  MAC_TRACE_LOOP ("entering persistent NSApplication run\n");
+  while (true)
+    {
+      BEGIN_AUTORELEASE_POOL;
+      [NSApp run];
+      END_AUTORELEASE_POOL;
+      MAC_TRACE_LOOP ("NSApplication run returned; resuming\n");
+    }
+}
+
+static void
+mac_loop_init (void)
+{
+  mac_loop_requests = [[NSMutableArray alloc] initWithCapacity:2];
+  mac_loop_inner_lisp_blocks = [[NSMutableArray alloc] initWithCapacity:1];
+  mac_loop_lisp_items = [[NSMutableArray alloc] initWithCapacity:8];
+  mac_loop_deferred_events = [[NSMutableArray alloc] initWithCapacity:8];
+  mac_loop_gui_semaphore = dispatch_semaphore_create (0);
+  mac_loop_lisp_semaphore = dispatch_semaphore_create (0);
+  EVENT_INIT (mac_loop_gui_hold_quit);
+}
+
+/* Decide the event loop for this process.  EMACS_MAC_PERSISTENT_LOOP
+   overrides the configured default in either direction.  */
+
+static void
+mac_loop_select_mode (void)
+{
+  const char *value = getenv ("EMACS_MAC_PERSISTENT_LOOP");
+
+#ifdef MAC_PERSISTENT_LOOP_DEFAULT
+  mac_persistent_loop_p = true;
+#else
+  mac_persistent_loop_p = false;
+#endif
+  if (value && *value)
+    mac_persistent_loop_p = strcmp (value, "0") != 0;
+  mac_trace_loop_p = getenv ("EMACS_MAC_TRACE_LOOP") != NULL;
+  MAC_TRACE_LOOP ("%s event loop selected\n",
+		  mac_persistent_loop_p ? "persistent" : "legacy");
+}
+
+/* Test support for the persistent loop (test/manual/mac-app-loop).
+   Actions are scheduled on the GUI thread's main dispatch queue, which
+   is serviced in the common run-loop modes, so they fire while Lisp is
+   busy and during native tracking.  Posted NSEvents take the normal
+   -[NSApplication sendEvent:] path.  A GUI-thread heartbeat measures
+   the longest gap in main-thread service.  */
+
+
+#define MAC_LOOP_TEST_MAX_RECORDS 4096
+
+static struct
+{
+  double time;
+  char label[64];
+} mac_loop_test_records[MAC_LOOP_TEST_MAX_RECORDS];
+static int mac_loop_test_nrecords;
+static bool mac_loop_test_recording_p;
+static double mac_loop_test_last_beat, mac_loop_test_max_gap;
+static int mac_loop_test_long_gaps;
+static dispatch_source_t mac_loop_test_heartbeat;
+
+/* GUI thread.  */
+
+static void
+mac_loop_test_record (const char *format, ...)
+{
+  if (!mac_loop_test_recording_p
+      || mac_loop_test_nrecords >= MAC_LOOP_TEST_MAX_RECORDS)
+    return;
+
+  va_list ap;
+  int i = mac_loop_test_nrecords++;
+
+  mac_loop_test_records[i].time = mac_system_uptime ();
+  va_start (ap, format);
+  vsnprintf (mac_loop_test_records[i].label,
+	     sizeof mac_loop_test_records[i].label, format, ap);
+  va_end (ap);
+}
+
+static void
+mac_loop_test_start_heartbeat (void)
+{
+  if (mac_loop_test_heartbeat)
+    return;
+  mac_loop_test_heartbeat =
+    dispatch_source_create (DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+			    dispatch_get_main_queue ());
+  dispatch_source_set_timer (mac_loop_test_heartbeat, DISPATCH_TIME_NOW,
+			     5 * NSEC_PER_MSEC, NSEC_PER_MSEC);
+  dispatch_source_set_event_handler (mac_loop_test_heartbeat, ^{
+      double now = mac_system_uptime ();
+
+      if (mac_loop_test_last_beat)
+	{
+	  double gap = now - mac_loop_test_last_beat;
+
+	  if (gap > mac_loop_test_max_gap)
+	    mac_loop_test_max_gap = gap;
+	  if (gap > 0.1)
+	    {
+	      mac_loop_test_long_gaps++;
+	      mac_loop_test_record ("gap %.0f ms", gap * 1000);
+	    }
+	}
+      mac_loop_test_last_beat = now;
+    });
+  dispatch_resume (mac_loop_test_heartbeat);
+}
+
+static void
+mac_loop_test_perform (struct mac_loop_test_action action,
+		       EmacsWindow *window)
+{
+  NSRect frame = window.frame;
+  NSPoint location = NSMakePoint (action.x, NSHeight (frame) - action.y);
+  NSEventType type = NSEventTypeLeftMouseDown;
+  NSEvent *event = nil;
+  const char *name = "?";
+
+  switch (action.kind)
+    {
+    case MAC_LOOP_TEST_KEY:
+      {
+	/* ACTION.character is the unmodified character; Control
+	   yields the control character, as a keyboard would.  */
+	UniChar base = action.character, modified = base;
+
+	if ((action.modifiers & NSEventModifierFlagControl)
+	    && base >= '@' && base < 0x80)
+	  modified = base & 0x1f;
+
+	NSString *chars = [NSString stringWithCharacters:&modified length:1];
+	NSString *ignoring = [NSString stringWithCharacters:&base length:1];
+
+	for (int i = 0; i < 2; i++)
+	  {
+	    event = [NSEvent keyEventWithType:(i == 0 ? NSEventTypeKeyDown
+					       : NSEventTypeKeyUp)
+				     location:NSZeroPoint
+				modifierFlags:action.modifiers
+				    timestamp:[[NSProcessInfo processInfo]
+						systemUptime]
+				 windowNumber:window.windowNumber
+				      context:nil
+				   characters:chars
+		  charactersIgnoringModifiers:ignoring
+				    isARepeat:NO
+				      keyCode:action.key_code];
+	    [NSApp postEvent:event atStart:NO];
+	  }
+	mac_loop_test_record ("post key %d", action.key_code);
+	return;
+      }
+
+    case MAC_LOOP_TEST_MOUSE_UP:
+      type = NSEventTypeLeftMouseUp;
+      name = "up";
+      break;
+    case MAC_LOOP_TEST_MOUSE_DRAG:
+      type = NSEventTypeLeftMouseDragged;
+      name = "drag";
+      break;
+    case MAC_LOOP_TEST_MOUSE_DOWN:
+      name = "down";
+      break;
+
+    case MAC_LOOP_TEST_MINIATURIZE:
+      [window miniaturize:nil];
+      mac_loop_test_record ("miniaturize");
+      return;
+    case MAC_LOOP_TEST_DEMINIATURIZE:
+      [window deminiaturize:nil];
+      mac_loop_test_record ("deminiaturize");
+      return;
+    case MAC_LOOP_TEST_ZOOM:
+      [window zoom:nil];
+      mac_loop_test_record ("zoom");
+      return;
+    case MAC_LOOP_TEST_FULLSCREEN:
+      [window toggleFullScreen:nil];
+      mac_loop_test_record ("fullscreen");
+      return;
+    case MAC_LOOP_TEST_CLOSE:
+      [window performClose:nil];
+      mac_loop_test_record ("close");
+      return;
+    case MAC_LOOP_TEST_ACTIVATE:
+      [NSApp activateIgnoringOtherApps:YES];
+      [window makeKeyAndOrderFront:nil];
+      mac_loop_test_record ("activate key=%d", window.isKeyWindow);
+      return;
+    case MAC_LOOP_TEST_SET_SIZE:
+      {
+	NSRect rect = frame;
+
+	rect.origin.y += NSHeight (rect) - action.y;
+	rect.size = NSMakeSize (action.x, action.y);
+	[window setFrame:rect display:YES];
+	mac_loop_test_record ("set-size %.0fx%.0f", action.x, action.y);
+	return;
+      }
+    case MAC_LOOP_TEST_TERMINATE:
+      [NSApp terminate:nil];
+      mac_loop_test_record ("terminate");
+      return;
+    default:
+      mac_loop_test_record ("probe %.0f", action.x);
+      return;
+    }
+
+  event = [NSEvent mouseEventWithType:type location:location
+			modifierFlags:action.modifiers
+			    timestamp:[[NSProcessInfo processInfo] systemUptime]
+			 windowNumber:window.windowNumber context:nil
+			  eventNumber:0 clickCount:1
+			     pressure:(type == NSEventTypeLeftMouseUp ? 0 : 1)];
+  [NSApp postEvent:event atStart:NO];
+  mac_loop_test_record ("post %s %.0f,%.0f", name, action.x, action.y);
+}
+
+/* Lisp thread: schedule ACTIONS (an array of N elements) against the
+   window of frame F, relative to now.  */
+
+void
+mac_loop_test_schedule (struct frame *f,
+			const struct mac_loop_test_action *actions, int n)
+{
+  EmacsWindow *window = MRC_RETAIN (FRAME_MAC_WINDOW_OBJECT (f));
+  struct mac_loop_test_action *copy = xmalloc (n * sizeof *copy);
+
+  memcpy (copy, actions, n * sizeof *copy);
+  mac_within_gui (^{
+      mac_loop_test_recording_p = true;
+      mac_loop_test_start_heartbeat ();
+      mac_loop_test_record ("schedule %d", n);
+      for (int i = 0; i < n; i++)
+	{
+	  struct mac_loop_test_action action = copy[i];
+
+	  dispatch_after (dispatch_time (DISPATCH_TIME_NOW,
+					 action.delay * NSEC_PER_SEC),
+			  dispatch_get_main_queue (), ^{
+			      mac_loop_test_perform (action, window);
+			    });
+	}
+    });
+  xfree (copy);
+}
+
+/* Lisp thread: return the records and heartbeat statistics.  If
+   RESET, clear them.  */
+
+Lisp_Object
+mac_loop_test_results (bool reset)
+{
+  __block Lisp_Object records = Qnil;
+  __block double max_gap;
+  __block int long_gaps;
+  int n = 0;
+  double *times = NULL;
+  char (*labels)[64] = NULL;
+
+  mac_within_gui (^{
+      max_gap = mac_loop_test_max_gap;
+      long_gaps = mac_loop_test_long_gaps;
+      if (reset)
+	{
+	  mac_loop_test_max_gap = 0;
+	  mac_loop_test_long_gaps = 0;
+	}
+    });
+  /* Copy without allocating Lisp objects on the GUI thread.  */
+  __block int count;
+  mac_within_gui (^{ count = mac_loop_test_nrecords; });
+  n = count;
+  times = xmalloc ((n + 1) * sizeof *times);
+  labels = xmalloc ((n + 1) * sizeof *labels);
+  mac_within_gui (^{
+      for (int i = 0; i < n; i++)
+	{
+	  times[i] = mac_loop_test_records[i].time;
+	  memcpy (labels[i], mac_loop_test_records[i].label, 64);
+	}
+      if (reset)
+	mac_loop_test_nrecords = 0;
+    });
+  for (int i = n - 1; i >= 0; i--)
+    records = Fcons (Fcons (make_float (times[i]), build_string (labels[i])),
+		     records);
+  xfree (times);
+  xfree (labels);
+
+  return list3 (make_float (max_gap), make_fixnum (long_gaps), records);
+}
+
+
+/***********************************************************************
 			       Startup
 ***********************************************************************/
 
@@ -17973,8 +19520,11 @@ main (int argc, char **argv)
 	}
     }
 
+  mac_loop_select_mode ();
   mac_init_thread_synchronization ();
   mac_init_select_fds ();
+  if (mac_persistent_loop_p)
+    mac_loop_init ();
 
   err = pthread_attr_init (&attr);
   if (!err)
@@ -18039,7 +19589,10 @@ main (int argc, char **argv)
     }
   pthread_attr_destroy (&attr);
 
-  mac_gui_loop ();
+  if (mac_persistent_loop_p)
+    mac_loop_gui_main ();
+  else
+    mac_gui_loop ();
 
   emacs_abort ();
 }

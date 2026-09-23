@@ -604,6 +604,12 @@ frame's display, or the first available display.  */)
 ***********************************************************************/
 static bool mac_ready_for_apple_events = false;
 
+/* True while the persistent event loop hands over an Apple event that
+   it already suspended with -[NSAppleEventManager
+   suspendCurrentAppleEvent]; the handlers then skip
+   AESuspendTheCurrentEvent.  */
+bool mac_apple_event_suspended_by_caller;
+
 struct suspended_ae_info
 {
   double expiration_uptime;
@@ -673,7 +679,8 @@ defer_apple_events (const AppleEvent *apple_event, const AppleEvent *reply)
   new->apple_event.descriptorType = typeNull;
   new->reply.descriptorType = typeNull;
 
-  err = AESuspendTheCurrentEvent (apple_event);
+  err = (mac_apple_event_suspended_by_caller ? noErr
+	 : AESuspendTheCurrentEvent (apple_event));
 
   /* Mac OS X 10.3 Xcode manual says AESuspendTheCurrentEvent makes
      copies of the Apple event and the reply, but Mac OS X 10.4 Xcode
@@ -710,7 +717,8 @@ mac_handle_apple_event_1 (Lisp_Object class, Lisp_Object id,
   new->apple_event.descriptorType = typeNull;
   new->reply.descriptorType = typeNull;
 
-  err = AESuspendTheCurrentEvent (apple_event);
+  err = (mac_apple_event_suspended_by_caller ? noErr
+	 : AESuspendTheCurrentEvent (apple_event));
   if (err == noErr)
     err = AEDuplicateDesc (apple_event, &new->apple_event);
   if (err == noErr)

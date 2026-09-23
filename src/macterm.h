@@ -546,6 +546,7 @@ extern OSStatus mac_store_event_ref_as_apple_event (AEEventClass, AEEventID,
 extern void mac_clear_frame_selections (struct frame *);
 extern Lisp_Object mac_find_apple_event_spec (AEEventClass, AEEventID,
 					      Lisp_Object *, Lisp_Object *);
+extern bool mac_apple_event_suspended_by_caller;
 extern pascal OSErr mac_handle_apple_event (const AppleEvent *, AppleEvent *,
 					    SInt32);
 extern void cleanup_all_suspended_apple_events (void);
@@ -797,6 +798,38 @@ extern void mac_start_animation (Lisp_Object, Lisp_Object);
 extern CFTypeRef mac_sound_create (Lisp_Object, Lisp_Object);
 extern void mac_sound_play (CFTypeRef, Lisp_Object, Lisp_Object);
 extern void mac_within_gui (void (^block) (void));
+
+/* Test support for the persistent event loop.  */
+struct mac_loop_test_action
+{
+  double delay;
+  int kind;
+  double x, y;
+  unsigned short key_code;
+  unsigned long modifiers;	/* NSEventModifierFlags */
+  unsigned short character;
+};
+
+enum
+  {
+    MAC_LOOP_TEST_KEY,
+    MAC_LOOP_TEST_MOUSE_DOWN,
+    MAC_LOOP_TEST_MOUSE_DRAG,
+    MAC_LOOP_TEST_MOUSE_UP,
+    MAC_LOOP_TEST_MINIATURIZE,
+    MAC_LOOP_TEST_DEMINIATURIZE,
+    MAC_LOOP_TEST_ZOOM,
+    MAC_LOOP_TEST_FULLSCREEN,
+    MAC_LOOP_TEST_CLOSE,
+    MAC_LOOP_TEST_ACTIVATE,
+    MAC_LOOP_TEST_SET_SIZE,
+    MAC_LOOP_TEST_PROBE,
+    MAC_LOOP_TEST_TERMINATE
+  };
+
+extern void mac_loop_test_schedule (struct frame *,
+				    const struct mac_loop_test_action *, int);
+extern Lisp_Object mac_loop_test_results (bool);
 
 #ifndef USE_METAL_RENDERING
 #if DRAWING_USE_GCD
