@@ -1,7 +1,7 @@
 ---
 id: native-behavior
 title: Define native responsiveness and acceptance scenarios
-status: open
+status: closed
 labels: ["wayfinder:grilling"]
 parent: macos-app-integration
 assignee: null
@@ -20,3 +20,8 @@ OS/build matrix and fresh-process interactive evidence needed for acceptance.
 
 - [Establish documented AppKit lifecycle and tracking contracts](01-appkit-contracts.md)
 - [Establish upstream direction and supported macOS baseline](02-upstream-baseline.md)
+
+## Discussion
+
+- [Acceptance contract](../comments/native-behavior/2026-09-23-discussion.md)
+- [Resolution](../comments/native-behavior/2026-09-23-resolution.md)

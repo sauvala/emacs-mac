@@ -9,6 +9,14 @@ The ability to resize and operate native window controls, and dismiss menus,
 while Emacs Lisp is busy. Completion of commands that require Lisp is a
 separate acceptance condition.
 
+**Native presentation**:
+The visible window and menu response available while Lisp is busy. Editor
+content may show its last completed state until Lisp can redraw.
+
+**Lisp completion**:
+The execution of an accepted request that needs Lisp, including command
+validation, save prompts, hooks, and editor redisplay.
+
 **Documented integration**:
 The target event, window, menu, and application lifecycle integration that uses
 documented AppKit contracts. It does not imply removing private APIs throughout
