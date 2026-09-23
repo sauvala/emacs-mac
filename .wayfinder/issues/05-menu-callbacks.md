@@ -4,7 +4,7 @@ title: Choose menu preparation and GUI-to-Lisp callback contracts
 status: open
 labels: ["wayfinder:grilling"]
 parent: macos-app-integration
-assignee: null
+assignee: claude-session-05
 ---
 
 ## Question
