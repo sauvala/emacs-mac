@@ -1,10 +1,10 @@
 ---
 id: window-redisplay
 title: Choose window lifecycle and redisplay coordination
-status: open
+status: closed
 labels: ["wayfinder:grilling"]
 parent: macos-app-integration
-assignee: claude-session-05
+assignee: null
 ---
 
 ## Question
@@ -19,3 +19,8 @@ window/control preferences can be retired.
 ## Blocked by
 
 - [Choose application event-loop ownership and Lisp scheduling](04-event-loop-ownership.md)
+
+## Discussion
+
+- [Recorded decisions](../comments/window-redisplay/2026-09-23-discussion.md)
+- [Resolution](../comments/window-redisplay/2026-09-23-resolution.md)

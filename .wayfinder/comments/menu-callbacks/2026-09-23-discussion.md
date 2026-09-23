@@ -1,9 +1,8 @@
 # Menu and callback contracts discussion
 
-Status: open, awaiting user confirmation. The user asked on 2026-09-23 that
-the agent adopt its own recommended answers and document them for later
-review instead of asking. Every decision below is **agent-adopted, not yet
-user-confirmed**. The ticket must not close until the user confirms live.
+Status: confirmed by the user and resolved. On 2026-09-23 the user asked the
+agent to adopt its recommended answers and document them instead of asking;
+the user then reviewed the decisions live, accepted them, and revised D9.
 
 ## Round 1 decisions (agent-adopted)
 
@@ -121,15 +120,20 @@ sites at `254f965d9c0`:
   are not used by the new loop. *Why:* the interception exists to run Lisp
   before tracking starts, which D2/D3 make unnecessary, and it depends on
   Carbon queue access and a private symbol.
-- **D9. Lisp-initiated menu-bar opening.** `mac-menu-bar-open` (F10 and
-  `accelerate-menu`) becomes a Lisp-initiated modal popup of the menu-bar
-  keymap positioned at the menu bar, using the same path as `popup-menu`
-  (which `mac-menu-bar-open` already uses when `menu-bar-lines` is 0). *Why:*
-  AppKit has no public call to begin tracking a main-menu title; faking a
-  click is what D8 retires. *Risk recorded:* the popup looks different from
-  real menu-bar tracking; the menu prototype must show it is acceptable,
-  otherwise revisit with an accessibility-based press as a separate
-  decision.
+- **D9. Lisp-initiated menu-bar opening (user-revised).** Nothing fakes a
+  menu-bar click or drives the app's own menu bar through accessibility.
+  `mac-menu-bar-open` (F10 and `accelerate-menu`) shows the menu-bar keymap as
+  an ordinary Lisp-initiated modal popup placed under the menu bar, the
+  same path as `popup-menu`. GNU Emacs's NS port likewise has no native F10
+  and falls back to `popup-menu` (`lisp/menu-bar.el:2863`). Real keyboard
+  navigation of the menu bar is left to the system shortcut "Move focus to
+  menu bar" (Control-F2 by default), which AppKit handles natively once D8
+  removes the Carbon interception; Emacs only has to pass the key to the
+  system, as `mac-pass-control-to-system` already allows. Users who prefer a
+  text menu can bind F10 to `tmm-menubar`. *Rejected:* private AppKit
+  methods and an Accessibility self-press (automation hacks). *Prototype
+  checks:* the popup is acceptable in practice, and Control-F2 reaches AppKit
+  tracking under the new loop while Lisp is idle and busy.
 - **D10. Cancel/rebuild/reopen and Help redirection retire under the new
   loop.** `menuNeedsUpdate:` fills the submenu in place from the snapshot or
   the bounded refresh (D3) before it is displayed, so there is no
@@ -203,8 +207,8 @@ sites at `254f965d9c0`:
 - **D21. Menu prototype.** On top of 04's persistent-loop prototype, add:
   per-frame snapshot publication, bounded open-time refresh, the
   generation table and revalidated action record, C-g cancellation, Help
-  search on published topics, published Services data, and the popup-based
-  `mac-menu-bar-open`. Run the ticket 03 menu scenarios in fresh processes
+  search on published topics, published Services data, the popup-based
+  `mac-menu-bar-open`, and Control-F2 menu-bar navigation. Run the ticket 03 menu scenarios in fresh processes
   with Lisp idle, waiting in the minibuffer, and in a busy loop that never
   waits for input:
   menus open within 100 ms from cache; dynamic submenus are fresh when idle;
@@ -218,10 +222,10 @@ sites at `254f965d9c0`:
   to cover the new table's lifetime rules (release only when superseded and
   unreferenced), which remains a standalone check, not GC evidence.
 
-## Open items for user review
+## User review
 
-- D9's popup substitute for real menu-bar tracking changes the look of
-  F10; the user may prefer an accessibility-based press.
-- D17 turns silent drops into `user-error` messages; confirm the wording and
-  that a bell is acceptable.
-- Whether help-echo for menu-bar menus (new; today only popups) is wanted.
+The user accepted every decision except the original D9 (a popup substitute,
+with an Accessibility press as the alternative), asking for a way to avoid
+event-faking hacks. D9 was revised to popup plus the system menu-bar
+shortcut, which the user accepted. The user also accepted D17's `user-error`
+feedback. Help text for highlighted menu-bar items (D13) is kept as proposed.

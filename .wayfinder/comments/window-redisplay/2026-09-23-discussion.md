@@ -1,9 +1,8 @@
 # Window lifecycle and redisplay discussion
 
-Status: open, awaiting user confirmation. Per the user's 2026-09-23
-instruction, the agent adopted its own recommended answers and documented
-them for later review. Every decision below is **agent-adopted, not yet
-user-confirmed**. The ticket must not close until the user confirms live.
+Status: confirmed by the user and resolved. Per the user's 2026-09-23
+instruction the agent adopted its recommended answers and documented them;
+the user then reviewed and accepted them live.
 Menu-side counterparts are in
 [the menu callback discussion](../menu-callbacks/2026-09-23-discussion.md).
 
@@ -145,10 +144,9 @@ cited sites at `254f965d9c0`:
   disabled. Fails on any GUI-thread Lisp evaluation, synthetic tracking event,
   or result that needs an undocumented preference.
 
-## Open items for user review
+## User review
 
-- W7/W8 add a visible "Waiting for Emacs…" indicator; the wording and
-  subtitle placement are new UI.
-- W9 defers Lisp resizes of a frame being dragged until the drag ends.
-- W6 returns from Lisp fullscreen requests before the animation finishes, so
-  `frame-parameter` briefly reports the requested state.
+The user accepted all decisions, including the items flagged for review: the
+"Waiting for Emacs…" subtitle after 100 ms (W7/W8), deferring Lisp resizes
+of a frame being dragged until the drag ends (W9), and returning from Lisp
+fullscreen requests once AppKit accepts the transition (W6).

@@ -32,7 +32,8 @@ version, with explicit validation and retirement criteria for existing workaroun
 - Source baseline: `1b08291ec0350cec8fbd1447fe869185f486097d`.
   The [initial audit](../research/initial-audit.md) is source inspection plus
   recorded historical tests, not a fresh GUI validation.
-- Event-loop ownership is selected (ticket 04), pending its decisive prototype.
+- Event-loop ownership (ticket 04), menu callbacks (05) and window/redisplay
+  coordination (06) are selected, pending their prototypes.
 
 ## Decisions so far
 
@@ -40,6 +41,8 @@ version, with explicit validation and retirement criteria for existing workaroun
 - [Establish upstream direction and supported macOS baseline](02-upstream-baseline.md): existing thread separation needs new coordination; preserve the declared 10.10 floor and distinguish it from renderer requirements and tested coverage.
 - [Define native responsiveness and acceptance scenarios](03-native-behavior.md): native operations and menus respond while Lisp is busy, with deferred save/quit, context-bound single-execution commands, 100/250 ms targets, and per-OS runtime evidence before retiring legacy paths.
 - [Choose application event-loop ownership and Lisp scheduling](04-event-loop-ownership.md): persistent `NSApplication.run` with Lisp on its own thread; the GUI never waits unbounded on Lisp, using safe-point lock acquisition or snapshots; synchronous mode-classed Lisp-to-GUI requests; launch-selected opt-in and a busy-Lisp macOS 27 prototype.
+- [Choose menu preparation and GUI-to-Lisp callback contracts](05-menu-callbacks.md): no GUI-thread Lisp; published per-frame menu snapshots with bounded open-time refresh; revalidated at-most-once actions; Carbon interception and cancel/reopen retire under the new loop; F10 popup plus system Control-F2 navigation.
+- [Choose window lifecycle and redisplay coordination](06-window-redisplay.md): single-owner window fields with GUI-applied geometry and coalesced records; Lisp draws during one live-resize session with safe stale presentation; synthetic events and event-loop preferences retire under the new loop; deduplicated close/Quit with a 100 ms waiting indicator.
 
 ## Not yet specified
 

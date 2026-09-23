@@ -1,10 +1,10 @@
 ---
 id: menu-callbacks
 title: Choose menu preparation and GUI-to-Lisp callback contracts
-status: open
+status: closed
 labels: ["wayfinder:grilling"]
 parent: macos-app-integration
-assignee: claude-session-05
+assignee: null
 ---
 
 ## Question
@@ -18,3 +18,8 @@ cancel/rebuild/reopen menus and Carbon queue interception can be retired.
 ## Blocked by
 
 - [Choose application event-loop ownership and Lisp scheduling](04-event-loop-ownership.md)
+
+## Discussion
+
+- [Recorded decisions](../comments/menu-callbacks/2026-09-23-discussion.md)
+- [Resolution](../comments/menu-callbacks/2026-09-23-resolution.md)
