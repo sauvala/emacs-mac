@@ -724,6 +724,10 @@ typedef NSInteger NSGlyphProperty;
     FULLSCREEN_PARAM_FULLBOTH, FULLSCREEN_PARAM_FULLSCREEN
   } fullscreenFrameParameterAfterTransition;
 
+  /* Under the persistent event loop, serial number of the latest
+     fullscreen parameter event, so that Lisp ignores stale ones.  */
+  EMACS_INT fullscreenParameterSerial;
+
   /* Array of blocks called when the window completes full screen
      transition.  Each block is called with the window object and a
      boolean value meaning whether the transition has succeeded.  */

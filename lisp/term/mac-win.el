@@ -1766,6 +1766,8 @@ modifiers, it changes the global tool-bar visibility setting."
      '("searchStringForAllHelpTopics"))
 
 ;;; Frame events
+(declare-function mac-frame-fullscreen-serial "macterm.c" (&optional frame))
+
 (defun mac-handle-modify-frame-parameters-event (event)
   "Modify frame parameters according to EVENT."
   (interactive "e")
@@ -1774,8 +1776,16 @@ modifiers, it changes the global tool-bar visibility setting."
 	  (alist (cdr (mac-ae-parameter ae 'alist))))
       ;; macOS 10.12 sends this event for a dead frame when a tab in a
       ;; full screen space is closed.
-      (if (frame-live-p frame)
-          (modify-frame-parameters frame alist)))))
+      (when (frame-live-p frame)
+        (let ((serial (alist-get 'mac-fullscreen-serial alist)))
+          ;; Under the persistent event loop, a fullscreen event can be
+          ;; handled after a later native transition; apply only the
+          ;; latest so that stale values do not restart a transition.
+          (when (or (null serial)
+                    (= serial (mac-frame-fullscreen-serial frame)))
+            (modify-frame-parameters
+             frame (assq-delete-all 'mac-fullscreen-serial
+                                    (copy-sequence alist)))))))))
 
 (define-key mac-apple-event-map [frame modify-frame-parameters]
  'mac-handle-modify-frame-parameters-event)

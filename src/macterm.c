@@ -574,14 +574,29 @@ The actions run on the GUI thread even while Lisp is busy.  */)
 
 DEFUN ("mac-loop-test-results", Fmac_loop_test_results,
        Smac_loop_test_results, 0, 1, 0,
-       doc: /* Return persistent-loop test records as (MAX-GAP LONG-GAPS RECORDS).
+       doc: /* Return test records as (MAX-GAP LONG-GAPS RECORDS COUNTERS).
 MAX-GAP is the longest interval in seconds between GUI-thread heartbeats
 (every 5 ms) since the first schedule or last reset, LONG-GAPS counts
-gaps over 100 ms, and RECORDS is a list of (UPTIME . LABEL).  Non-nil
-RESET clears them.  Internal test support.  */)
+gaps over 100 ms, RECORDS is a list of (UPTIME . LABEL), and COUNTERS
+lists GUI Lisp access by try-lock, access while Lisp is parked on a
+request, denied access, deferred events, deferred callbacks and queued
+GUI-to-Lisp items.  Non-nil RESET clears them.  Internal test support.  */)
   (Lisp_Object reset)
 {
   return mac_loop_test_results (!NILP (reset));
+}
+
+DEFUN ("mac-frame-fullscreen-serial", Fmac_frame_fullscreen_serial,
+       Smac_frame_fullscreen_serial, 0, 1, 0,
+       doc: /* Return the serial number of FRAME's latest fullscreen event.
+Under the persistent event loop, native fullscreen transitions tag their
+`modify-frame-parameters' events with `mac-fullscreen-serial' so that a
+stale event handled after a later transition is ignored.  */)
+  (Lisp_Object frame)
+{
+  struct frame *f = decode_window_system_frame (frame);
+
+  return make_int (mac_frame_fullscreen_serial (f));
 }
 
 DEFUN ("mac-loop-uptime", Fmac_loop_uptime, Smac_loop_uptime, 0, 0, 0,
@@ -6680,6 +6695,7 @@ syms_of_macterm (void)
   defsubr (&Smac_loop_test_schedule);
   defsubr (&Smac_loop_test_results);
   defsubr (&Smac_loop_uptime);
+  defsubr (&Smac_frame_fullscreen_serial);
 
   DEFSYM (Qcontrol, "control");
   DEFSYM (Qmeta, "meta");

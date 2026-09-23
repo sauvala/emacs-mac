@@ -11,7 +11,7 @@ out="${TMPDIR:-/tmp}/mac-app-loop/results"
 mkdir -p "$out"
 modes=${1:-both}; [ $# -gt 0 ] && shift
 [ "$modes" = both ] && modes="old new"
-scenarios=${*:-"idle-typing busy-typing quit busy-native idle-resize live-resize close-busy"}
+scenarios=${*:-"idle-typing busy-typing quit busy-native idle-resize live-resize close-busy stress-requests thread-busy fullscreen-idle fullscreen-busy"}
 if [ ! -d "$app/Contents/Resources/lisp" ]; then
   EMACSLOADPATH="$repo_root/lisp"; export EMACSLOADPATH
 fi

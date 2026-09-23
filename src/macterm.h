@@ -830,6 +830,8 @@ enum
 extern void mac_loop_test_schedule (struct frame *,
 				    const struct mac_loop_test_action *, int);
 extern Lisp_Object mac_loop_test_results (bool);
+extern EMACS_INT mac_frame_fullscreen_serial (struct frame *);
+extern bool mac_persistent_event_loop_active (void);
 
 #ifndef USE_METAL_RENDERING
 #if DRAWING_USE_GCD

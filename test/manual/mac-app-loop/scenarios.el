@@ -80,7 +80,8 @@ window; posted control keys become Emacs events directly."
                               :loop (or (getenv "EMACS_MAC_PERSISTENT_LOOP")
                                         "0")
                               :gui-max-gap (nth 0 test)
-                              :gui-long-gaps (nth 1 test))
+                              :gui-long-gaps (nth 1 test)
+                              :access (nth 3 test))
                         result
                         (list :lisp-log (reverse mac-loop-scenario-log)
                               :gui-log (nth 2 test)))))
@@ -191,6 +192,56 @@ The wait lets the command loop execute queued input first."
         (list :busy busy :second-live (frame-live-p second)
               :frames (length (frame-list)))))))
 
+;; 04's stress check: Lisp-to-GUI requests interleaved with native
+;; tracking and window operations must not deadlock.
+(defun mac-loop-scenario-stress-requests ()
+  "Frequent title changes and redisplay during drags and window ops."
+  (let* ((n 0)
+         (timer (run-at-time 0 0.01
+                             (lambda ()
+                               (setq n (1+ n))
+                               (set-frame-parameter nil 'name
+                                                    (format "stress %d" n))
+                               (redisplay t)))))
+    (mac-loop-test-schedule
+     (append (mac-loop-scenario--corner-drag 0.3)
+             '((2.0 zoom) (2.8 zoom) (3.5 miniaturize) (4.5 deminiaturize))
+             (mac-loop-scenario--type 5.0 "ofo")))
+    (mac-loop-scenario--then 6.5
+      (cancel-timer timer)
+      (list :ticks n :after (mac-loop-scenario--frame-state)
+            :commands (mac-loop-scenario--commands)))))
+
+(defun mac-loop-scenario-thread-busy ()
+  "A second Lisp thread computes while the main thread waits for input."
+  (let ((thread (make-thread (lambda () (mac-loop-scenario--busy 3))
+                             "loop-test-busy")))
+    (mac-loop-test-schedule
+     (append '((0.5 set-size 700 500))
+             (mac-loop-scenario--type 1.0 "ofo")))
+    (mac-loop-scenario--then 4.5
+      (list :thread-alive (thread-live-p thread)
+            :after (mac-loop-scenario--frame-state)
+            :commands (mac-loop-scenario--commands)))))
+
+(defun mac-loop-scenario-fullscreen-busy ()
+  "Enter and leave fullscreen while Lisp computes."
+  (mac-loop-test-schedule '((0.5 fullscreen) (2.5 probe 1) (3.0 fullscreen)
+                            (4.5 probe 2) (7.5 probe 3)))
+  (let ((busy (mac-loop-scenario--busy 5)))
+    (mac-loop-scenario--then 3.0
+      (list :busy busy :after (mac-loop-scenario--frame-state)))))
+
+(defun mac-loop-scenario-fullscreen-idle ()
+  "Enter fullscreen while idle and check the frame parameter."
+  (mac-loop-test-schedule '((0.3 fullscreen)))
+  (mac-loop-scenario--then 2.5
+    (let ((during (mac-loop-scenario--frame-state)))
+      (mac-loop-test-schedule '((0 fullscreen)))
+      ;; `sit-for' returns early on the transition's input events.
+      (sleep-for 2.5)
+      (list :during during :after (mac-loop-scenario--frame-state)))))
+
 (defun mac-loop-scenario-run (name)
   "Run scenario NAME, write its result and exit.
 Setup and the scenario body run in timers; the result is collected
@@ -210,6 +261,10 @@ after the command loop has executed input queued meanwhile."
             (run-at-time (plist-get k :wait) nil
                          (lambda ()
                            (mac-loop-scenario--finish
-                            name (funcall (plist-get k :collect))))))))))))
+                            name
+                            (condition-case err
+                                (funcall (plist-get k :collect))
+                              (error
+                               (list :error (format "%S" err))))))))))))))
 
 ;;; scenarios.el ends here

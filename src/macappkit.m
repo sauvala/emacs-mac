@@ -23,6 +23,7 @@ along with GNU Emacs Mac port.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "macterm.h"
 
 #include <sys/socket.h>
+#include <execinfo.h>
 
 #include "character.h"
 #include "frame.h"
@@ -131,8 +132,14 @@ static bool mac_persistent_loop_p;
 static bool mac_trace_loop_p;
 
 #define MAC_TRACE_LOOP(...)						\
-  do { if (mac_trace_loop_p) fprintf (stderr, "mac-loop: " __VA_ARGS__); } \
-  while (false)
+  do {									\
+    if (mac_trace_loop_p)						\
+      {									\
+	fprintf (stderr, "mac-loop: %.3f %s ", mac_system_uptime (),	\
+		 pthread_main_np () ? "G" : "L");			\
+	fprintf (stderr, __VA_ARGS__);					\
+      }									\
+  } while (false)
 
 /* Kinds of Lisp access of the GUI thread.  */
 enum
@@ -4307,8 +4314,22 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
       return;
     }
 
-  [self storeModifyFrameParametersEvent:(list1 (Fcons (Qfullscreen, value)))];
+  if (mac_persistent_loop_p)
+    /* The event may be handled after later transitions; tag it so
+       that only the latest one takes effect.  */
+    [self storeModifyFrameParametersEvent:
+	    (list2 (Fcons (Qfullscreen, value),
+		    Fcons (intern ("mac-fullscreen-serial"),
+			   make_fixnum (++fullscreenParameterSerial))))];
+  else
+    [self storeModifyFrameParametersEvent:(list1 (Fcons (Qfullscreen,
+							 value)))];
   fullscreenFrameParameterAfterTransition = FULLSCREEN_PARAM_NONE;
+}
+
+- (EMACS_INT)fullscreenParameterSerial
+{
+  return fullscreenParameterSerial;
 }
 
 - (void)storeParentFrameFrameParameter
@@ -18371,6 +18392,17 @@ static bool mac_loop_launch_requested_p;
 static int mac_loop_deferred_count;	/* Number of deferred NSEvents.  */
 static bool mac_loop_lisp_waiting_p;	/* Lisp is inside thread_select.  */
 
+/* Counters for test/manual/mac-app-loop: Lisp access granted by
+   try-lock, granted while a request parks Lisp, denied; deferred
+   NSEvents and callbacks; queued GUI-to-Lisp items.  */
+static unsigned long mac_loop_stats[6];
+enum
+  {
+    MAC_LOOP_STAT_LOCKED, MAC_LOOP_STAT_BORROWED, MAC_LOOP_STAT_DENIED,
+    MAC_LOOP_STAT_DEFERRED_EVENTS, MAC_LOOP_STAT_DEFERRED_CALLBACKS,
+    MAC_LOOP_STAT_LISP_ITEMS
+  };
+
 /* Lisp thread: hold_quit of the drain in progress, if any.  */
 static struct input_event *mac_loop_lisp_hold_quit;
 
@@ -18497,11 +18529,16 @@ mac_loop_within_gui (void (^block) (void))
   dispatch_semaphore_signal (mac_loop_gui_semaphore);
   mac_loop_signal_source (mac_loop_request_source);
 
+  double start = mac_trace_loop_p ? mac_system_uptime () : 0;
+
   while (!__atomic_load_n (&request->done, __ATOMIC_ACQUIRE))
     {
       dispatch_semaphore_wait (mac_loop_lisp_semaphore, DISPATCH_TIME_FOREVER);
       mac_loop_run_inner_lisp_blocks ();
     }
+  if (start && mac_system_uptime () - start > 0.05)
+    MAC_TRACE_LOOP ("request took %.0f ms\n",
+		    (mac_system_uptime () - start) * 1000);
 
   for (void (^deferred) (void) in request->deferredLispBlocks)
     deferred ();
@@ -18569,6 +18606,8 @@ mac_loop_wake_lisp (void)
 static void
 mac_loop_queue_lisp_block (void (^block) (void))
 {
+  __atomic_add_fetch (&mac_loop_stats[MAC_LOOP_STAT_LISP_ITEMS], 1,
+		      __ATOMIC_RELAXED);
   mac_loop_push (mac_loop_lisp_items, MRC_AUTORELEASE ([block copy]));
   mac_loop_wake_lisp ();
 }
@@ -18576,6 +18615,8 @@ mac_loop_queue_lisp_block (void (^block) (void))
 static void
 mac_loop_queue_input_event (const struct input_event *event)
 {
+  __atomic_add_fetch (&mac_loop_stats[MAC_LOOP_STAT_LISP_ITEMS], 1,
+		      __ATOMIC_RELAXED);
   mac_loop_push (mac_loop_lisp_items,
 		 [NSData dataWithBytes:event length:(sizeof *event)]);
   mac_loop_wake_lisp ();
@@ -18687,10 +18728,17 @@ mac_loop_begin_lisp_access (void)
   if (!mac_persistent_loop_p || !pthread_main_np ())
     return MAC_LOOP_BORROWED_ACCESS;
   if (mac_loop_request_depth > 0 || mac_loop_gui_owns_lock)
-    return MAC_LOOP_BORROWED_ACCESS;
+    {
+      mac_loop_stats[MAC_LOOP_STAT_BORROWED]++;
+      return MAC_LOOP_BORROWED_ACCESS;
+    }
   if (!mac_loop_try_global_lock ())
-    return MAC_LOOP_NO_ACCESS;
+    {
+      mac_loop_stats[MAC_LOOP_STAT_DENIED]++;
+      return MAC_LOOP_NO_ACCESS;
+    }
   mac_loop_gui_owns_lock = true;
+  mac_loop_stats[MAC_LOOP_STAT_LOCKED]++;
 
   return MAC_LOOP_LOCKED_ACCESS;
 }
@@ -18890,6 +18938,7 @@ mac_loop_send_event (NSEvent *event)
 	  && event.type == NSEventTypeMouseMoved)
 	[mac_loop_deferred_events removeLastObject];
       [mac_loop_deferred_events addObject:event];
+      mac_loop_stats[MAC_LOOP_STAT_DEFERRED_EVENTS]++;
       __atomic_store_n (&mac_loop_deferred_count,
 			mac_loop_deferred_events.count, __ATOMIC_RELEASE);
       MAC_TRACE_LOOP ("deferred event type %ld (%lu pending)\n",
@@ -18920,10 +18969,14 @@ mac_loop_with_access_now_or_later (void (^block) (void))
   if (token == MAC_LOOP_NO_ACCESS)
     {
       [mac_loop_deferred_events addObject:MRC_AUTORELEASE ([block copy])];
+      mac_loop_stats[MAC_LOOP_STAT_DEFERRED_CALLBACKS]++;
       __atomic_store_n (&mac_loop_deferred_count,
 			mac_loop_deferred_events.count, __ATOMIC_RELEASE);
-      MAC_TRACE_LOOP ("callback deferred (%lu pending)\n",
-		      (unsigned long) mac_loop_deferred_events.count);
+      MAC_TRACE_LOOP ("callback deferred (%lu pending, lisp %s)\n",
+		      (unsigned long) mac_loop_deferred_events.count,
+		      (__atomic_load_n (&mac_loop_lisp_waiting_p,
+					__ATOMIC_ACQUIRE)
+		       ? "waiting" : "running"));
       mac_loop_wake_lisp ();
       if (__atomic_load_n (&mac_loop_lisp_waiting_p, __ATOMIC_ACQUIRE))
 	mac_loop_signal_source (mac_loop_retry_source);
@@ -18949,6 +19002,10 @@ mac_loop_retry_source_perform (void *info)
 
   int token = mac_loop_begin_lisp_access ();
 
+  MAC_TRACE_LOOP ("retry %lu deferred: %s (mode %s)\n",
+		  (unsigned long) mac_loop_deferred_events.count,
+		  token == MAC_LOOP_NO_ACCESS ? "denied" : "granted",
+		  [[NSRunLoop currentRunLoop].currentMode UTF8String]);
   if (token == MAC_LOOP_NO_ACCESS)
     return;
 
@@ -19048,6 +19105,10 @@ mac_loop_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
   int r;
 
   read_all_from_nonblocking_fd (mac_select_fds[0]);
+  if (mac_trace_loop_p && getenv ("EMACS_MAC_TRACE_LOOP")[0] == '2')
+    MAC_TRACE_LOOP ("select keyboard=%d deferred=%d\n", keyboard_p,
+		    __atomic_load_n (&mac_loop_deferred_count,
+				     __ATOMIC_ACQUIRE));
   if (keyboard_p)
     {
       read_all_from_nonblocking_fd (mac_select_fds[1]);
@@ -19080,9 +19141,16 @@ mac_loop_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 
   __atomic_store_n (&mac_loop_lisp_waiting_p, true, __ATOMIC_RELEASE);
   if (__atomic_load_n (&mac_loop_deferred_count, __ATOMIC_ACQUIRE))
-    mac_loop_signal_source (mac_loop_retry_source);
+    {
+      MAC_TRACE_LOOP ("select: signal retry (%d deferred)\n",
+		      __atomic_load_n (&mac_loop_deferred_count,
+				       __ATOMIC_ACQUIRE));
+      mac_loop_signal_source (mac_loop_retry_source);
+    }
   r = thread_select (pselect, nfds, rfds, wfds, efds, timeout, sigmask);
   __atomic_store_n (&mac_loop_lisp_waiting_p, false, __ATOMIC_RELEASE);
+  if (mac_trace_loop_p && getenv ("EMACS_MAC_TRACE_LOOP")[0] == '2')
+    MAC_TRACE_LOOP ("select returned %d\n", r);
 
   if (r > 0 && FD_ISSET (mac_select_fds[0], rfds))
     {
@@ -19145,9 +19213,47 @@ mac_loop_gui_main (void)
     }
 }
 
+/* Diagnostics: with EMACS_MAC_TRACE_LOOP set, SIGINFO (kill -INFO)
+   makes the GUI thread and the Lisp main thread print backtraces to
+   stderr.  Debugging aid for hangs; lldb and sample may be
+   unavailable.  */
+
+static pthread_t mac_loop_gui_thread_id;
+static pthread_t mac_lisp_main_thread_id;
+
+static void
+mac_loop_siginfo_handler (int sig)
+{
+  static volatile sig_atomic_t forwarding;
+  void *frames[64];
+  int n = backtrace (frames, 64);
+  char header[64];
+  pthread_t self = pthread_self ();
+  int len = snprintf (header, sizeof header, "mac-loop: backtrace of %s\n",
+		      (pthread_equal (self, mac_loop_gui_thread_id) ? "GUI"
+		       : pthread_equal (self, mac_lisp_main_thread_id)
+		       ? "Lisp main" : "other"));
+
+  write (STDERR_FILENO, header, len);
+  backtrace_symbols_fd (frames, n, STDERR_FILENO);
+  if (!forwarding)
+    {
+      forwarding = 1;
+      if (!pthread_equal (self, mac_loop_gui_thread_id))
+	pthread_kill (mac_loop_gui_thread_id, SIGINFO);
+      if (!pthread_equal (self, mac_lisp_main_thread_id))
+	pthread_kill (mac_lisp_main_thread_id, SIGINFO);
+    }
+}
+
 static void
 mac_loop_init (void)
 {
+  if (mac_trace_loop_p)
+    {
+      mac_loop_gui_thread_id = pthread_self ();
+      signal (SIGINFO, mac_loop_siginfo_handler);
+    }
   mac_loop_requests = [[NSMutableArray alloc] initWithCapacity:2];
   mac_loop_inner_lisp_blocks = [[NSMutableArray alloc] initWithCapacity:1];
   mac_loop_lisp_items = [[NSMutableArray alloc] initWithCapacity:8];
@@ -19175,6 +19281,27 @@ mac_loop_select_mode (void)
   mac_trace_loop_p = getenv ("EMACS_MAC_TRACE_LOOP") != NULL;
   MAC_TRACE_LOOP ("%s event loop selected\n",
 		  mac_persistent_loop_p ? "persistent" : "legacy");
+}
+
+/* Return the serial number of F's latest fullscreen parameter event
+   under the persistent loop.  */
+
+EMACS_INT
+mac_frame_fullscreen_serial (struct frame *f)
+{
+  __block EMACS_INT serial = 0;
+
+  mac_within_gui (^{
+      serial = [FRAME_CONTROLLER (f) fullscreenParameterSerial];
+    });
+
+  return serial;
+}
+
+bool
+mac_persistent_event_loop_active (void)
+{
+  return mac_persistent_loop_p;
 }
 
 /* Test support for the persistent loop (test/manual/mac-app-loop).
@@ -19344,7 +19471,10 @@ mac_loop_test_perform (struct mac_loop_test_action action,
       mac_loop_test_record ("terminate");
       return;
     default:
-      mac_loop_test_record ("probe %.0f", action.x);
+      mac_loop_test_record ("probe %.0f window %.0fx%.0f%s", action.x,
+			    NSWidth (frame), NSHeight (frame),
+			    ((window.styleMask & NSWindowStyleMaskFullScreen)
+			     ? " fullscreen" : ""));
       return;
     }
 
@@ -19396,6 +19526,8 @@ mac_loop_test_results (bool reset)
   __block Lisp_Object records = Qnil;
   __block double max_gap;
   __block int long_gaps;
+  unsigned long stats[countof (mac_loop_stats)];
+  unsigned long *statsp = stats;
   int n = 0;
   double *times = NULL;
   char (*labels)[64] = NULL;
@@ -19403,8 +19535,10 @@ mac_loop_test_results (bool reset)
   mac_within_gui (^{
       max_gap = mac_loop_test_max_gap;
       long_gaps = mac_loop_test_long_gaps;
+      memcpy (statsp, mac_loop_stats, sizeof mac_loop_stats);
       if (reset)
 	{
+	  memset (mac_loop_stats, 0, sizeof mac_loop_stats);
 	  mac_loop_test_max_gap = 0;
 	  mac_loop_test_long_gaps = 0;
 	}
@@ -19430,7 +19564,13 @@ mac_loop_test_results (bool reset)
   xfree (times);
   xfree (labels);
 
-  return list3 (make_float (max_gap), make_fixnum (long_gaps), records);
+  Lisp_Object counters = Qnil;
+
+  for (int i = countof (mac_loop_stats) - 1; i >= 0; i--)
+    counters = Fcons (make_uint (stats[i]), counters);
+
+  return list4 (make_float (max_gap), make_fixnum (long_gaps), records,
+		counters);
 }
 
 
