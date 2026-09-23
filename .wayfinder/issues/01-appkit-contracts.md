@@ -1,10 +1,10 @@
 ---
 id: appkit-contracts
 title: Establish documented AppKit lifecycle and tracking contracts
-status: open
+status: closed
 labels: ["wayfinder:research"]
 parent: macos-app-integration
-assignee: janne
+assignee: null
 ---
 
 ## Question
@@ -27,3 +27,7 @@ Branch: `research/appkit-contracts`.
 Worktree: `/Users/janne/Projects/emacs-mac-wayfinder-appkit`.
 Expected asset: `.wayfinder/research/appkit-contracts.md`.
 Base: `1b08291ec0350cec8fbd1447fe869185f486097d`.
+
+## Resolution comment
+
+[Research resolution](../comments/appkit-contracts/2026-09-23-resolution.md)

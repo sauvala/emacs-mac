@@ -37,7 +37,8 @@ version, with explicit validation and retirement criteria for existing workaroun
 
 ## Decisions so far
 
-No decision tickets resolved yet. The scope above was set during charting.
+- [Establish documented AppKit lifecycle and tracking contracts](01-appkit-contracts.md): public mechanisms exist; callback safety and tracking responsiveness still require design and prototype evidence.
+- [Establish upstream direction and supported macOS baseline](02-upstream-baseline.md): existing thread separation needs new coordination; preserve the declared 10.10 floor and distinguish it from renderer requirements and tested coverage.
 
 ## Not yet specified
 

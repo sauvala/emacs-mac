@@ -1,10 +1,10 @@
 ---
 id: upstream-baseline
 title: Establish upstream direction and supported macOS baseline
-status: open
+status: closed
 labels: ["wayfinder:research"]
 parent: macos-app-integration
-assignee: janne
+assignee: null
 ---
 
 ## Question
@@ -27,3 +27,7 @@ Worktree: `/Users/janne/Projects/emacs-mac-wayfinder-upstream`.
 Expected asset: `.wayfinder/research/upstream-baseline.md`.
 Base: `1b08291ec0350cec8fbd1447fe869185f486097d`.
 Primary starting point: https://github.com/jdtsmith/emacs-mac/issues/151
+
+## Resolution comment
+
+[Research resolution](../comments/upstream-baseline/2026-09-23-resolution.md)
