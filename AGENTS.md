@@ -64,6 +64,17 @@ lldb mac/Emacs.app  # start from src/ directory for .lldbinit
 
 Must use clang (macOS `gcc` is aliased to clang). Real GCC cannot build this — it lacks Blocks extension support.
 
+Do not add `-fobjc-arc` to global `CFLAGS`. With `--with-metal-rendering`,
+the build adds ARC specifically to `macmetal.o`; other Objective-C sources
+use manual retain/release.
+
+If `temacs` crashes in `rpl_pipe2` while generating `emacs.pdmp`, check for
+an SDK/runtime mismatch: configure can detect a weak `pipe2` symbol that
+the running OS does not provide. Re-run the same configure command with
+`ac_cv_func_pipe2=no` in its environment, then rebuild. This selects the
+bundled `pipe`/`fcntl` fallback. Use this override only for the confirmed
+missing-symbol case, not for arbitrary dump failures.
+
 ## Testing
 
 On macOS 27 and later, preserve the existing event-loop settings and register
