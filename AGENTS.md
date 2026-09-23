@@ -40,6 +40,14 @@ misleading, update this `AGENTS.md` file as part of the same change when
 practical.  Keep these notes concise and focused on durable project workflow or
 architecture facts.
 
+## Application integration planning
+
+The fork-local AppKit modernization map is
+`.wayfinder/issues/macos-app-integration.md`. Read `.wayfinder/README.md`
+for local ticket claims, dependencies, and research resolutions. This map is
+planning-only; it does not authorize removing the working macOS compatibility
+settings before replacement behavior has passed the agreed interactive checks.
+
 ## Build Commands
 
 ```bash

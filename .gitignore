@@ -28,6 +28,7 @@
 !.gitlab-ci.yml
 !.github
 !.mailmap
+!.wayfinder
 
 # Built by 'autogen.sh'.
 /aclocal.m4
