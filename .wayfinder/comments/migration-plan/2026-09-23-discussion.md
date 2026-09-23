@@ -1,9 +1,8 @@
 # Migration plan discussion
 
-Status: open, awaiting user confirmation. Per the user's 2026-09-23
-instruction, the agent adopted its recommended answers and documented them.
-Every decision below is **agent-adopted, not yet user-confirmed**. The ticket
-closes only with the user's live confirmation.
+Status: confirmed by the user and resolved. Per the user's 2026-09-23
+instruction the agent adopted its recommended answers and documented them;
+the user then reviewed and accepted them live.
 
 Inputs: the contract of [ticket 03](../native-behavior/2026-09-23-discussion.md),
 and the decisions of [04](../event-loop-ownership/2026-09-23-discussion.md),
@@ -152,10 +151,9 @@ load-bearing sites at `395af2c0eea`.
   Integration failures discovered during validation become new tickets under
   this map if they affect the destination, otherwise separate efforts.
 
-## Open items for user review
+## User review
 
-- M4 relies on UTM guests; confirm which older OS images you are willing to
-  install and whether any Intel Mac is available.
-- M2's one-week daily-use requirement before S6 is a judgment call.
-- M1 puts windows before menus; the opposite order is viable if menus under
-  the persistent loop prove unusable during S2.
+The user accepted all decisions, including the one-week macOS 27 daily-use
+requirement before S6 and windows (S3) before menus (S4). The specific UTM
+guest images and any Intel hardware were not named; they are chosen when S7
+starts, and the M4 order stands until then.

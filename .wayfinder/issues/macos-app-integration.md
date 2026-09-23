@@ -33,7 +33,8 @@ version, with explicit validation and retirement criteria for existing workaroun
   The [initial audit](../research/initial-audit.md) is source inspection plus
   recorded historical tests, not a fresh GUI validation.
 - Event-loop ownership (ticket 04), menu callbacks (05) and window/redisplay
-  coordination (06) are selected, pending their prototypes.
+  coordination (06) are selected, pending their prototypes. The migration
+  plan (07) stages implementation from S0 instrumentation to S8 removal.
 
 ## Decisions so far
 
@@ -43,6 +44,7 @@ version, with explicit validation and retirement criteria for existing workaroun
 - [Choose application event-loop ownership and Lisp scheduling](04-event-loop-ownership.md): persistent `NSApplication.run` with Lisp on its own thread; the GUI never waits unbounded on Lisp, using safe-point lock acquisition or snapshots; synchronous mode-classed Lisp-to-GUI requests; launch-selected opt-in and a busy-Lisp macOS 27 prototype.
 - [Choose menu preparation and GUI-to-Lisp callback contracts](05-menu-callbacks.md): no GUI-thread Lisp; published per-frame menu snapshots with bounded open-time refresh; revalidated at-most-once actions; Carbon interception and cancel/reopen retire under the new loop; F10 popup plus system Control-F2 navigation.
 - [Choose window lifecycle and redisplay coordination](06-window-redisplay.md): single-owner window fields with GUI-applied geometry and coalesced records; Lisp draws during one live-resize session with safe stale presentation; synthetic events and event-loop preferences retire under the new loop; deduplicated close/Quit with a 100 ms waiting indicator.
+- [Decide migration stages and workaround retirement gates](07-migration-plan.md): stages S0-S8 behind a launch selector with the old loop default; macOS 27 first, then per-OS flips from UTM-guest evidence (12-26); mac-only code with no new shared hooks expected; env-var and per-OS default rollback; workarounds leave the new loop per stage and are deleted only in S8.
 
 ## Not yet specified
 
