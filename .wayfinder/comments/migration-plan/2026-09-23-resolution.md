@@ -24,3 +24,21 @@ flipped with evidence or been explicitly dropped.
 
 A cheaper agent mapped the shared-file footprint; the parent verified the
 load-bearing sites. No application code changed and no GUI tests were run.
+
+## Post-resolution revision (2026-09-23, user decision)
+
+The user decided not to validate on UTM or any other virtual machine; runtime
+validation uses macOS 27 only. This replaces M4's guest order. Consequences
+under the existing rules, which stay unchanged:
+
+- Only macOS 27+ flips its default (S6). Every earlier OS keeps the old loop
+  as its default, marked unverified; support is not narrowed, and users on
+  those systems can still opt in to the new loop at launch.
+- S7 has no runtime work unless the user later supplies evidence for another
+  OS or explicitly drops older systems.
+- S8 (deleting the old loop and its workarounds) stays blocked until every
+  OS still on the old loop has flipped with evidence or been explicitly
+  dropped by the user. With 27-only testing, the old loop therefore remains
+  in the source for older systems.
+- Workarounds still leave the new loop in their stage (M8), so macOS 27 runs
+  without them once S3/S4 are accepted.

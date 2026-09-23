@@ -9,16 +9,18 @@ assignee: null
 
 ## Scope
 
-Gather runtime evidence on macOS 26, 15, 14 and 12 in UTM guests (then
-13), with the ordinary renderer and Metal where a guest exposes it, and flip
-each OS's default independently. Choose the guest images and any Intel
-hardware when this ticket starts. macOS 10.10-11 and Intel stay on the old
-loop, unverified, unless hardware becomes available.
+The user decided on 2026-09-23 not to validate in UTM or other virtual
+machines; runtime validation uses macOS 27 only. Earlier systems keep the old
+loop as their default, marked unverified, with the new loop available by
+launch opt-in. This ticket has work only if the user later supplies evidence
+for another OS (flipping that OS's default) or explicitly drops older
+systems. Otherwise it closes with the user recording that decision.
 
 ## Acceptance gate
 
 Each flipped OS has a recorded S6-equivalent run; unflipped OSes are listed
-as unverified, never as passing.
+as unverified, never as passing. Closing without flips requires the user's
+explicit decision on whether older systems keep the old loop or are dropped.
 
 ## Decisions
 
