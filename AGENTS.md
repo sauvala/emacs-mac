@@ -130,6 +130,33 @@ C-g handler intercepts dequeued key events in `EmacsApplication`, uses the
 existing quit-key recognizer, and cancels tracking without evaluating Lisp.
 It passed Edit/Help dismissal and ordinary prefix cancellation outside menus.
 
+### Persistent event loop (experimental)
+
+`EMACS_MAC_PERSISTENT_LOOP=1` (or `--enable-mac-persistent-loop` for the
+compiled default; `=0` selects the old loop) keeps `-[NSApplication run]`
+running on the GUI thread; see the "Persistent event loop" section of
+`src/macappkit.m` and `.wayfinder/issues/macos-app-integration.md`. Under it
+the GUI thread may touch Lisp or redisplay state only with Lisp access
+(a request parks the Lisp thread, or the GUI holds the global lock taken by
+try-lock while Lisp waits for input). New AppKit callbacks that read or build
+Lisp state must start with `MAC_LOOP_CALLBACK_NEEDS_LISP` or
+`MAC_LOOP_QUERY_NEEDS_LISP`; a GUI-thread crash in GC or allocation usually
+means one is missing. It registers none of the undocumented event-loop
+preferences above; `EMACS_MAC_LOOP_PREFS` (comma-separated keys or `all`)
+re-enables them for comparison. The native-menu experiments are disabled
+under it.
+
+`EMACS_MAC_TRACE_LOOP=1` traces deferrals to stderr (`2` adds every select);
+with it set, `kill -INFO <pid>` prints GUI and Lisp thread backtraces, useful
+where lldb or `sample` hang. `test/manual/mac-app-loop/run-scenarios.sh
+[old|new|both] [scenario...]` runs scripted scenarios in fresh processes and
+`summarize.el` compares them. They post real NSEvents and native window
+operations from GUI-thread timers (`mac-loop-test-schedule`), so they need no
+accessibility or screen-recording permission, but they are not interactive
+acceptance: the app may be unable to become active, and plain typing needs a
+key window, so scenarios use control-key commands. Pass absolute paths to
+`-l` when launching the bundle directly.
+
 ```bash
 make -C test check                          # run all tests
 make -C test check-maybe                    # run only outdated tests
