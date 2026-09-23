@@ -1487,6 +1487,9 @@ static bool handling_queued_nsevents_p;
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self applicationDidBecomeActive:
+					notification]);
+
   if (needsUpdatePresentationOptionsOnBecomingActive)
     {
       [self updatePresentationOptions];
@@ -1971,6 +1974,12 @@ emacs_windows_need_display_p (void)
 
 - (void)processDeferredReadSocket:(NSTimer *)theTimer
 {
+  if (mac_persistent_loop_p)
+    {
+      /* Nothing polls the GUI; just let Lisp read its queue.  */
+      mac_loop_wake_lisp ();
+      return;
+    }
   if (!handling_queued_nsevents_p)
     {
       if (mac_peek_next_event () || emacs_windows_need_display_p ())
@@ -9944,6 +9953,8 @@ mac_get_default_scroll_bar_height (struct frame *f)
 
 - (void)storeToolBarEvent:(id)sender
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self storeToolBarEvent:sender]);
+
   NSInteger i = [sender tag];
   struct frame *f = emacsFrame;
 
@@ -9970,6 +9981,10 @@ mac_get_default_scroll_bar_height (struct frame *f)
 
 - (void)noteToolBarMouseMovement:(NSEvent *)event
 {
+  /* Help echo only; skip it while Lisp is busy.  */
+  if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())
+    return;
+
   struct frame *f = emacsFrame;
   NSView *hitView;
 
@@ -12020,6 +12035,27 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 			   resultLimit:(NSInteger)resultLimit
 		    matchedItemHandler:(void (^)(NSArray *items))handleMatchedItems
 {
+  if (mac_persistent_loop_p && !pthread_main_np ())
+    {
+      /* AppKit may search on a background queue; read the topics on
+	 the GUI thread under the access rules.  */
+      dispatch_async (dispatch_get_main_queue (), ^{
+	  [self searchForItemsWithSearchString:searchString
+				   resultLimit:resultLimit
+			    matchedItemHandler:handleMatchedItems];
+	});
+      return;
+    }
+
+  int token = mac_loop_begin_lisp_access ();
+
+  if (token == MAC_LOOP_NO_ACCESS)
+    {
+      /* Lisp is busy: no topics rather than a stall.  */
+      handleMatchedItems (@[]);
+      return;
+    }
+
   NSMutableArrayOf (NSString *) *items =
     [NSMutableArray arrayWithCapacity:resultLimit];
   Lisp_Object rest;
@@ -12039,6 +12075,7 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 	      break;
 	  }
       }
+  mac_loop_end_lisp_access (token);
 
   handleMatchedItems (items);
 }
@@ -12050,6 +12087,9 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 
 - (void)performActionForItem:(id)item
 {
+  /* The action reads selectedHelpTopic synchronously.  */
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self performActionForItem:item]);
+
   selectedHelpTopic = item;
   [NSApp sendAction:(NSSelectorFromString (@"select-help-topic:"))
 		 to:nil from:self];
@@ -12058,6 +12098,9 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 
 - (void)showAllHelpTopicsForSearchString:(NSString *)searchString
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self showAllHelpTopicsForSearchString:
+					searchString]);
+
   searchStringForAllHelpTopics = searchString;
   [NSApp sendAction:(NSSelectorFromString (@"show-all-help-topics:"))
 		 to:nil from:self];
@@ -13725,6 +13768,10 @@ drag_operation_to_actions (NSDragOperation operation)
 
 - (BOOL)performDragOperation:(id <NSDraggingInfo>)sender
 {
+  /* The pasteboard is only valid during this call: reject the drop
+     rather than wait if Lisp is busy.  */
+  MAC_LOOP_QUERY_NEEDS_LISP (BOOL, NO, [self performDragOperation:sender]);
+
   struct frame *f = [self emacsFrame];
   NSPoint point = [self convertPoint:[sender draggingLocation] fromView:nil];
   NSDragOperation operation = [sender draggingSourceOperationMask];
@@ -14068,6 +14115,11 @@ mac_dnd_begin_drag_and_drop (struct frame *f, DragActions actions,
 - (id)validRequestorForSendType:(NSPasteboardType)sendType
 		     returnType:(NSPasteboardType)returnType
 {
+  MAC_LOOP_QUERY_NEEDS_LISP (id, [super validRequestorForSendType:sendType
+						      returnType:returnType],
+			     [self validRequestorForSendType:sendType
+						  returnType:returnType]);
+
   Selection sel;
 
   if ([sendType length] == 0
@@ -14098,6 +14150,10 @@ mac_dnd_begin_drag_and_drop (struct frame *f, DragActions actions,
 - (BOOL)writeSelectionToPasteboard:(NSPasteboard *)pboard
 			     types:(NSArrayOf (NSPasteboardType) *)types
 {
+  MAC_LOOP_QUERY_NEEDS_LISP (BOOL, NO,
+			     [self writeSelectionToPasteboard:pboard
+							types:types]);
+
   OSStatus err;
   Selection sel;
   NSPasteboard *servicePboard;
@@ -14158,6 +14214,9 @@ copy_pasteboard_to_service_selection (NSPasteboard *pboard)
 
 - (BOOL)readSelectionFromPasteboard:(NSPasteboard *)pboard
 {
+  MAC_LOOP_QUERY_NEEDS_LISP (BOOL, NO,
+			     [self readSelectionFromPasteboard:pboard]);
+
   BOOL result = copy_pasteboard_to_service_selection (pboard);
 
   if (result)
@@ -16417,6 +16476,9 @@ init_accessibility (void)
 
 - (void)accessibilityDisplayOptionsDidChange:(NSNotification *)notification
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self accessibilityDisplayOptionsDidChange:
+					notification]);
+
   mac_update_accessibility_display_options ();
 }
 
@@ -18450,6 +18512,7 @@ static bool mac_loop_launch_requested_p;
 /* Shared flags.  */
 static int mac_loop_deferred_count;	/* Number of deferred NSEvents.  */
 static bool mac_loop_lisp_waiting_p;	/* Lisp is inside thread_select.  */
+static unsigned mac_loop_wait_generation; /* Counts Lisp's input waits.  */
 
 /* Counters for test/manual/mac-app-loop: Lisp access granted by
    try-lock, granted while a request parks Lisp, denied; deferred
@@ -18759,19 +18822,29 @@ mac_loop_drain_lisp_items (struct input_event *hold_quit)
 static bool
 mac_loop_try_global_lock (void)
 {
+  /* Another Lisp thread may hold the lock while the waiting one is in
+     its input wait.  After one spin fails, do not spin again until
+     Lisp starts another input wait.  */
+  static unsigned failed_generation = -1;
+  unsigned generation = __atomic_load_n (&mac_loop_wait_generation,
+					 __ATOMIC_ACQUIRE);
   double start = 0;
 
   while (true)
     {
       if (thread_try_acquire_global_lock () == 0)
 	return true;
-      if (!__atomic_load_n (&mac_loop_lisp_waiting_p, __ATOMIC_ACQUIRE))
+      if (!__atomic_load_n (&mac_loop_lisp_waiting_p, __ATOMIC_ACQUIRE)
+	  || generation == failed_generation)
 	return false;
       double now = mac_system_uptime ();
       if (start == 0)
 	start = now;
       else if (now - start > 0.05)
-	return false;
+	{
+	  failed_generation = generation;
+	  return false;
+	}
       usleep (200);
     }
 }
@@ -19198,6 +19271,7 @@ mac_loop_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
   if (nfds <= mac_select_fds[0])
     nfds = mac_select_fds[0] + 1;
 
+  __atomic_add_fetch (&mac_loop_wait_generation, 1, __ATOMIC_RELEASE);
   __atomic_store_n (&mac_loop_lisp_waiting_p, true, __ATOMIC_RELEASE);
   if (__atomic_load_n (&mac_loop_deferred_count, __ATOMIC_ACQUIRE))
     {

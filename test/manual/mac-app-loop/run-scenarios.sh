@@ -1,13 +1,13 @@
 #!/bin/sh
 # Run scripted persistent-loop scenarios in fresh GUI processes.
 # Usage: run-scenarios.sh [old|new|both] [scenario...]
-# Results: ${TMPDIR:-/tmp}/mac-app-loop/results/<scenario>-<mode>.eld
+# Results: $MAC_LOOP_RESULTS_DIR (default ${TMPDIR:-/tmp}/mac-app-loop/results)/<scenario>-<mode>.eld
 set -u
 script_dir=$(cd "$(dirname "$0")" && pwd)
 repo_root=$(cd "$script_dir/../../.." && pwd)
 app=${EMACS_APP:-"$repo_root/mac/Emacs.app"}
 bin="$app/Contents/MacOS/Emacs"
-out="${TMPDIR:-/tmp}/mac-app-loop/results"
+out="${MAC_LOOP_RESULTS_DIR:-${TMPDIR:-/tmp}/mac-app-loop/results}"
 mkdir -p "$out"
 modes=${1:-both}; [ $# -gt 0 ] && shift
 [ "$modes" = both ] && modes="old new"
