@@ -4,7 +4,7 @@ title: Choose window lifecycle and redisplay coordination
 status: open
 labels: ["wayfinder:grilling"]
 parent: macos-app-integration
-assignee: null
+assignee: claude-session-05
 ---
 
 ## Question
