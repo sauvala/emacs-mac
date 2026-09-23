@@ -4,7 +4,7 @@ title: Decide migration stages and workaround retirement gates
 status: open
 labels: ["wayfinder:grilling"]
 parent: macos-app-integration
-assignee: null
+assignee: claude-session-05
 ---
 
 ## Question
