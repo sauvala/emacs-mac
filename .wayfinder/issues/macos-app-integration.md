@@ -35,6 +35,10 @@ version, with explicit validation and retirement criteria for existing workaroun
 - Event-loop ownership (ticket 04), menu callbacks (05) and window/redisplay
   coordination (06) are selected, pending their prototypes. The migration
   plan (07) stages implementation from S0 instrumentation to S8 removal.
+- Implementation stages S0-S8 are tracked as `wayfinder:task` children
+  (tickets 08-16), created 2026-09-23 at the user's request. Tracking them
+  here does not change the planning scope; each task's own work happens in
+  later sessions.
 
 ## Decisions so far
 
