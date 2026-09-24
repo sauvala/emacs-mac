@@ -1,7 +1,7 @@
 ---
 id: s4-menus-callbacks
 title: "S4: Move menus and callbacks to the new loop"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: macos-app-integration
 assignee: null
@@ -61,9 +61,9 @@ Added later on 2026-09-24:
   or recons equal strings no longer refill AppKit (see the implementation
   notes in the menu-callbacks discussion).
 
-Not done:
-- Real mouse and keyboard menu tracking, and C-g during it.
-- D3's bounded open-time refresh (the deep fill stands in for it).
+Real mouse and keyboard menu tracking, and C-g during it, passed
+interactive checks on 2026-09-24. D3 moved to
+[S4 follow-up: open-time submenu refresh](17-s4-open-time-refresh.md).
 
 Snapshots are kept for the eight newest generations rather than by
 reference count.

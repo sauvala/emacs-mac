@@ -49,6 +49,7 @@ version, with explicit validation and retirement criteria for existing workaroun
 - [Choose menu preparation and GUI-to-Lisp callback contracts](05-menu-callbacks.md): no GUI-thread Lisp; published per-frame menu snapshots with bounded open-time refresh; revalidated at-most-once actions; Carbon interception and cancel/reopen retire under the new loop; F10 popup plus system Control-F2 navigation.
 - [Choose window lifecycle and redisplay coordination](06-window-redisplay.md): single-owner window fields with GUI-applied geometry and coalesced records; Lisp draws during one live-resize session with safe stale presentation; synthetic events and event-loop preferences retire under the new loop; deduplicated close/Quit with a 100 ms waiting indicator.
 - [Decide migration stages and workaround retirement gates](07-migration-plan.md): stages S0-S8 behind a launch selector with the old loop default; macOS 27 first; runtime validation on macOS 27 only (user revision: no VM testing), so earlier systems keep the old loop, unverified; mac-only code with no new shared hooks expected; env-var and per-OS default rollback; workarounds leave the new loop per stage and are deleted only in S8.
+- [S4: Move menus and callbacks to the new loop](12-s4-menus-callbacks.md): closed after interactive macOS 27 checks; D3's open-time refresh is deferred to [a follow-up](17-s4-open-time-refresh.md), with an idle-time deep fill standing in for it.
 
 ## Not yet specified
 
