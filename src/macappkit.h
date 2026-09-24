@@ -829,6 +829,7 @@ struct mac_text_snapshot
 /* Persistent loop only (W7/W8); see macappkit.m.  */
 - (BOOL)macLoopBeginClosePending;
 - (void)macLoopClearClosePending;
+- (BOOL)macLoopFullScreenTransitionInProgress;
 - (void)macLoopShowQuitIndicator;
 - (void)macLoopClearQuitIndicator;
 #ifdef USE_METAL_RENDERING

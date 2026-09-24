@@ -337,3 +337,27 @@ grew faster than redisplay."
                                (expand-file-name "src/macappkit.m"
                                                  source-directory))
                               (buffer-string))))))
+
+(ert-deftest macmetal-presents-live-resize-frames-with-transaction ()
+  "Live-resize frames are presented in the window's Core Animation transaction.
+Apple documents the order for `presentsWithTransaction': commit the
+command buffer, wait until it is scheduled, then present the drawable
+(not `presentDrawable:' on the command buffer).  In synchronous mode
+the presenter queue is bypassed."
+  (let ((present (macmetal-tests--function-body "emacs_metal_present_sync"))
+        (schedule (macmetal-tests--function-body
+                   "emacs_metal_schedule_presentation"))
+        (set-sync (macmetal-tests--function-body
+                   "emacs_metal_set_sync_presentation")))
+    (should (string-match-p
+             "\\[cmd commit\\];\n *\\[cmd waitUntilScheduled\\];\n *\\[drawable present\\];"
+             present))
+    (should-not (string-match-p "presentDrawable" present))
+    (should (string-match-p
+             "ctx->sync_presentation)[\0-\377]*ctx->sync_frame_ready = true;[\0-\377]*return;[\0-\377]*emacs_metal_dispatch_presentation_task"
+             schedule))
+    (should (string-match-p "presentsWithTransaction = flag" set-sync))
+    ;; The presenter queue must be idle before the layer switches.
+    (should (string-match-p
+             "if (flag)\n[^;]*\n *emacs_metal_wait_for_presentation_copy (ctx);"
+             set-sync))))

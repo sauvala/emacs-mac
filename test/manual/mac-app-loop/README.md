@@ -88,6 +88,14 @@ clicks), which cannot be automated from outside AppKit's tracking loops.
   correct `EMACS_MAC_PERSISTENT_LOOP` value, a `FRAME-SIZE` line for the
   initial frame, and a `KILL-EMACS` line, with an empty stderr log.
 
+- `resize-band.sh` (with `resize-band.el` and `resize-band.py`) —
+  records a scripted 8 ms-step drag that grows the frame and measures
+  the undrawn band between Emacs's drawing and the window's bottom edge
+  in each video frame (ticket 18).  Arguments are
+  `EMACS_MAC_RESIZE_WAIT_MS` values to compare (default `0 30`).  Needs
+  screen recording permission for the terminal and `ffmpeg`.  Scripted
+  drags are slower than a real trackpad drag at 40 ms steps; keep 8 ms.
+
 - `windows.py` — Python 3, standard library only. Lists the target
   process's windows (name, position, size, `AXMinimized`) via
   `osascript`/System Events, as JSON:

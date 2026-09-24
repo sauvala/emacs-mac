@@ -69,6 +69,16 @@ extern bool emacs_metal_set_maximum_drawable_count (emacs_metal_context_t *ctx,
 extern void emacs_metal_frame_begin (emacs_metal_context_t *ctx);
 extern void emacs_metal_frame_end (emacs_metal_context_t *ctx);
 extern void emacs_metal_frame_end_held (emacs_metal_context_t *ctx);
+/* Live resize: present frames in the GUI thread's Core Animation
+   transaction instead of on the presenter queue.  */
+extern void emacs_metal_set_sync_presentation (emacs_metal_context_t *ctx,
+                                               bool flag);
+extern bool emacs_metal_sync_frame_ready (emacs_metal_context_t *ctx,
+                                          int width, int height);
+extern bool emacs_metal_present_sync (emacs_metal_context_t *ctx);
+/* Called on the Lisp thread when a frame becomes ready in synchronous
+   presentation.  */
+extern void (*emacs_metal_sync_frame_ready_hook) (void);
 /* For drawing that happens outside update_begin/update_end.  */
 extern void emacs_metal_ensure_frame (emacs_metal_context_t *ctx);
 extern void emacs_metal_end_implicit_frame (emacs_metal_context_t *ctx);

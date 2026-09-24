@@ -4,7 +4,7 @@ title: "S3 follow-up: present live-resize frames with the window change"
 status: open
 labels: ["wayfinder:task"]
 parent: macos-app-integration
-assignee: null
+assignee: claude-transactional-resize
 ---
 
 ## Problem
@@ -95,3 +95,39 @@ With a person at the Mac on macOS 27, idle and busy:
 ## Blocked by
 
 - [S3: Move window lifecycle and redisplay to the new loop](11-s3-windows-redisplay.md)
+
+## Progress (2026-09-24, agent-adopted)
+
+Implemented on branch `transactional-resize`; scripted checks pass
+(evidence
+`test/manual/mac-app-loop/evidence/2026-09-24-macos27-new-sync-resize.md`).
+- `-viewWillStartLiveResize` switches the frame's Metal context to
+  synchronous presentation (`presentsWithTransaction`); the end of live
+  resize switches back and presents any ready frame asynchronously.
+  In synchronous mode `emacs_metal_schedule_presentation` marks the
+  frame ready with its size instead of using the presenter queue.
+- An idle step applies the size, wakes Lisp, and waits for a ready
+  frame of the new size with `mac_loop_wait_for_lisp`, then presents it
+  (commit, `waitUntilScheduled`, `present`). A late frame is presented
+  from the main queue only if the layer still has its size.
+- Decisions adopted on the way:
+  - Most steps arrived while Lisp finished the previous step's
+    redisplay and were deferred (175 of 208). If Lisp was idle at the
+    previous step, a step now waits (same bound) for Lisp's input wait,
+    which signals the GUI semaphore while `mac_loop_gui_awaits_idle` is
+    set. One failed wait marks Lisp busy until a step finds it idle, so
+    busy-Lisp drags wait at most once.
+  - Default wait 30 ms (`EMACS_MAC_RESIZE_WAIT_MS`, 0 disables): the
+    user's configuration needed 15 ms median, 18 ms p90.
+  - Fullscreen transitions send live-resize notifications but are
+    animated by AppKit; synchronous presentation is skipped while
+    `fullScreenTransitionCompletionHandlers` is set (it raised the
+    `fullscreen-idle` GUI gap over 100 ms).
+  - The workarounds from `fb6cb18a20f` and `a5972084b64` stay: the
+    asynchronous path still serves busy-Lisp steps' final frames,
+    programmatic resizes, zoom and fullscreen.
+- `resize-band.sh`: 62 of 175 frames with an undrawn band (up to
+  70 px) with the wait disabled, none with it.
+
+Still open: the acceptance gate's hand-driven checks with a person at
+the Mac (mode line following the edge, fast grow/shrink, busy drags).

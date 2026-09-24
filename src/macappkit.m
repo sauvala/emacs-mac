@@ -163,6 +163,10 @@ static unsigned long mac_menu_bar_generation_for_menu (NSMenu *);
 static NSString *mac_menu_bar_title (const char *);
 static bool mac_loop_lisp_idle_p (void);
 static bool mac_loop_wait_for_lisp (bool (^) (void), double);
+static dispatch_semaphore_t mac_loop_gui_semaphore;
+/* Set while the GUI thread waits for Lisp to reach its input wait;
+   Lisp then signals mac_loop_gui_semaphore on entering it.  */
+static bool mac_loop_gui_awaits_idle;
 static bool mac_loop_lisp_items_pending_p (void);
 static int mac_loop_deferred_count;
 static int mac_loop_read_socket_events (struct input_event *);
@@ -4638,6 +4642,15 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
     }
 }
 
+/* Whether a native fullscreen transition is under way, from
+   -windowWillEnterFullScreen: or -windowWillExitFullScreen: until its
+   completion handlers have run.  */
+
+- (BOOL)macLoopFullScreenTransitionInProgress
+{
+  return fullScreenTransitionCompletionHandlers != nil;
+}
+
 - (void)addFullScreenTransitionCompletionHandler:(void (^)(EmacsWindow *,
 							   BOOL))block
 {
@@ -8671,6 +8684,10 @@ mac_publish_text_snapshot (struct frame *f)
   int token = mac_loop_begin_lisp_access ();
   NSRect frameRect = [self frame];
 
+#ifdef USE_METAL_RENDERING
+  if (token == MAC_LOOP_NO_ACCESS)
+    token = [self macLoopAwaitIdleLispForLiveResizeStep];
+#endif
   MAC_TRACE_LOOP ("live resize step %.0fx%.0f %s\n", NSWidth (frameRect),
 		  NSHeight (frameRect),
 		  token == MAC_LOOP_NO_ACCESS ? "deferred" : "applied");
@@ -8686,8 +8703,129 @@ mac_publish_text_snapshot (struct frame *f)
   [self macLoopApplyLiveResizeStep];
   mac_loop_end_lisp_access (token);
   if (token == MAC_LOOP_LOCKED_ACCESS)
-    mac_loop_wake_lisp ();
+    {
+      mac_loop_wake_lisp ();
+#ifdef USE_METAL_RENDERING
+      [self macLoopPresentLiveResizeStep];
+#endif
+    }
 }
+
+#ifdef USE_METAL_RENDERING
+/* Ticket 18: while Lisp is idle, present each live-resize step in the
+   Core Animation transaction that changes the window size, as native
+   Metal apps do, so that the window edge and its contents (the mode
+   line at the bottom edge, for instance) move together.  Redisplay
+   stays on the Lisp thread: the step waits a bounded time, running
+   Lisp requests meanwhile, for the frame Lisp draws at the new size,
+   and presents it here.  A step that misses the wait keeps the last
+   presentation over the layer background (W3); a late frame is
+   presented from the main queue only if the window still has its
+   size.  EMACS_MAC_RESIZE_WAIT_MS sets the wait (default 30); 0
+   disables synchronous presentation.  */
+
+static double
+mac_loop_resize_frame_wait (void)
+{
+  static double wait = -1;
+
+  if (wait < 0)
+    {
+      const char *value = getenv ("EMACS_MAC_RESIZE_WAIT_MS");
+
+      wait = (value ? atof (value) : 30) / 1000;
+      if (!(wait >= 0))
+	wait = 0;
+    }
+  return wait;
+}
+
+/* Whether Lisp was idle at the previous synchronous step.  */
+static bool mac_loop_resize_lisp_was_idle;
+
+static void
+mac_loop_metal_sync_frame_ready (void)
+{
+  dispatch_semaphore_signal (mac_loop_gui_semaphore);
+}
+
+- (void)viewWillStartLiveResize
+{
+  struct frame *f = [self emacsFrame];
+
+  [super viewWillStartLiveResize];
+  /* AppKit animates fullscreen transitions itself, with live-resize
+     notifications; waiting for Lisp there only lengthens the
+     animation's main-thread stalls.  */
+  if (mac_persistent_loop_p && FRAME_METAL_CTX (f)
+      && mac_loop_resize_frame_wait () > 0
+      && ![FRAME_CONTROLLER (f) macLoopFullScreenTransitionInProgress])
+    {
+      double start = mac_system_uptime ();
+
+      emacs_metal_sync_frame_ready_hook = mac_loop_metal_sync_frame_ready;
+      emacs_metal_set_sync_presentation (FRAME_METAL_CTX (f), true);
+      MAC_TRACE_LOOP ("live resize: synchronous presentation after %.1f ms\n",
+		      (mac_system_uptime () - start) * 1000);
+      mac_loop_resize_lisp_was_idle = true;
+    }
+}
+
+/* A step usually arrives while Lisp finishes the previous step's
+   redisplay, a few milliseconds before it waits for input again.  If
+   Lisp was idle at the previous step, wait for its input wait (at most
+   the frame wait) and return a new access token.  Once such a wait
+   fails, Lisp counts as busy and later steps do not wait, until a step
+   finds it idle again.  */
+
+- (int)macLoopAwaitIdleLispForLiveResizeStep
+{
+  CALayer *layer = self.layer;
+  int token = MAC_LOOP_NO_ACCESS;
+
+  if (!mac_loop_resize_lisp_was_idle
+      || ![layer isKindOfClass:[CAMetalLayer class]]
+      || !((CAMetalLayer *) layer).presentsWithTransaction)
+    return token;
+
+  __atomic_store_n (&mac_loop_gui_awaits_idle, true, __ATOMIC_RELEASE);
+  if (mac_loop_wait_for_lisp (^{ return mac_loop_lisp_idle_p (); },
+			      mac_loop_resize_frame_wait ()))
+    token = mac_loop_begin_lisp_access ();
+  __atomic_store_n (&mac_loop_gui_awaits_idle, false, __ATOMIC_RELEASE);
+  if (token == MAC_LOOP_NO_ACCESS)
+    mac_loop_resize_lisp_was_idle = false;
+  return token;
+}
+
+- (void)macLoopPresentLiveResizeStep
+{
+  struct frame *f = [self emacsFrame];
+  emacs_metal_context_t *ctx = FRAME_METAL_CTX (f);
+  CALayer *layer = self.layer;
+
+  if (!ctx || ![layer isKindOfClass:[CAMetalLayer class]]
+      || !((CAMetalLayer *) layer).presentsWithTransaction)
+    return;
+
+  CGSize size = ((CAMetalLayer *) layer).drawableSize;
+  int width = size.width, height = size.height;
+  double start = mac_system_uptime ();
+  bool ready = mac_loop_wait_for_lisp (^{
+      return emacs_metal_sync_frame_ready (ctx, width, height);
+    }, mac_loop_resize_frame_wait ());
+  bool presented = ready && emacs_metal_present_sync (ctx);
+
+  mac_loop_resize_lisp_was_idle = true;
+  double elapsed = (mac_system_uptime () - start) * 1000;
+
+  MAC_TRACE_LOOP ("live resize step %dx%d %s after %.1f ms\n", width,
+		  height, presented ? "presented" : "missed", elapsed);
+  if (mac_loop_test_recording_p)
+    mac_loop_test_record ("live resize %s %.1f ms",
+			  presented ? "presented" : "missed", elapsed);
+}
+#endif
 
 /* With Lisp access: apply the current size of a live resize, if one is
    still in progress (otherwise -viewDidEndLiveResize has applied it).  */
@@ -8714,6 +8852,11 @@ mac_publish_text_snapshot (struct frame *f)
 
 - (void)viewDidEndLiveResize
 {
+#ifdef USE_METAL_RENDERING
+  if (FRAME_METAL_CTX ([self emacsFrame]))
+    emacs_metal_set_sync_presentation (FRAME_METAL_CTX ([self emacsFrame]),
+				       false);
+#endif
   MAC_LOOP_STATE_CALLBACK_NEEDS_LISP ("end-live-resize", [self viewDidEndLiveResize]);
 
   struct frame *f = [self emacsFrame];
@@ -20402,6 +20545,8 @@ mac_loop_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 
   __atomic_add_fetch (&mac_loop_wait_generation, 1, __ATOMIC_RELEASE);
   __atomic_store_n (&mac_loop_lisp_waiting_p, true, __ATOMIC_RELEASE);
+  if (__atomic_load_n (&mac_loop_gui_awaits_idle, __ATOMIC_ACQUIRE))
+    dispatch_semaphore_signal (mac_loop_gui_semaphore);
   if (__atomic_load_n (&mac_loop_deferred_count, __ATOMIC_ACQUIRE))
     {
       MAC_TRACE_LOOP ("select: signal retry (%d deferred)\n",

@@ -147,7 +147,14 @@ callback of the same kind. While Lisp is busy, a growing window shows the
 last Metal drawable anchored top-left over the frame background, which is
 the layer's `backgroundColor`. Idle live-resize steps redraw a garbaged
 frame; `mac_update_end` holds the Metal presentation of `redraw_frame`'s
-clear so that no blank frame reaches the screen between steps. Do not add
+clear so that no blank frame reaches the screen between steps. While Lisp
+is idle, each live-resize step waits (`EMACS_MAC_RESIZE_WAIT_MS`, default
+30; 0 disables) for Lisp to redraw at the new size and presents that
+frame in the step's Core Animation transaction
+(`presentsWithTransaction`), so the window edge and contents move
+together; redisplay stays on the Lisp thread. Fullscreen transitions
+skip this. `test/manual/mac-app-loop/resize-band.sh` measures the
+undrawn band at the growing edge. Do not add
 GUI-thread snapshots that read
 the window tree or faces without Lisp access. Text input and
 accessibility queries that read buffer text or glyph matrices use

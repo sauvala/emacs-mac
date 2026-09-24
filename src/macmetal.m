@@ -313,6 +313,14 @@ struct emacs_metal_context
   MTLClearColor clear_color;
   /* Broadcast when a presentation task commits or finishes.  */
   pthread_cond_t presentation_cond;
+  /* Synchronous presentation (live resize): frames are not handed to
+     the presenter queue.  frame_end marks them ready, recording the
+     backbuffer size in device pixels, and the GUI thread presents them
+     in its Core Animation transaction.  Guarded by
+     presentation_mutex.  */
+  bool sync_presentation;
+  bool sync_frame_ready;
+  int sync_frame_width, sync_frame_height;
   atomic_uint ref_count;
 
   struct emacs_metal_glyph_cache *glyph_cache;
@@ -326,6 +334,9 @@ struct emacs_metal_context
 static void flush_render_batches (emacs_metal_context_t *ctx,
                                   id<MTLCommandBuffer> cmd);
 static void emacs_metal_schedule_presentation (emacs_metal_context_t *ctx);
+static void emacs_metal_present_sync_if_current (emacs_metal_context_t *);
+
+void (*emacs_metal_sync_frame_ready_hook) (void);
 static void glyph_cache_entry_clear (struct emacs_metal_glyph_cache *gc,
                                      glyph_cache_entry_t *entry);
 
@@ -1207,6 +1218,24 @@ emacs_metal_schedule_presentation (emacs_metal_context_t *ctx)
   bool dispatch_task = false;
 
   pthread_mutex_lock (&ctx->presentation_mutex);
+  if (ctx->presentation_valid && ctx->sync_presentation)
+    {
+      ctx->sync_frame_ready = true;
+      ctx->sync_frame_width = ctx->width * ctx->scale;
+      ctx->sync_frame_height = ctx->height * ctx->scale;
+      pthread_mutex_unlock (&ctx->presentation_mutex);
+      /* Wake a GUI thread waiting in a live-resize step; otherwise
+         present from the main queue if the window still has this
+         size.  */
+      if (emacs_metal_sync_frame_ready_hook)
+        emacs_metal_sync_frame_ready_hook ();
+      emacs_metal_context_retain (ctx);
+      dispatch_async (dispatch_get_main_queue (), ^{
+          emacs_metal_present_sync_if_current (ctx);
+          emacs_metal_context_release (ctx);
+        });
+      return;
+    }
   if (ctx->presentation_valid)
     {
       METAL_STAT_INC (presentation_requests);
@@ -1338,6 +1367,131 @@ void
 emacs_metal_frame_end_held (emacs_metal_context_t *ctx)
 {
   emacs_metal_frame_end_1 (ctx, false);
+}
+
+/* Synchronous presentation for live resize (ticket 18).  Native Metal
+   apps present each live-resize step in the Core Animation
+   transaction that changes the window size, so the window edge and
+   its contents change together.  With presentsWithTransaction, Apple
+   documents the order: commit the command buffer, wait until it is
+   scheduled, then call the drawable's present method, which joins the
+   transaction current on that thread.  */
+
+/* GUI thread: enter or leave synchronous presentation.  */
+
+void
+emacs_metal_set_sync_presentation (emacs_metal_context_t *ctx, bool flag)
+{
+  bool pending = false;
+
+  if (flag)
+    /* The presenter queue must not present with a command buffer
+       while the layer presents with transactions.  */
+    emacs_metal_wait_for_presentation_copy (ctx);
+  pthread_mutex_lock (&ctx->presentation_mutex);
+  if (ctx->sync_presentation == flag)
+    {
+      pthread_mutex_unlock (&ctx->presentation_mutex);
+      return;
+    }
+  ctx->sync_presentation = flag;
+  if (!flag)
+    {
+      pending = ctx->sync_frame_ready;
+      ctx->sync_frame_ready = false;
+    }
+  pthread_mutex_unlock (&ctx->presentation_mutex);
+
+  if (ctx->layer)
+    ctx->layer.presentsWithTransaction = flag;
+  if (pending)
+    emacs_metal_schedule_presentation (ctx);
+}
+
+/* Any thread: whether a frame of WIDTH x HEIGHT device pixels waits
+   for synchronous presentation.  */
+
+bool
+emacs_metal_sync_frame_ready (emacs_metal_context_t *ctx,
+                              int width, int height)
+{
+  bool ready;
+
+  pthread_mutex_lock (&ctx->presentation_mutex);
+  ready = (ctx->sync_frame_ready && ctx->sync_frame_width == width
+           && ctx->sync_frame_height == height);
+  pthread_mutex_unlock (&ctx->presentation_mutex);
+  return ready;
+}
+
+/* GUI thread: present the ready frame now, in the current Core
+   Animation transaction.  Return whether it was presented.  */
+
+bool
+emacs_metal_present_sync (emacs_metal_context_t *ctx)
+{
+  CAMetalLayer *layer = ctx->layer;
+  id<MTLTexture> backbuffer;
+
+  pthread_mutex_lock (&ctx->presentation_mutex);
+  if (!ctx->presentation_valid || !ctx->sync_presentation
+      || !ctx->sync_frame_ready || !layer)
+    {
+      pthread_mutex_unlock (&ctx->presentation_mutex);
+      return false;
+    }
+  ctx->sync_frame_ready = false;
+  backbuffer = ctx->backbuffer;
+  pthread_mutex_unlock (&ctx->presentation_mutex);
+
+  id<CAMetalDrawable> drawable = [layer nextDrawable];
+  if (!drawable || !backbuffer)
+    return false;
+
+  id<MTLCommandBuffer> cmd = [ctx->command_queue commandBuffer];
+  id<MTLTexture> dst = drawable.texture;
+  NSUInteger copy_w = MIN (backbuffer.width, dst.width);
+  NSUInteger copy_h = MIN (backbuffer.height, dst.height);
+
+  if (copy_w > 0 && copy_h > 0)
+    {
+      id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+      [blit copyFromTexture:backbuffer
+                sourceSlice:0
+                sourceLevel:0
+               sourceOrigin:MTLOriginMake (0, 0, 0)
+                 sourceSize:MTLSizeMake (copy_w, copy_h, 1)
+                  toTexture:dst
+           destinationSlice:0
+           destinationLevel:0
+          destinationOrigin:MTLOriginMake (0, 0, 0)];
+      [blit endEncoding];
+    }
+  [cmd commit];
+  [cmd waitUntilScheduled];
+  [drawable present];
+  METAL_SHARED_INC (frames);
+  return true;
+}
+
+/* GUI thread (main queue): present a ready frame that arrived after
+   the live-resize step stopped waiting for it, if the layer still has
+   its size.  A frame of another size is dropped; a later step or the
+   end of live resize presents a newer one.  */
+
+static void
+emacs_metal_present_sync_if_current (emacs_metal_context_t *ctx)
+{
+  CAMetalLayer *layer = ctx->layer;
+
+  if (!layer)
+    return;
+
+  CGSize size = layer.drawableSize;
+
+  if (emacs_metal_sync_frame_ready (ctx, (int) size.width,
+                                    (int) size.height))
+    emacs_metal_present_sync (ctx);
 }
 
 /* Local MIN/MAX for integer arithmetic if not already defined.  */
