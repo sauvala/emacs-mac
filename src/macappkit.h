@@ -1175,6 +1175,7 @@ struct mac_text_snapshot
   BOOL persistentTracking;
 }
 - (BOOL)nativeTracking;
+- (BOOL)persistentTracking;
 - (BOOL)nativePreparing;
 - (unsigned long)nativeGeneration;
 - (BOOL)nativeNeedsPreparation;

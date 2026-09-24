@@ -11,7 +11,7 @@
 | Configure flags | as in `2026-09-24-macos27-new-interactive.md` |
 | Runtime env flags | `EMACS_MAC_PERSISTENT_LOOP=0` or `1`, `EMACS_MAC_TRACE_LOOP=1` (`2` for the wakeup count), `-Q` |
 | Lisp state | idle; busy for 1.5 s after an edit without redisplay |
-| Scenario | `run-scenarios.sh both` default list, 29 scenarios including the new `stalled-resize-layer`, `text-idle` and `text-busy` |
+| Scenario | `run-scenarios.sh both` default list, 27 scenarios including the new `stalled-resize-layer`, `text-idle` and `text-busy` |
 | Pass/fail/unverified | scripted: pass; IME and VoiceOver with real input: **unverified** |
 
 The environment limits in `2026-09-24-macos27-both-scripted.md` still
@@ -59,7 +59,7 @@ report 0+1.
 
 ## Full suite
 
-All 58 runs (29 scenarios, both loops) exited 0 with the same outcomes
+All 54 runs (27 scenarios, both loops) exited 0 with the same outcomes
 as before: final geometry, commands, buffer contents, menu rejections,
 close and Quit counts, and subtitles. `stalled-resize-layer` is in
 `2026-09-24-macos27-new-prefs.md`.

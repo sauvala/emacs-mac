@@ -845,7 +845,11 @@ enum
     /* Record the state of the frame view's layer (W3).  */
     MAC_LOOP_TEST_LAYER,
     /* Record text input and accessibility query results (S5).  */
-    MAC_LOOP_TEST_TEXT
+    MAC_LOOP_TEST_TEXT,
+    /* X is 1 or 0: send the root menu a begin or end tracking
+       notification; any other value only records.  Then record the
+       number of top-level menus and the root's generation.  */
+    MAC_LOOP_TEST_MENU_TRACKING
   };
 
 extern void mac_loop_test_schedule (struct frame *,
@@ -853,6 +857,9 @@ extern void mac_loop_test_schedule (struct frame *,
 extern Lisp_Object mac_loop_test_results (bool);
 extern EMACS_INT mac_frame_fullscreen_serial (struct frame *);
 extern bool mac_persistent_event_loop_active (void);
+extern bool mac_menu_bar_tracking_p (void);
+extern void mac_note_menu_bar_refresh_needed (void);
+extern void mac_queue_menu_bar_refresh (void);
 
 #ifndef USE_METAL_RENDERING
 #if DRAWING_USE_GCD

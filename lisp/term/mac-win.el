@@ -1970,6 +1970,16 @@ was shown."
 (define-key special-event-map [mac-menu-bar-selection]
   'mac-handle-menu-bar-selection)
 
+(defun mac-handle-menu-bar-refresh (_event)
+  "Apply menu-bar updates held back while the menu bar was open.
+Under the persistent event loop, menus are not changed while they are
+displayed; the end of menu-bar tracking sends this event."
+  (interactive "e")
+  (mac-update-pending-menu-bars))
+
+(define-key special-event-map [mac-menu-bar-refresh]
+  'mac-handle-menu-bar-refresh)
+
 
 ;;;; Drag and drop
 

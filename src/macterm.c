@@ -510,6 +510,10 @@ where DELAY is seconds from now and KIND is one of:
                        and accessibility queries: selected range,
                        character count, marked-text rectangle, role,
                        value length and line for the insertion point.
+  menu-tracking N      with N 1 or 0, tell the root menu that menu-bar
+                       tracking began or ended, as AppKit's
+                       notifications do; then record the number of
+                       top-level menus and the root's generation.
   menu TOP-INDEX ITEM-INDEX [SUB-INDEX]
                        perform ITEM-INDEX'th item of the TOP-INDEX'th
                        top-level menu's submenu (0-based), as AppKit
@@ -537,7 +541,8 @@ The actions run on the GUI thread even while Lisp is busy.  */)
 	 {"terminate", MAC_LOOP_TEST_TERMINATE},
 	 {"subtitle", MAC_LOOP_TEST_SUBTITLE},
 	 {"menu", MAC_LOOP_TEST_MENU}, {"layer", MAC_LOOP_TEST_LAYER},
-	 {"text", MAC_LOOP_TEST_TEXT}};
+	 {"text", MAC_LOOP_TEST_TEXT},
+	 {"menu-tracking", MAC_LOOP_TEST_MENU_TRACKING}};
       int k;
 
       CHECK_CONS (spec);

@@ -164,7 +164,10 @@ reference.  A deleted frame's snapshots are retracted in
 `free_frame_menubar`.  `test/manual/mac-menu/check.py` covers the
 snapshot table.  The menu bar is filled deeply, but only once Emacs is
 idle (`mac-update-pending-menu-bars` idle timer), since a deep build
-costs 10-40 ms. F10 shows the menu-bar keymap as a popup
+costs 10-40 ms. Lisp keeps running while the menu bar is tracked, so
+`mac_fill_menubar` refuses to change a tracked root; the end of
+tracking queues a `mac-menu-bar-refresh` special event that applies
+the held-back update. F10 shows the menu-bar keymap as a popup
 (`mac-persistent-event-loop-p`), and repeated close/Quit requests are
 dropped until Lisp reaches its next input wait.
 

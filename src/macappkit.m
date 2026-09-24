@@ -156,6 +156,9 @@ static void mac_loop_with_lisp_access_or_defer (void (^) (void));
 static void mac_loop_send_event (NSEvent *);
 static void mac_loop_queue_input_event (const struct input_event *);
 static void mac_loop_wake_lisp (void);
+/* Set while the root EmacsMenu is tracked under the persistent loop,
+   and when a menu-bar update was held back meanwhile.  */
+static bool mac_menu_bar_tracking, mac_menu_bar_refresh_needed;
 static bool mac_loop_lisp_items_pending_p (void);
 static int mac_loop_deferred_count;
 static int mac_loop_read_socket_events (struct input_event *);
@@ -11998,6 +12001,7 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 @implementation EmacsMenu
 
 - (BOOL)nativeTracking { return nativeTracking; }
+- (BOOL)persistentTracking { return persistentTracking; }
 - (BOOL)nativePreparing { return nativePreparing; }
 - (unsigned long)nativeGeneration { return nativeGeneration; }
 - (BOOL)nativeNeedsPreparation { return nativeNeedsPreparation; }
@@ -12307,6 +12311,8 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
   if (mac_persistent_loop_p)
     {
       persistentTracking = !popup_activated ();
+      if (persistentTracking)
+	__atomic_store_n (&mac_menu_bar_tracking, true, __ATOMIC_RELEASE);
       return;
     }
   if (nativeTracking)
@@ -12327,6 +12333,15 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 - (void)menuDidEndTracking:(NSNotification *)notification
 {
   mac_trace_menu_lifecycle ("end", self, 0);
+  if (persistentTracking)
+    {
+      __atomic_store_n (&mac_menu_bar_tracking, false, __ATOMIC_RELEASE);
+      /* Apply the updates held back during tracking now rather than
+	 at the next idle period, which may be far off.  */
+      if (__atomic_exchange_n (&mac_menu_bar_refresh_needed, false,
+			       __ATOMIC_ACQ_REL))
+	mac_loop_queue_lisp_block (^{ mac_queue_menu_bar_refresh (); });
+    }
   persistentTracking = NO;
   nativeTracking = NO;
   [self restoreNativeHelpMenu];
@@ -12935,10 +12950,19 @@ mac_fill_menubar (widget_value *first_wv, bool deep_p,
       NSInteger index = 1, nitems = [mainMenu numberOfItems];
       bool needs_update_p = deep_p;
 
-      /* Redisplay must not replace a menu currently owned by AppKit.  */
+      /* Redisplay must not replace a menu currently owned by AppKit.
+	 Under the persistent loop, Lisp keeps running while the user
+	 tracks the menu bar, so an idle update can arrive then; the
+	 caller retries after tracking ends.  */
       if ([mainMenu isKindOfClass:EmacsMenu.class]
-          && [(EmacsMenu *) mainMenu nativeTracking])
-        return;
+          && ([(EmacsMenu *) mainMenu nativeTracking]
+	      || [(EmacsMenu *) mainMenu persistentTracking]))
+	{
+	  if (mac_loop_test_recording_p)
+	    mac_loop_test_record ("menu fill deferred while tracking");
+	  mac_note_menu_bar_refresh_needed ();
+	  return;
+	}
 
       newMenu = [[EmacsMenu alloc] init];
       [newMenu setAutoenablesItems:NO];
@@ -20274,6 +20298,25 @@ mac_restamp_menu_bar_generation (unsigned long old, unsigned long new)
    and C callers outside this file (macmenu.c) that need to know which
    loop is active without a raw extern of the static flag above.  */
 
+/* Any thread: whether the user is tracking the menu bar under the
+   persistent loop.  */
+
+bool
+mac_menu_bar_tracking_p (void)
+{
+  return __atomic_load_n (&mac_menu_bar_tracking, __ATOMIC_ACQUIRE);
+}
+
+/* Any thread: note that a menu-bar update was held back because the
+   menu bar is tracked, so that the end of tracking queues a
+   `mac-menu-bar-refresh' event.  */
+
+void
+mac_note_menu_bar_refresh_needed (void)
+{
+  __atomic_store_n (&mac_menu_bar_refresh_needed, true, __ATOMIC_RELEASE);
+}
+
 bool
 mac_persistent_event_loop_active (void)
 {
@@ -20503,6 +20546,29 @@ mac_loop_test_perform (struct mac_loop_test_action action,
 			      role ? [role UTF8String] : "nil",
 			      value ? (long) value.length : -1L,
 			      line ? line.longValue : -1L);
+	return;
+      }
+    case MAC_LOOP_TEST_MENU_TRACKING:
+      {
+	NSMenu *root = NSApp.mainMenu;
+
+	if (![root isKindOfClass:EmacsMenu.class])
+	  return;
+	if (action.x == 1)
+	  [(EmacsMenu *) root
+	      menuDidBeginTracking:
+		[NSNotification
+		  notificationWithName:NSMenuDidBeginTrackingNotification
+				object:root]];
+	else if (action.x == 0)
+	  [(EmacsMenu *) root
+	      menuDidEndTracking:
+		[NSNotification
+		  notificationWithName:NSMenuDidEndTrackingNotification
+				object:root]];
+	mac_loop_test_record ("menu-tracking %d menus=%ld gen=%lu",
+			      (int) action.x, (long) root.numberOfItems,
+			      [(EmacsMenu *) root persistentMenuGeneration]);
 	return;
       }
     case MAC_LOOP_TEST_SUBTITLE:

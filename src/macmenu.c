@@ -343,6 +343,22 @@ mac_persistent_menubar_selection (unsigned long generation, int selection)
   kbd_buffer_store_event (&buf);
 }
 
+/* Lisp thread: queue a `mac-menu-bar-refresh' special event, which
+   applies menu-bar updates held back while the menu bar was tracked
+   under the persistent loop.  */
+
+void
+mac_queue_menu_bar_refresh (void)
+{
+  struct input_event buf;
+
+  EVENT_INIT (buf);
+  buf.kind = MENU_BAR_EVENT;
+  buf.frame_or_window = selected_frame;
+  buf.arg = list1 (Qmac_menu_bar_refresh);
+  kbd_buffer_store_event (&buf);
+}
+
 /* Return the key path of item N in the menu-bar VECTOR of USED
    entries, in the order find_and_call_menu_selection queues its
    events, without the leading `menu-bar'.  Return nil if N does not
@@ -545,6 +561,13 @@ called from an idle timer, does it.  Internal use only.  */)
 {
   Lisp_Object tail, frame;
 
+  /* Menus must not change while displayed; the end of tracking queues
+     a `mac-menu-bar-refresh' event that calls this again.  */
+  if (mac_menu_bar_tracking_p ())
+    {
+      mac_note_menu_bar_refresh_needed ();
+      return Qnil;
+    }
   FOR_EACH_FRAME (tail, frame)
     {
       struct frame *f = XFRAME (frame);
@@ -875,10 +898,15 @@ set_frame_menubar (struct frame *f, bool deep_p)
        ? mac_publish_menu_bar_snapshot (f) : 0);
 
   if (!mac_fill_menubar (first_wv->contents, deep_p, snapshot_generation))
-    /* The Lisp vector was rebuilt, but AppKit kept the menu it is currently
-       tracking.  Invalidate the comparison cache so the next deep update
-       retries applying these contents.  */
-    f->menu_bar_items_used = 0;
+    {
+      /* The Lisp vector was rebuilt, but AppKit kept the menu it is
+	 currently tracking.  Invalidate the comparison cache so the
+	 next deep update retries applying these contents, and under
+	 the persistent loop let the idle timer do it.  */
+      f->menu_bar_items_used = 0;
+      if (mac_persistent_event_loop_active ())
+	f->output_data.mac->menu_bar_deep_pending = true;
+    }
 
   free_menubar_widget_value_tree (first_wv);
 
@@ -1449,6 +1477,7 @@ syms_of_macmenu (void)
   defsubr (&Smac_menu_bar_execute_selection);
   defsubr (&Smac_update_pending_menu_bars);
   DEFSYM (Qmac_menu_bar_selection, "mac-menu-bar-selection");
+  DEFSYM (Qmac_menu_bar_refresh, "mac-menu-bar-refresh");
   Ffset (intern_c_string ("accelerate-menu"),
 	 intern_c_string (Smac_menu_bar_open_internal.s.symbol_name));
 

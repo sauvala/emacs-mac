@@ -327,6 +327,28 @@ loop the answers are live again."
         (buffer-substring (max (point-min) (- (point-max) 300))
                           (point-max))))))
 
+(defun mac-loop-scenario-menu-tracking-update ()
+  "Change the menu bar while the menu bar is tracked, with Lisp idle.
+The begin and end notifications are sent by the `menu-tracking' action.
+Expect the new loop to keep the tracked root menu (same count and
+generation, a \"menu fill deferred while tracking\" record) and to
+install the new top-level menu within the idle timer's 0.2 s after
+tracking ends."
+  (mac-loop-scenario--install-looptest-menu)
+  (mac-loop-test-schedule
+   '((0.3 menu-tracking 1) (1.2 menu-tracking 2) (1.5 menu-tracking 0)
+     (2.2 menu-tracking 2)))
+  (run-at-time 0.6 nil
+               (lambda ()
+                 (define-key global-map [menu-bar looptest2]
+                   (cons "LoopTest2" (make-sparse-keymap "LoopTest2")))
+                 (define-key global-map [menu-bar looptest2 run]
+                   '(menu-item "Run2" ignore))
+                 (force-mode-line-update t)
+                 (redisplay t)))
+  (mac-loop-scenario--then 2.5
+    (list :menus (length (lookup-key global-map [menu-bar])))))
+
 (defun mac-loop-scenario-menu-idle ()
   "Select the custom menu-bar item while Lisp is idle; runs exactly once."
   (mac-loop-scenario--install-looptest-menu)
