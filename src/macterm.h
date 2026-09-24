@@ -564,6 +564,16 @@ extern unsigned long mac_publish_menu_bar_snapshot (struct frame *);
 extern void mac_persistent_menubar_selection (unsigned long, int);
 extern bool mac_menu_bar_snapshot_live_p (unsigned long);
 extern void mac_restamp_menu_bar_generation (unsigned long, unsigned long);
+/* How an open-time menu refresh request (D3) ended.  */
+enum mac_menu_open_refresh_result
+  {
+    MAC_MENU_OPEN_REFRESH_OBSOLETE,  /* Superseded, or the menu is gone.  */
+    MAC_MENU_OPEN_REFRESH_DISPLAYED, /* Late, and the menu is displayed.  */
+    MAC_MENU_OPEN_REFRESH_UNCHANGED,
+    MAC_MENU_OPEN_REFRESH_APPLIED
+  };
+extern enum mac_menu_open_refresh_result
+  mac_fill_menu_bar_submenu (unsigned long, widget_value *, unsigned long);
 extern Lisp_Object mac_popup_dialog (struct frame *, Lisp_Object, Lisp_Object);
 extern bool name_is_separator (const char *);
 extern bool mac_fill_menubar (widget_value *, bool, unsigned long);
@@ -849,7 +859,13 @@ enum
     /* X is 1 or 0: send the root menu a begin or end tracking
        notification; any other value only records.  Then record the
        number of top-level menus and the root's generation.  */
-    MAC_LOOP_TEST_MENU_TRACKING
+    MAC_LOOP_TEST_MENU_TRACKING,
+    /* X is the index of a top-level menu: send its delegate
+       menuNeedsUpdate: and menuWillOpen:, as AppKit does when the user
+       opens it (D3), and record its first items.  */
+    MAC_LOOP_TEST_MENU_OPEN,
+    /* X is the index of a top-level menu: send menuDidClose:.  */
+    MAC_LOOP_TEST_MENU_CLOSE
   };
 
 extern void mac_loop_test_schedule (struct frame *,
@@ -860,6 +876,8 @@ extern bool mac_persistent_event_loop_active (void);
 extern bool mac_menu_bar_tracking_p (void);
 extern void mac_note_menu_bar_refresh_needed (void);
 extern void mac_queue_menu_bar_refresh (void);
+extern void mac_queue_menu_bar_open_refresh (unsigned long, unsigned long,
+					     int);
 
 #ifndef USE_METAL_RENDERING
 #if DRAWING_USE_GCD

@@ -514,6 +514,10 @@ where DELAY is seconds from now and KIND is one of:
                        tracking began or ended, as AppKit's
                        notifications do; then record the number of
                        top-level menus and the root's generation.
+  menu-open TOP-INDEX  tell the delegate of the TOP-INDEX'th top-level
+                       menu that it is about to open, as AppKit does,
+                       then record its first items.
+  menu-close TOP-INDEX tell that delegate that the menu closed.
   menu TOP-INDEX ITEM-INDEX [SUB-INDEX]
                        perform ITEM-INDEX'th item of the TOP-INDEX'th
                        top-level menu's submenu (0-based), as AppKit
@@ -542,7 +546,9 @@ The actions run on the GUI thread even while Lisp is busy.  */)
 	 {"subtitle", MAC_LOOP_TEST_SUBTITLE},
 	 {"menu", MAC_LOOP_TEST_MENU}, {"layer", MAC_LOOP_TEST_LAYER},
 	 {"text", MAC_LOOP_TEST_TEXT},
-	 {"menu-tracking", MAC_LOOP_TEST_MENU_TRACKING}};
+	 {"menu-tracking", MAC_LOOP_TEST_MENU_TRACKING},
+	 {"menu-open", MAC_LOOP_TEST_MENU_OPEN},
+	 {"menu-close", MAC_LOOP_TEST_MENU_CLOSE}};
       int k;
 
       CHECK_CONS (spec);

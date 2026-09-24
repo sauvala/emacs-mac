@@ -159,6 +159,10 @@ static void mac_loop_wake_lisp (void);
 /* Set while the root EmacsMenu is tracked under the persistent loop,
    and when a menu-bar update was held back meanwhile.  */
 static bool mac_menu_bar_tracking, mac_menu_bar_refresh_needed;
+static unsigned long mac_menu_bar_generation_for_menu (NSMenu *);
+static NSString *mac_menu_bar_title (const char *);
+static bool mac_loop_lisp_idle_p (void);
+static bool mac_loop_wait_for_lisp (bool (^) (void), double);
 static bool mac_loop_lisp_items_pending_p (void);
 static int mac_loop_deferred_count;
 static int mac_loop_read_socket_events (struct input_event *);
@@ -1734,11 +1738,12 @@ static bool handling_queued_nsevents_p;
 	 to ROOT when the deep menu-bar fill that created it stamped a
 	 generation (see mac_fill_menubar); this revalidates the frame,
 	 window and buffer at execution time (D5/D17 in the mac-app-loop
-	 menu design).  Fall back to the unvalidated selected-frame path
-	 only when no snapshot was ever published for this root.  */
+	 menu design).  A menu refreshed when it was opened (D3) has
+	 its own generation.  Fall back to the unvalidated
+	 selected-frame path only when no snapshot was ever published
+	 for this root.  */
       unsigned long generation
-	= ([root isKindOfClass:EmacsMenu.class]
-	   ? [(EmacsMenu *) root persistentMenuGeneration] : 0);
+	= mac_menu_bar_generation_for_menu ([sender menu]);
       int selection = [sender tag];
 
       if (generation)
@@ -12430,12 +12435,263 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 
 @end				// EmacsWeakLispObject
 
+/* Open-time refresh of menu-bar menus under the persistent loop (D3).
+   When the user opens a top-level menu while Lisp waits for input,
+   menuNeedsUpdate: asks Lisp for a fresh copy of that menu with a
+   `mac-menu-bar-open-refresh' special event and waits a bounded time,
+   executing Lisp requests meanwhile.  Lisp runs `menu-bar-update-hook',
+   expands only that menu, publishes it as a snapshot generation of
+   its own, and fills the menu through mac_fill_menu_bar_submenu
+   before AppKit displays it.  If Lisp is busy or does not answer in
+   time, the cached contents are shown; a late answer is applied only
+   while the menu is not displayed.  All state is GUI-thread only.  */
+
+/* Longest wait for Lisp in menuNeedsUpdate:, in seconds.  */
+#define MAC_MENU_OPEN_REFRESH_TIMEOUT 0.05
+
+/* Unanswered requests: menu by serial number.  */
+static NSMutableDictionary *mac_menu_open_refresh_requests;
+static unsigned long mac_menu_open_refresh_serial;
+/* The request that menuNeedsUpdate: is waiting for, or 0.  */
+static unsigned long mac_menu_open_refresh_awaited;
+/* Menus that are displayed.  */
+static NSMutableSet *mac_menu_open_menus;
+/* Key of the snapshot generation of a menu filled by D3.  */
+static char mac_menu_generation_key;
+/* Key of the items that Emacs put in a top-level menu.  AppKit adds
+   items of its own to some menus (Edit, Window, Help), which a
+   refresh must keep.  */
+static char mac_menu_emacs_items_key;
+
+/* Record that ITEMS of the top-level MENU are Emacs's.  */
+
+static void
+mac_menu_note_emacs_items (NSMenu *menu, NSArray *items)
+{
+  objc_setAssociatedObject (menu, &mac_menu_emacs_items_key,
+			    [NSArray arrayWithArray:items],
+			    OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+/* Return the snapshot generation that selections from MENU bind to:
+   that of its top-level menu if D3 filled it, otherwise the root's.  */
+
+static unsigned long
+mac_menu_bar_generation_for_menu (NSMenu *menu)
+{
+  NSMenu *top = menu;
+
+  while (top.supermenu.supermenu)
+    top = top.supermenu;
+
+  NSNumber *generation = objc_getAssociatedObject (top,
+						   &mac_menu_generation_key);
+  NSMenu *root = top.supermenu ? top.supermenu : top;
+
+  if (generation)
+    return generation.unsignedLongValue;
+  return ([root isKindOfClass:EmacsMenu.class]
+	  ? [(EmacsMenu *) root persistentMenuGeneration] : 0);
+}
+
+/* Return true if the menu items A and B look the same.  */
+
+static bool
+mac_menu_items_look_equal_p (NSArray *a, NSArray *b)
+{
+  NSUInteger count = a.count;
+
+  if (count != b.count)
+    return false;
+  for (NSUInteger i = 0; i < count; i++)
+    {
+      NSMenuItem *x = a[i], *y = b[i];
+
+      if (x.isSeparatorItem != y.isSeparatorItem
+	  || ![x.title isEqualToString:y.title]
+	  || (x.attributedTitle != y.attributedTitle
+	      && ![x.attributedTitle isEqualToAttributedString:
+			     y.attributedTitle])
+	  || x.enabled != y.enabled || x.state != y.state
+	  || ![x.keyEquivalent isEqualToString:y.keyEquivalent]
+	  || x.keyEquivalentModifierMask != y.keyEquivalentModifierMask
+	  || !x.submenu != !y.submenu
+	  || (x.submenu
+	      && !mac_menu_items_look_equal_p (x.submenu.itemArray,
+					       y.submenu.itemArray)))
+	return false;
+    }
+
+  return true;
+}
+
+/* GUI thread, from menuNeedsUpdate:: refresh MENU if it is a
+   top-level menu of the tracked menu bar and Lisp waits for input.  */
+
+static void
+mac_menu_bar_refresh_on_open (NSMenu *menu)
+{
+  EmacsMenu *root = (EmacsMenu *) NSApp.mainMenu;
+
+  /* Require tracking: AppKit also sends menuNeedsUpdate: when it
+     searches menus for a key equivalent.  */
+  if (![root isKindOfClass:EmacsMenu.class] || menu.supermenu != root
+      || ![root persistentTracking] || popup_activated ())
+    return;
+
+  NSInteger index = [root indexOfItemWithSubmenu:menu];
+  unsigned long generation = [root persistentMenuGeneration];
+
+  /* Item 0 is the application menu, which Lisp does not fill.  */
+  if (index < 1 || generation == 0)
+    return;
+  if (!mac_loop_lisp_idle_p ())
+    {
+      MAC_TRACE_LOOP ("menu open %ld: Lisp busy, cached\n", (long) index);
+      if (mac_loop_test_recording_p)
+	mac_loop_test_record ("menu open %ld cached (busy)", (long) index);
+      return;
+    }
+
+  __block unsigned long serial = 0;
+
+  if (mac_menu_open_refresh_requests == nil)
+    mac_menu_open_refresh_requests = [[NSMutableDictionary alloc] init];
+  /* Wait for a request still unanswered rather than repeat it.  */
+  [mac_menu_open_refresh_requests
+      enumerateKeysAndObjectsUsingBlock:^(id key, id object, BOOL *stop) {
+      if (object == menu)
+	{
+	  serial = [key unsignedLongValue];
+	  *stop = YES;
+	}
+    }];
+  if (serial == 0)
+    {
+      int top = index - 1;
+
+      serial = ++mac_menu_open_refresh_serial;
+      [mac_menu_open_refresh_requests setObject:menu forKey:@(serial)];
+      mac_loop_queue_lisp_block (^{
+	  mac_queue_menu_bar_open_refresh (serial, generation, top);
+	});
+    }
+
+  NSNumber *key = @(serial);
+  double start = mac_system_uptime ();
+
+  mac_menu_open_refresh_awaited = serial;
+  bool answered
+    = mac_loop_wait_for_lisp (^{
+	return (bool) ([mac_menu_open_refresh_requests objectForKey:key]
+		       == nil);
+      }, MAC_MENU_OPEN_REFRESH_TIMEOUT);
+  mac_menu_open_refresh_awaited = 0;
+
+  double ms = (mac_system_uptime () - start) * 1000;
+
+  MAC_TRACE_LOOP ("menu open %ld: %s after %.1f ms\n", (long) index,
+		  answered ? "answered" : "timed out, cached", ms);
+  if (mac_loop_test_recording_p)
+    mac_loop_test_record ("menu open %ld %s %.0f ms items=%ld gen=%lu",
+			  (long) index, answered ? "answered" : "timeout",
+			  ms, (long) menu.numberOfItems,
+			  mac_menu_bar_generation_for_menu (menu));
+}
+
+/* Lisp thread: fill the menu of the open-time refresh request SERIAL
+   with the contents of WV, whose command table Lisp published as
+   GENERATION, or just drop the request if WV is NULL.  Return how the
+   request ended.  */
+
+enum mac_menu_open_refresh_result
+mac_fill_menu_bar_submenu (unsigned long serial, widget_value *wv,
+			   unsigned long generation)
+{
+  __block enum mac_menu_open_refresh_result result
+    = MAC_MENU_OPEN_REFRESH_OBSOLETE;
+
+  mac_within_gui (^{
+      NSNumber *key = @(serial);
+      NSMenu *menu = MRC_RETAIN ([mac_menu_open_refresh_requests
+				   objectForKey:key]);
+
+      if (menu == nil)
+	return;
+      [mac_menu_open_refresh_requests removeObjectForKey:key];
+      if (wv == NULL || menu.supermenu != NSApp.mainMenu
+	  || ![mac_menu_bar_title (wv->name) isEqualToString:menu.title])
+	;
+      else if (serial != mac_menu_open_refresh_awaited
+	       && [mac_menu_open_menus containsObject:menu])
+	/* Never edit a menu while it is displayed.  */
+	result = MAC_MENU_OPEN_REFRESH_DISPLAYED;
+      else
+	{
+	  NSMenu *fresh = [[NSMenu alloc] initWithTitle:menu.title];
+	  NSArray *ours = objc_getAssociatedObject (menu,
+						    &mac_menu_emacs_items_key);
+
+	  if (ours == nil)
+	    ours = menu.itemArray;
+	  [fresh setAutoenablesItems:NO];
+	  if (wv->contents)
+	    [fresh fillWithWidgetValue:wv->contents];
+	  if (mac_menu_items_look_equal_p (ours, fresh.itemArray))
+	    result = MAC_MENU_OPEN_REFRESH_UNCHANGED;
+	  else
+	    {
+	      /* Emacs's items come first; keep the others after them.  */
+	      mac_menu_note_emacs_items (menu, fresh.itemArray);
+	      for (NSMenuItem *item in ours)
+		if (item.menu == menu)
+		  [menu removeItem:item];
+	      for (NSInteger i = 0; fresh.numberOfItems; i++)
+		{
+		  NSMenuItem *item = MRC_RETAIN ([fresh itemAtIndex:0]);
+
+		  [fresh removeItemAtIndex:0];
+		  [menu insertItem:item atIndex:i];
+		  MRC_RELEASE (item);
+		}
+	      objc_setAssociatedObject (menu, &mac_menu_generation_key,
+					@(generation),
+					OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	      result = MAC_MENU_OPEN_REFRESH_APPLIED;
+	    }
+	  MRC_RELEASE (fresh);
+	}
+      MRC_RELEASE (menu);
+      if (mac_loop_test_recording_p)
+	mac_loop_test_record ("menu refresh %lu result %d", serial,
+			      (int) result);
+    });
+
+  return result;
+}
+
 @implementation EmacsController (Menu)
 
 - (void)menuNeedsUpdate:(NSMenu *)menu
 {
-  if ([NSApp.mainMenu isKindOfClass:EmacsMenu.class])
+  if (mac_persistent_loop_p)
+    mac_menu_bar_refresh_on_open (menu);
+  else if ([NSApp.mainMenu isKindOfClass:EmacsMenu.class])
     [(EmacsMenu *) NSApp.mainMenu scheduleNativeRetry:menu];
+}
+
+- (void)menuWillOpen:(NSMenu *)menu
+{
+  if (!mac_persistent_loop_p)
+    return;
+  if (mac_menu_open_menus == nil)
+    mac_menu_open_menus = [[NSMutableSet alloc] init];
+  [mac_menu_open_menus addObject:menu];
+}
+
+- (void)menuDidClose:(NSMenu *)menu
+{
+  [mac_menu_open_menus removeObject:menu];
 }
 
 - (void)menu:(NSMenu *)menu willHighlightItem:(NSMenuItem *)item
@@ -12471,14 +12727,7 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
   unsigned long my_generation
     = __atomic_add_fetch (&mac_loop_menu_help_echo_generation, 1,
 			  __ATOMIC_RELAXED);
-  NSMenu *root = menu;
-
-  while (root.supermenu)
-    root = root.supermenu;
-
-  unsigned long snapshot
-    = ([root isKindOfClass:EmacsMenu.class]
-       ? [(EmacsMenu *) root persistentMenuGeneration] : 0);
+  unsigned long snapshot = mac_menu_bar_generation_for_menu (menu);
 
   mac_loop_queue_lisp_block (^{
       if (my_generation != __atomic_load_n (&mac_loop_menu_help_echo_generation,
@@ -12926,6 +13175,30 @@ init_menu_bar (void)
 						    appKitBundle, NULL));
 }
 
+/* Return the title of the menu-bar menu named NAME.  */
+
+static NSString *
+mac_menu_bar_title (const char *name)
+{
+  NSString *title = CFBridgingRelease (CFStringCreateWithCString
+				       (NULL, name, kCFStringEncodingMacRoman));
+
+  /* The title of the Help menu needs to be localized in order for
+     Spotlight for Help to be installed on Mac OS X 10.5.  */
+  if ([title isEqualToString:@"Help"])
+    return localizedMenuTitleForHelp;
+  /* To make Input Manager add "Special Characters..." to the "Edit"
+     menu, we have to localize the menu title.  */
+  if ([title isEqualToString:@"Edit"])
+    return localizedMenuTitleForEdit;
+  /* Localize Window Menu for consistency with AppKit provided menu
+     items.  */
+  if ([title isEqualToString:@"Window"])
+    return localizedMenuTitleForWindow;
+
+  return title;
+}
+
 /* Fill menu bar with the items defined by FIRST_WV.  If DEEP_P,
    consider the entire menu trees we supply, rather than just the menu
    bar item names.  Return false if native tracking prevented the update,
@@ -12971,27 +13244,8 @@ mac_fill_menubar (widget_value *first_wv, bool deep_p,
 
       for (widget_value *wv = first_wv; wv != NULL; wv = wv->next, index++)
 	{
-	  NSString *title = CFBridgingRelease (CFStringCreateWithCString
-					       (NULL, wv->name,
-						kCFStringEncodingMacRoman));
+	  NSString *title = mac_menu_bar_title (wv->name);
 	  NSMenu *submenu;
-
-	  /* The title of the Help menu needs to be localized in order
-	     for Spotlight for Help to be installed on Mac OS X
-	     10.5.  */
-	  if ([title isEqualToString:@"Help"])
-	    title = localizedMenuTitleForHelp;
-
-          /* To make Input Manager add "Special Characters..." to the
-             "Edit" menu, we have to localize the menu title. */
-	  else if ([title isEqualToString:@"Edit"])
-	    title = localizedMenuTitleForEdit;
-
-          /* Localize Window Menu for consistency with AppKit provided
-             menu items. */
-	  else if ([title isEqualToString:@"Window"])
-	    title = localizedMenuTitleForWindow;
-
 
 	  if (!needs_update_p)
 	    {
@@ -13021,6 +13275,7 @@ mac_fill_menubar (widget_value *first_wv, bool deep_p,
 
 	  if (wv->contents)
 	    [submenu fillWithWidgetValue:wv->contents];
+	  mac_menu_note_emacs_items (submenu, submenu.itemArray);
 
 	  MRC_RELEASE (submenu);
 	}
@@ -19152,6 +19407,14 @@ static bool mac_loop_launch_requested_p;
 /* Shared flags.  */
 static int mac_loop_deferred_count;	/* Number of deferred NSEvents.  */
 static bool mac_loop_lisp_waiting_p;	/* Lisp is inside thread_select.  */
+
+/* Any thread: whether Lisp waits for input.  */
+
+static bool
+mac_loop_lisp_idle_p (void)
+{
+  return __atomic_load_n (&mac_loop_lisp_waiting_p, __ATOMIC_ACQUIRE);
+}
 static unsigned mac_loop_wait_generation; /* Counts Lisp's input waits.  */
 
 /* Counters for test/manual/mac-app-loop: Lisp access granted by
@@ -19365,6 +19628,31 @@ mac_loop_within_lisp (void (^block) (void))
   while (!__atomic_load_n (&finished, __ATOMIC_ACQUIRE))
     {
       dispatch_semaphore_wait (mac_loop_gui_semaphore, DISPATCH_TIME_FOREVER);
+      mac_loop_run_requests ();
+    }
+
+  return true;
+}
+
+/* GUI thread: wait until DONE returns true, executing Lisp requests
+   meanwhile, but at most TIMEOUT seconds.  Return whether DONE.  */
+
+static bool
+mac_loop_wait_for_lisp (bool (^done) (void), double timeout)
+{
+  eassert (pthread_main_np ());
+
+  dispatch_time_t deadline
+    = dispatch_time (DISPATCH_TIME_NOW, timeout * NSEC_PER_SEC);
+
+  mac_loop_run_requests ();
+  while (!done ())
+    {
+      if (dispatch_semaphore_wait (mac_loop_gui_semaphore, deadline))
+	{
+	  mac_loop_run_requests ();
+	  return done ();
+	}
       mac_loop_run_requests ();
     }
 
@@ -20569,6 +20857,42 @@ mac_loop_test_perform (struct mac_loop_test_action action,
 	mac_loop_test_record ("menu-tracking %d menus=%ld gen=%lu",
 			      (int) action.x, (long) root.numberOfItems,
 			      [(EmacsMenu *) root persistentMenuGeneration]);
+	return;
+      }
+    case MAC_LOOP_TEST_MENU_OPEN:
+    case MAC_LOOP_TEST_MENU_CLOSE:
+      {
+	NSMenu *mainMenu = NSApp.mainMenu;
+	NSInteger topIndex = (NSInteger) action.x;
+	NSMenu *submenu = (topIndex >= 0 && topIndex < mainMenu.numberOfItems
+			   ? [mainMenu itemAtIndex:topIndex].submenu : nil);
+	id <NSMenuDelegate> delegate = submenu.delegate;
+
+	if (delegate == nil)
+	  {
+	    mac_loop_test_record ("menu-open missing %ld", (long) topIndex);
+	    return;
+	  }
+	if (action.kind == MAC_LOOP_TEST_MENU_CLOSE)
+	  {
+	    [delegate menuDidClose:submenu];
+	    mac_loop_test_record ("menu-close %ld", (long) topIndex);
+	    return;
+	  }
+	[delegate menuNeedsUpdate:submenu];
+	[delegate menuWillOpen:submenu];
+	mac_loop_test_record ("menu-open %ld %s: %ld items, last %s",
+			      (long) topIndex, [submenu.title UTF8String],
+			      (long) submenu.numberOfItems,
+			      [submenu.itemArray.lastObject.title UTF8String]);
+	for (NSInteger i = 0; i < MIN (submenu.numberOfItems, 3); i++)
+	  {
+	    NSMenuItem *item = [submenu itemAtIndex:i];
+
+	    mac_loop_test_record ("menu-open item %ld %s%s", (long) i,
+				  [item.title UTF8String],
+				  item.enabled ? "" : " (disabled)");
+	  }
 	return;
       }
     case MAC_LOOP_TEST_SUBTITLE:

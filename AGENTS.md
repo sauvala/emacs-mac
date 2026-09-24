@@ -167,9 +167,15 @@ idle (`mac-update-pending-menu-bars` idle timer), since a deep build
 costs 10-40 ms. Lisp keeps running while the menu bar is tracked, so
 `mac_fill_menubar` refuses to change a tracked root; the end of
 tracking queues a `mac-menu-bar-refresh` special event that applies
-the held-back update. F10 shows the menu-bar keymap as a popup
-(`mac-persistent-event-loop-p`), and repeated close/Quit requests are
-dropped until Lisp reaches its next input wait.
+the held-back update. When a top-level menu opens while Lisp waits
+for input, `menuNeedsUpdate:` asks for that menu alone with a
+`mac-menu-bar-open-refresh` special event and waits at most 50 ms,
+running Lisp requests meanwhile (D3). The refreshed menu carries its
+own snapshot generation, and the root is rebuilt when tracking ends.
+A late answer is never applied to a displayed menu. F10 shows the
+menu-bar keymap as a popup (`mac-persistent-event-loop-p`), and
+repeated close/Quit requests are dropped until Lisp reaches its next
+input wait.
 
 `EMACS_MAC_TRACE_LOOP=1` traces deferrals to stderr (`2` adds every select);
 with it set, `kill -INFO <pid>` prints GUI and Lisp thread backtraces, useful

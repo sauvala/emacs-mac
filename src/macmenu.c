@@ -84,7 +84,7 @@ enum native_menu_snapshot_slot
    handful of generations is enough in practice, and this keeps the
    lifetime rule simple to state and to check in
    test/manual/mac-menu/check.py.  */
-#define NATIVE_MENU_SNAPSHOT_KEEP 8
+#define NATIVE_MENU_SNAPSHOT_KEEP 16
 
 static Lisp_Object
 native_menu_snapshot_entry (unsigned long generation)
@@ -229,6 +229,34 @@ mac_trim_menu_bar_snapshots (void)
     }
 }
 
+/* Publish a snapshot of the first USED entries of the menu-items
+   VECTOR for the menu bar of the live frame F, and return its
+   generation.  */
+
+static unsigned long
+publish_menu_bar_snapshot (struct frame *f, Lisp_Object vector, int used)
+{
+  Lisp_Object frame;
+  XSETFRAME (frame, f);
+
+  Lisp_Object window = FRAME_SELECTED_WINDOW (f);
+  Lisp_Object buffer = WINDOWP (window) ? XWINDOW (window)->contents : Qnil;
+  Lisp_Object snapshot = make_vector (NATIVE_MENU_SNAPSHOT_SIZE, Qnil);
+  unsigned long generation = next_native_menu_generation ();
+
+  ASET (snapshot, NATIVE_MENU_SNAPSHOT_FRAME, frame);
+  ASET (snapshot, NATIVE_MENU_SNAPSHOT_VECTOR, Fcopy_sequence (vector));
+  ASET (snapshot, NATIVE_MENU_SNAPSHOT_ITEMS_USED, make_fixnum (used));
+  ASET (snapshot, NATIVE_MENU_SNAPSHOT_WINDOW, window);
+  ASET (snapshot, NATIVE_MENU_SNAPSHOT_BUFFER, buffer);
+  native_menu_snapshots
+    = Fcons (Fcons (make_fixnum (generation), snapshot),
+	     native_menu_snapshots);
+  mac_trim_menu_bar_snapshots ();
+
+  return generation;
+}
+
 /* Publish a menu-bar snapshot for F's *current* menu_bar_vector /
    menu_bar_items_used (the caller, set_frame_menubar, has just
    finished (re)computing them) together with F's selected window and
@@ -242,27 +270,8 @@ mac_publish_menu_bar_snapshot (struct frame *f)
   if (!FRAME_LIVE_P (f) || !FRAME_MAC_P (f) || !VECTORP (f->menu_bar_vector))
     return 0;
 
-  Lisp_Object frame;
-  XSETFRAME (frame, f);
-
-  Lisp_Object window = FRAME_SELECTED_WINDOW (f);
-  Lisp_Object buffer = WINDOWP (window) ? XWINDOW (window)->contents : Qnil;
-  Lisp_Object snapshot = make_vector (NATIVE_MENU_SNAPSHOT_SIZE, Qnil);
-  unsigned long generation = next_native_menu_generation ();
-
-  ASET (snapshot, NATIVE_MENU_SNAPSHOT_FRAME, frame);
-  ASET (snapshot, NATIVE_MENU_SNAPSHOT_VECTOR,
-	Fcopy_sequence (f->menu_bar_vector));
-  ASET (snapshot, NATIVE_MENU_SNAPSHOT_ITEMS_USED,
-	make_fixnum (f->menu_bar_items_used));
-  ASET (snapshot, NATIVE_MENU_SNAPSHOT_WINDOW, window);
-  ASET (snapshot, NATIVE_MENU_SNAPSHOT_BUFFER, buffer);
-  native_menu_snapshots
-    = Fcons (Fcons (make_fixnum (generation), snapshot),
-	     native_menu_snapshots);
-  mac_trim_menu_bar_snapshots ();
-
-  return generation;
+  return publish_menu_bar_snapshot (f, f->menu_bar_vector,
+				    f->menu_bar_items_used);
 }
 
 /* The menu bar of F did not change, but its selected window or that
@@ -356,6 +365,27 @@ mac_queue_menu_bar_refresh (void)
   buf.kind = MENU_BAR_EVENT;
   buf.frame_or_window = selected_frame;
   buf.arg = list1 (Qmac_menu_bar_refresh);
+  kbd_buffer_store_event (&buf);
+}
+
+/* Lisp thread: queue a `mac-menu-bar-open-refresh' special event for
+   the open-time refresh request SERIAL (D3), which asks for the
+   top-level menu at INDEX of the menu bar published as GENERATION.
+   Like the events above, this is only stored here because queued
+   items can be drained in the middle of a command; the special event
+   runs when the command loop reads it.  */
+
+void
+mac_queue_menu_bar_open_refresh (unsigned long serial,
+				 unsigned long generation, int index)
+{
+  struct input_event buf;
+
+  EVENT_INIT (buf);
+  buf.kind = MENU_BAR_EVENT;
+  buf.frame_or_window = selected_frame;
+  buf.arg = list4 (Qmac_menu_bar_open_refresh, make_fixnum (serial),
+		   make_fixnum (generation), make_fixnum (index));
   kbd_buffer_store_event (&buf);
 }
 
@@ -579,6 +609,133 @@ called from an idle timer, does it.  Internal use only.  */)
   return Qnil;
 }
 
+/* Drop the open-time refresh request SERIAL unless it was answered,
+so that the GUI does not wait for it again after a nonlocal exit.  */
+
+static void
+mac_menu_open_refresh_unwind (Lisp_Object serial)
+{
+  mac_fill_menu_bar_submenu (XFIXNAT (serial), NULL, 0);
+}
+
+DEFUN ("mac-menu-bar-refresh-submenu", Fmac_menu_bar_refresh_submenu,
+       Smac_menu_bar_refresh_submenu, 3, 3, 0,
+       doc: /* Answer the open-time menu refresh request SERIAL.
+Under the persistent event loop, the GUI sends a special event when
+the user opens the top-level menu at INDEX of the menu bar published
+as GENERATION while Emacs waits for input.  Run `menu-bar-update-hook',
+expand only that menu and give it to the GUI.  Internal use only.  */)
+  (Lisp_Object serial, Lisp_Object generation, Lisp_Object index)
+{
+  CHECK_FIXNAT (serial);
+  CHECK_FIXNAT (generation);
+  CHECK_FIXNAT (index);
+
+  Lisp_Object entry = native_menu_snapshot_entry (XFIXNAT (generation));
+  Lisp_Object frame = (CONSP (entry) && VECTORP (XCDR (entry))
+		       && ASIZE (XCDR (entry)) == NATIVE_MENU_SNAPSHOT_SIZE
+		       ? AREF (XCDR (entry), NATIVE_MENU_SNAPSHOT_FRAME)
+		       : Qnil);
+  struct frame *f = FRAMEP (frame) ? XFRAME (frame) : NULL;
+
+  /* The GUI stops waiting when the request is answered, so answer
+     even when there is nothing to fill: a NULL tree drops it.  */
+  if (!f || !FRAME_LIVE_P (f) || !FRAME_MAC_P (f)
+      || !f->output_data.mac->menubar_widget)
+    {
+      mac_fill_menu_bar_submenu (XFIXNAT (serial), NULL, 0);
+      return Qnil;
+    }
+
+  double start = mac_system_uptime ();
+  specpdl_ref count = SPECPDL_INDEX ();
+  Lisp_Object buffer = XWINDOW (FRAME_SELECTED_WINDOW (f))->contents;
+
+  record_unwind_protect (mac_menu_open_refresh_unwind, serial);
+  /* As the deep update in set_frame_menubar.  */
+  XSETFRAME (Vmenu_updating_frame, f);
+  specbind (Qinhibit_quit, Qt);
+  specbind (Qdebug_on_next_call, Qnil);
+  record_unwind_save_match_data ();
+  if (NILP (Voverriding_local_map_menu_flag))
+    {
+      specbind (Qoverriding_terminal_local_map, Qnil);
+      specbind (Qoverriding_local_map, Qnil);
+    }
+  record_unwind_current_buffer ();
+  set_buffer_internal_1 (XBUFFER (buffer));
+  safe_run_hooks (Qactivate_menubar_hook);
+  safe_run_hooks (Qmenu_bar_update_hook);
+
+  /* A fresh vector: the frame's own describes the installed root.  */
+  Lisp_Object items = menu_bar_items (Qnil);
+  Lisp_Object key = Qnil, string = Qnil, maps = Qnil;
+  EMACS_INT n = 0;
+
+  for (ptrdiff_t i = 0; i < ASIZE (items); i += 4)
+    {
+      if (NILP (AREF (items, i + 1)))
+	break;
+      if (n++ == XFIXNAT (index))
+	{
+	  key = AREF (items, i);
+	  string = AREF (items, i + 1);
+	  maps = AREF (items, i + 2);
+	  break;
+	}
+    }
+
+  enum mac_menu_open_refresh_result result;
+  unsigned long new_generation = 0;
+
+  if (NILP (string))
+    result = mac_fill_menu_bar_submenu (XFIXNAT (serial), NULL, 0);
+  else
+    {
+      save_menu_items ();
+      init_menu_items ();
+      menu_items_n_panes = 0;
+      bool top_level_items = parse_single_submenu (key, string, maps);
+      finish_menu_items ();
+
+      /* No Lisp runs from here on, so the string data that the widget
+	 values point to stay put.  */
+      new_generation = publish_menu_bar_snapshot (f, menu_items,
+						  menu_items_used);
+      widget_value *wv = digest_single_submenu (0, menu_items_used,
+						top_level_items);
+      wv->name = SSDATA (string);
+      update_submenu_strings (wv->contents);
+      block_input ();
+      result = mac_fill_menu_bar_submenu (XFIXNAT (serial), wv,
+					  new_generation);
+      unblock_input ();
+      free_menubar_widget_value_tree (wv);
+    }
+  unbind_to (count, Qnil);
+
+  if (result != MAC_MENU_OPEN_REFRESH_APPLIED && new_generation)
+    release_native_menu_snapshot (new_generation);
+  if (result == MAC_MENU_OPEN_REFRESH_APPLIED
+      || result == MAC_MENU_OPEN_REFRESH_DISPLAYED)
+    {
+      /* The menu bar now differs from, or is behind, the frame's
+	 command table.  Rebuild the root, which ends the menu's own
+	 generation, once tracking ends.  */
+      f->menu_bar_items_used = 0;
+      f->output_data.mac->menu_bar_deep_pending = true;
+      if (mac_menu_bar_tracking_p ())
+	mac_note_menu_bar_refresh_needed ();
+      else
+	mac_queue_menu_bar_refresh ();
+    }
+  if (mac_persistent_event_loop_active () && getenv ("EMACS_MAC_TRACE_LOOP"))
+    fprintf (stderr, "mac-loop: menu open refresh %"pI"d: result %d, "
+	     "%.1f ms in Lisp\n", (EMACS_INT) XFIXNAT (serial), (int) result,
+	     (mac_system_uptime () - start) * 1000);
+  return Qnil;
+}
+
 DEFUN ("mac-menu-bar-open-internal", Fmac_menu_bar_open_internal,
        Smac_menu_bar_open_internal, 0, 1, "i",
        doc: /* Start key navigation of the menu bar in FRAME.
@@ -664,12 +821,13 @@ set_frame_menubar (struct frame *f, bool deep_p)
 
   XSETFRAME (Vmenu_updating_frame, f);
 
-  /* The persistent loop does not intercept menu-bar tracking, so no
-     deep update happens when a menu opens; it publishes the whole
-     tree instead (D6).  That costs tens of milliseconds, so while a
-     command runs, only note that an update is due and keep the
-     installed menus: `mac-update-pending-menu-bars' does it from an
-     idle timer.  Menus are briefly stale meanwhile; selections are
+  /* The persistent loop does not intercept menu-bar tracking, so it
+     publishes the whole tree (D6); a menu opened while Lisp waits for
+     input is refreshed alone (D3, mac-menu-bar-refresh-submenu).  A
+     deep update costs tens of milliseconds, so while a command runs,
+     only note that an update is due and keep the installed menus:
+     `mac-update-pending-menu-bars' does it from an idle timer.  Menus
+     opened while Lisp is busy are stale meanwhile; selections are
      revalidated when executed (D5).  */
   if (mac_persistent_event_loop_active ())
     {
@@ -1476,8 +1634,10 @@ syms_of_macmenu (void)
   defsubr (&Smac_menu_bar_open_internal);
   defsubr (&Smac_menu_bar_execute_selection);
   defsubr (&Smac_update_pending_menu_bars);
+  defsubr (&Smac_menu_bar_refresh_submenu);
   DEFSYM (Qmac_menu_bar_selection, "mac-menu-bar-selection");
   DEFSYM (Qmac_menu_bar_refresh, "mac-menu-bar-refresh");
+  DEFSYM (Qmac_menu_bar_open_refresh, "mac-menu-bar-open-refresh");
   Ffset (intern_c_string ("accelerate-menu"),
 	 intern_c_string (Smac_menu_bar_open_internal.s.symbol_name));
 

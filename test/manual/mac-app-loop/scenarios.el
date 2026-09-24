@@ -349,6 +349,56 @@ tracking ends."
   (mac-loop-scenario--then 2.5
     (list :menus (length (lookup-key global-map [menu-bar])))))
 
+(defvar mac-loop-scenario--looptest-dyn 0
+  "Counter shown in the label of the LoopTest menu's Dyn item.")
+
+(defun mac-loop-scenario--slow-hook ()
+  (mac-loop-scenario--busy 0.2))
+
+(defun mac-loop-scenario-menu-open-refresh ()
+  "Open the LoopTest menu after its contents changed (D3).
+The Dyn item's label is computed from a variable that changes without
+a menu-bar update, so the installed menu is stale when opened.  The
+`menu-open' action sends menuNeedsUpdate: as AppKit does.  Expect the
+new loop to show \"Dyn 1\" when opened while Lisp is idle, the cached
+label without waiting while Lisp computes, a selection from the
+refreshed menu to run once, a timeout of about 50 ms when
+`menu-bar-update-hook' is slow (the late answer is not applied to the
+displayed menu), and a new root generation after tracking ends.  The old loop does not
+refresh on open."
+  (mac-loop-scenario--install-looptest-menu)
+  (setq mac-loop-scenario--looptest-dyn 0)
+  (define-key global-map [menu-bar looptest dyn]
+    '(menu-item (format "Dyn %d" mac-loop-scenario--looptest-dyn)
+                mac-loop-scenario--looptest-command))
+  (force-mode-line-update t)
+  (redisplay t)
+  (setq mac-loop-scenario--looptest-dyn 1)
+  (let ((top mac-loop-scenario--looptest-top-index))
+    (mac-loop-test-schedule
+     `((0.3 menu-tracking 1) (0.4 menu-open ,top) (0.6 menu-close ,top)
+       ;; Lisp computes from 0.8 to 1.8 s.
+       (1.0 menu-open ,top) (1.1 menu-close ,top)
+       (2.2 menu-open ,top) (2.3 menu ,top 0) (2.4 menu-close ,top)
+       (2.6 menu-tracking 0) (3.2 menu-tracking 2)
+       ;; From 3.6 s `menu-bar-update-hook' takes 0.2 s.
+       (3.7 menu-tracking 1) (3.8 menu-open ,top) (4.4 menu-close ,top)
+       (4.5 menu-tracking 0) (5.2 menu-tracking 2))))
+  (run-at-time 0.8 nil
+               (lambda ()
+                 (setq mac-loop-scenario--looptest-dyn 2)
+                 (mac-loop-scenario--busy 1.0)))
+  (run-at-time 3.6 nil (lambda ()
+                         (setq mac-loop-scenario--looptest-dyn 3)
+                         (add-hook 'menu-bar-update-hook
+                                   #'mac-loop-scenario--slow-hook)))
+  (run-at-time 4.4 nil (lambda ()
+                         (remove-hook 'menu-bar-update-hook
+                                      #'mac-loop-scenario--slow-hook)))
+  (mac-loop-scenario--then 5.6
+    (list :count mac-loop-scenario--looptest-count
+          :commands (mac-loop-scenario--commands))))
+
 (defun mac-loop-scenario-menu-idle ()
   "Select the custom menu-bar item while Lisp is idle; runs exactly once."
   (mac-loop-scenario--install-looptest-menu)
@@ -455,6 +505,17 @@ Lisp drains the selection: it must be rejected as \"frame closed\"
       (redisplay t))
     (/ (- (float-time) start) n)))
 
+(defun mac-loop-scenario--load-menus ()
+  "Create many buffers and buffers in several modes that add menus."
+  (dotimes (i 200)
+    (with-current-buffer (get-buffer-create (format "fill-%03d" i))
+      (insert "x")))
+  (dolist (mode '(org-mode c-mode python-mode sh-mode outline-mode
+                  emacs-lisp-mode))
+    (with-current-buffer (get-buffer-create (format "*fill-%s*" mode))
+      (funcall mode)))
+  (switch-to-buffer "*fill-org-mode*"))
+
 (defun mac-loop-scenario-menu-fill-cost ()
   "Time forced menu-bar updates with a plain setup, then with many
 buffers and several major modes that add menus.  The persistent loop
@@ -462,18 +523,29 @@ fills the whole menu tree on each update; the old loop fills only the
 top level, so the difference is the deep-fill cost."
   (let ((plain (mac-loop-scenario--menu-update-time 50))
         (gcs gcs-done))
-    (dotimes (i 200)
-      (with-current-buffer (get-buffer-create (format "fill-%03d" i))
-        (insert "x")))
-    (dolist (mode '(org-mode c-mode python-mode sh-mode outline-mode
-                    emacs-lisp-mode))
-      (with-current-buffer (get-buffer-create (format "*fill-%s*" mode))
-        (funcall mode)))
-    (switch-to-buffer "*fill-org-mode*")
+    (mac-loop-scenario--load-menus)
     (let ((loaded (mac-loop-scenario--menu-update-time 50)))
       (mac-loop-scenario--then 0.5
         (list :plain-ms (* 1000 plain) :loaded-ms (* 1000 loaded)
               :gcs (- gcs-done gcs))))))
+
+(defun mac-loop-scenario-menu-open-cost ()
+  "Open each top-level menu once with the setup of `menu-fill-cost'.
+Under the new loop each opening while Lisp is idle refreshes that menu
+(D3); the \"menu open\" records give the time the GUI waited.  Indices
+past the last menu record \"menu-open missing\"."
+  (mac-loop-scenario--load-menus)
+  (force-mode-line-update t)
+  (redisplay t)
+  (let ((actions '((0.3 menu-tracking 1))) (time 0.4))
+    (dotimes (i 12)
+      (push (list time 'menu-open (1+ i)) actions)
+      (push (list (+ time 0.1) 'menu-close (1+ i)) actions)
+      (setq time (+ time 0.2)))
+    (push (list time 'menu-tracking 0) actions)
+    (mac-loop-test-schedule (nreverse actions))
+    (mac-loop-scenario--then (+ time 0.5)
+      (list :buffers (length (buffer-list))))))
 
 (defun mac-loop-scenario-close-busy ()
   "Close a second frame while Lisp computes; it goes away afterwards."

@@ -184,6 +184,7 @@ for name in (
     "mac_native_menubar_selection",
     "mac_release_native_menubar",
     "mac_trim_menu_bar_snapshots",
+    "publish_menu_bar_snapshot",
     "mac_publish_menu_bar_snapshot",
     "mac_refresh_menu_bar_snapshot",
     "mac_menu_bar_snapshot_live_p",

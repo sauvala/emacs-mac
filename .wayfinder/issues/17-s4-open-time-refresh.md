@@ -76,3 +76,41 @@ D3 itself is not implemented. Open questions found on the way:
 - Validation needs real menu-bar tracking. The `menu-tracking` test
   action only sends the begin and end notifications, and AppKit does not
   call `menuNeedsUpdate:` for them.
+
+## Progress (2026-09-24, later; agent-adopted)
+
+D3 is implemented under the persistent loop, and the scripted checks
+pass (evidence
+`test/manual/mac-app-loop/evidence/2026-09-24-macos27-new-open-refresh.md`).
+- `menuNeedsUpdate:` of a top-level menu, during menu-bar tracking and
+  with Lisp in its input wait, queues a `mac-menu-bar-open-refresh`
+  special event. It then waits at most 50 ms, running Lisp requests
+  meanwhile. Busy Lisp: the cached menu is shown at once.
+- The Lisp thread (`mac-menu-bar-refresh-submenu`) runs
+  `activate-menubar-hook` and `menu-bar-update-hook`, expands only that
+  menu, and publishes it as a snapshot generation of its own. The GUI
+  fills the menu from the widget values while Lisp is parked, as
+  `mac_fill_menubar` does, so no Lisp runs on the GUI thread.
+- Decisions adopted on the way:
+  - The per-submenu generation is an associated object on the top-level
+    `NSMenu`. Selections and help-echo look it up before the root's.
+  - A refresh that changed a menu makes the root rebuild once tracking
+    ends, which retires the per-menu generation. An unchanged refresh
+    keeps the old items and releases its generation.
+  - A late answer is applied only while the menu is not displayed
+    (`menuWillOpen:` and `menuDidClose:` track that). Otherwise it is
+    dropped, and the root rebuilds after tracking.
+  - AppKit adds items of its own to Edit, Window and Help. The refresh
+    compares and replaces only the items Emacs put there.
+  - `NATIVE_MENU_SNAPSHOT_KEEP` is 16, up from 8.
+  - The idle deep fill stays. The gate does not require dropping it,
+    and it covers menus opened while Lisp is busy.
+- Numbers: open-time refresh 0.4-4 ms of Lisp per menu (loaded setup),
+  GUI wait 0-4 ms. Deep fill unchanged at 9.1 ms plain, 22.0 ms loaded.
+
+Still open before closing: real menu-bar tracking with a person at the
+Mac. Check that dynamic menus (Buffers after `C-x b`, a `:filter` menu)
+are fresh when opened while idle, that nothing flickers, that Help's
+search field and Edit's AppKit items remain, and that menus open
+promptly while Lisp is busy. Computer control was not available to this
+session for that check.

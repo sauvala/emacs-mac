@@ -1980,6 +1980,20 @@ displayed; the end of menu-bar tracking sends this event."
 (define-key special-event-map [mac-menu-bar-refresh]
   'mac-handle-menu-bar-refresh)
 
+(declare-function mac-menu-bar-refresh-submenu "macmenu.c"
+                  (serial generation index))
+
+(defun mac-handle-menu-bar-open-refresh (event)
+  "Refresh a menu-bar menu that the user is opening.
+Under the persistent event loop, the GUI sends this event when a menu
+opens while Emacs waits for input.  EVENT is
+\(mac-menu-bar-open-refresh SERIAL GENERATION INDEX)."
+  (interactive "e")
+  (apply #'mac-menu-bar-refresh-submenu (cdr event)))
+
+(define-key special-event-map [mac-menu-bar-open-refresh]
+  'mac-handle-menu-bar-open-refresh)
+
 
 ;;;; Drag and drop
 
