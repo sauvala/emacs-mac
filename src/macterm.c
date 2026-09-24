@@ -5233,6 +5233,7 @@ mac_wm_set_size_hint (struct frame *f, long flags, bool user_position)
       size_hints->flags &= ~ PPosition;
       size_hints->flags |= USPosition;
     }
+  mac_publish_size_hints (f);
 }
 
 

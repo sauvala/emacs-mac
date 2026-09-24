@@ -738,6 +738,12 @@ typedef NSInteger NSGlyphProperty;
      are made completely transparent temporarily.  */
   NSMapTableOf (NSWindow *, NSNumber *) *savedChildWindowAlphaMap;
 
+  /* Copy of FRAME_SIZE_HINTS published by mac_publish_size_hints,
+     so that the GUI thread reads hints without Lisp access.  Guarded
+     by mac_size_hints_lock.  */
+  XSizeHints publishedSizeHints;
+  BOOL hasPublishedSizeHints;
+
   /* Persistent loop only (W7/W8, see the "Persistent event loop"
      section in macappkit.m).  True while a windowShouldClose: request
      for this frame has not yet been resolved by Lisp (the frame was

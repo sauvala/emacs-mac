@@ -50,6 +50,8 @@ discussion):
   the drag. While Lisp is busy, one coalesced callback carries the
   latest step, so the window catches up after the busy period even if
   the pointer stays still (scenario `stalled-resize-layer`).
+- Size hints are published to the frame controller; the GUI thread no
+  longer reads `FRAME_SIZE_HINTS`.
 - W6/W10: deferred state callbacks coalesce per object and kind. The
   unlocked Metal context resize on backing changes is gone.
 - Per-preference scripted runs: see
@@ -63,8 +65,6 @@ Not done:
   session).
 - Mixed-scale display move (W10).
 - Real window-server drags with accessibility discovery (W13).
-- Publishing size hints instead of reading `FRAME_SIZE_HINTS` on the GUI
-  thread (a benign race; see the notes).
 
 A pending close or Quit is considered resolved at Lisp's next input wait,
 which can come slightly before the queued event is read; a rare repeated

@@ -1280,6 +1280,9 @@ mac_uti_copy_mime_type (CFStringRef uti)
 
 static EmacsController *emacsController;
 
+/* Guards -[EmacsFrameController publishedSizeHints].  */
+static pthread_mutex_t mac_size_hints_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static void init_menu_bar (void);
 static void init_apple_event_handler (void);
 static void init_accessibility (void);
@@ -3358,16 +3361,31 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
   return !FRAME_TOOLTIP_P (f) && !FRAME_NO_ACCEPT_FOCUS (f);
 }
 
+/* Any thread: copy the size hints into the frame controller.  */
+
+- (void)publishSizeHints:(const XSizeHints *)hints
+{
+  pthread_mutex_lock (&mac_size_hints_lock);
+  publishedSizeHints = *hints;
+  hasPublishedSizeHints = YES;
+  pthread_mutex_unlock (&mac_size_hints_lock);
+}
+
 - (NSSize)hintedWindowFrameSize:(NSSize)frameSize allowsLarger:(BOOL)flag
 {
-  struct frame *f = emacsFrame;
-  XSizeHints *size_hints = FRAME_SIZE_HINTS (f);
+  XSizeHints size_hints_copy, *size_hints = &size_hints_copy;
+  BOOL has_hints;
   NSRect windowFrame, emacsViewBounds;
   NSSize emacsViewSizeInPixels, emacsViewSize;
   CGFloat dw, dh, min_width, min_height;
 
+  pthread_mutex_lock (&mac_size_hints_lock);
+  has_hints = hasPublishedSizeHints;
+  size_hints_copy = publishedSizeHints;
+  pthread_mutex_unlock (&mac_size_hints_lock);
+
   windowFrame = [emacsWindow frame];
-  if (size_hints == NULL)
+  if (!has_hints)
     return windowFrame.size;
 
   emacsViewBounds = [emacsView bounds];
@@ -5968,6 +5986,19 @@ mac_convert_frame_point_to_global (struct frame *f, int *x, int *y)
 
   *x = point.x - NSMinX (baseScreenFrame);
   *y = - point.y + NSMaxY (baseScreenFrame);
+}
+
+/* Lisp thread: publish FRAME_SIZE_HINTS (F) for the GUI thread, which
+   reads them in window resize callbacks that may run without Lisp
+   access under the persistent loop.  */
+
+void
+mac_publish_size_hints (struct frame *f)
+{
+  EmacsFrameController *frameController = FRAME_CONTROLLER (f);
+
+  if (frameController && FRAME_SIZE_HINTS (f))
+    [frameController publishSizeHints:FRAME_SIZE_HINTS (f)];
 }
 
 void

@@ -213,8 +213,10 @@ found while doing it. The user has not yet reviewed them.
   presentation can briefly appear at the wrong size. It is top-left
   anchored over the background, not corrupt. This has not been checked on
   mixed-scale displays.
-- **Not changed:** `-windowWillResize:toSize:` still reads
-  `FRAME_SIZE_HINTS` on the GUI thread. That structure is allocated once
-  per frame and updated field by field, so a racing read can give one
-  stale increment but no invalid memory. Publishing a copy (W2) is left
-  for later.
+- **Size hints published (later on 2026-09-24, agent-adopted):**
+  `mac_wm_set_size_hint` copies `FRAME_SIZE_HINTS` into the frame
+  controller under a mutex (`mac_publish_size_hints`), and
+  `-hintedWindowFrameSize:allowsLarger:` reads only that copy, so
+  `-windowWillResize:toSize:` no longer reads Lisp-owned frame data. Both
+  loops use the copy. The remaining direct read, in the synthetic
+  release/press path, is not reached under the persistent loop.
