@@ -839,7 +839,9 @@ enum
        menu's submenu, as AppKit would on a real click, without faking
        events.  X holds TOP-INDEX, Y holds ITEM-INDEX (both 0-based,
        reusing the mouse-event fields).  */
-    MAC_LOOP_TEST_MENU
+    MAC_LOOP_TEST_MENU,
+    /* Record the state of the frame view's layer (W3).  */
+    MAC_LOOP_TEST_LAYER
   };
 
 extern void mac_loop_test_schedule (struct frame *,

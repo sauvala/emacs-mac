@@ -61,6 +61,30 @@ later ones. `busy-native` replaced 40-42 and `stress-requests` 40-41.
 `resize-burst` replaced none, because busy Lisp drains the deferred FIFO
 from `read_socket` between its 50 ms steps.
 
+## W3 layer probe (in-process, no screenshots)
+
+Computer use was unavailable: the approval could not be given remotely,
+and the cmux-cua driver has neither Accessibility nor Screen Recording
+permission. Instead, the `layer` test action records the frame view's
+layer state from inside the process. The runs used scenarios
+`busy-resize-layer` and `idle-resize-layer`, both loops, probing before,
+during and after a posted corner drag:
+
+| Probe | Old loop | New loop, Lisp busy | New loop, Lisp idle |
+| --- | --- | --- | --- |
+| Layer background | none (opaque layer: exposed area undefined) | frame background | frame background |
+| Gravity | `bottomLeft` in a flipped layer (top-left) | same | same |
+| Mid-drag layer / drawable | 908x656 pt / 1666x1200 px | 908x656 pt / 1666x1200 px (old drawable kept) | 908x656 pt / 1816x1312 px (tracks the drag) |
+| Overlay sublayers mid-drag | 2 (snapshot added) | 1 (no snapshot) | 1 (no snapshot) |
+| After the drag | drawable matches | drawable matches 950x688 pt | drawable matches |
+
+A one-off run with `(set-background-color "#102030")` recorded a layer
+background of 0.06,0.13,0.19, which matches. So while Lisp is busy, the
+grown area is the frame background, and the old content is anchored
+top-left without stretching. This shows the layer's configuration, not
+its composited pixels. Rapid reversals and the actual on-screen result
+still need an interactive look.
+
 ## Not covered
 
 - Pixels: what a busy drag actually shows (W3) needs the interactive

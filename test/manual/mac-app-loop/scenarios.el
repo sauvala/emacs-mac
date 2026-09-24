@@ -187,6 +187,37 @@ it stays 0 when busy Lisp drains them between steps from `read_socket'."
       (mac-loop-scenario--then 1.0
         (list :busy busy :after (mac-loop-scenario--frame-state))))))
 
+(defun mac-loop-scenario--layer-probes (start drag)
+  "Return actions dragging from time START with layer probes.
+With DRAG nil, return only probes before, during and after."
+  (let ((actions (if drag (mac-loop-scenario--corner-drag start) nil)))
+    (append (list (list (- start 0.1) 'layer)
+                  (list (+ start 0.6) 'layer)
+                  (list (+ start 1.2) 'layer))
+            actions)))
+
+(defun mac-loop-scenario-busy-resize-layer ()
+  "Record the view layer while a corner drag grows the frame of busy Lisp.
+W3 expects a background colour, top-left gravity (bottomLeft in the
+flipped layer), a drawable smaller than the grown layer, and no
+snapshot overlay; after the busy loop the drawable matches again."
+  (let ((before (mac-loop-scenario--frame-state)))
+    (mac-loop-test-schedule
+     (append (mac-loop-scenario--layer-probes 0.5 t)
+             '((4.0 layer))))
+    (let ((busy (mac-loop-scenario--busy 3)))
+      (mac-loop-scenario--then 1.5
+        (list :busy busy :before before
+              :after (mac-loop-scenario--frame-state))))))
+
+(defun mac-loop-scenario-idle-resize-layer ()
+  "Record the view layer during a corner drag while Lisp is idle."
+  (let ((before (mac-loop-scenario--frame-state)))
+    (mac-loop-test-schedule
+     (append (mac-loop-scenario--layer-probes 0.3 t) '((2.5 layer))))
+    (mac-loop-scenario--then 3.0
+      (list :before before :after (mac-loop-scenario--frame-state)))))
+
 (defun mac-loop-scenario-idle-resize ()
   "Drag the bottom-right corner while Lisp is idle."
   (let ((before (mac-loop-scenario--frame-state)))

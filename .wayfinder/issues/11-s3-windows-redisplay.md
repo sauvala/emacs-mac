@@ -54,7 +54,9 @@ discussion):
   `test/manual/mac-app-loop/evidence/2026-09-24-macos27-new-prefs.md`.
 
 Not done:
-- Interactive W3 check on real drags, including rapid reversals and a
+- W3 layer configuration during busy and idle drags is verified
+  in-process (evidence file, "W3 layer probe"). Still to do: an
+  interactive W3 check on real drags, including rapid reversals and a
   busy fullscreen toggle (screenshots are not possible in the agent
   session).
 - Mixed-scale display move (W10).

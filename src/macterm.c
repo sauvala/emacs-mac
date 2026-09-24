@@ -503,6 +503,9 @@ where DELAY is seconds from now and KIND is one of:
   set-size W H         set the window size natively.
   probe N              only record a timestamp.
   subtitle             record the window's current subtitle text.
+  layer                record the frame view layer's contents gravity,
+                       background, opacity, bounds and drawable size,
+                       and the number of overlay sublayers.
   menu TOP-INDEX ITEM-INDEX [SUB-INDEX]
                        perform ITEM-INDEX'th item of the TOP-INDEX'th
                        top-level menu's submenu (0-based), as AppKit
@@ -529,7 +532,7 @@ The actions run on the GUI thread even while Lisp is busy.  */)
 	 {"set-size", MAC_LOOP_TEST_SET_SIZE}, {"probe", MAC_LOOP_TEST_PROBE},
 	 {"terminate", MAC_LOOP_TEST_TERMINATE},
 	 {"subtitle", MAC_LOOP_TEST_SUBTITLE},
-	 {"menu", MAC_LOOP_TEST_MENU}};
+	 {"menu", MAC_LOOP_TEST_MENU}, {"layer", MAC_LOOP_TEST_LAYER}};
       int k;
 
       CHECK_CONS (spec);

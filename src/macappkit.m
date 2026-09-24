@@ -20131,6 +20131,33 @@ mac_loop_test_perform (struct mac_loop_test_action action,
       [NSApp terminate:nil];
       mac_loop_test_record ("terminate");
       return;
+    case MAC_LOOP_TEST_LAYER:
+      {
+	id delegate = window.delegate;
+	NSView *view = [delegate valueForKey:@"emacsView"];
+	NSView *overlay = [delegate valueForKey:@"overlayView"];
+	CALayer *layer = view.layer;
+	CGSize drawableSize = CGSizeZero;
+	const CGFloat *rgb = NULL;
+
+	if ([layer isKindOfClass:CAMetalLayer.class])
+	  drawableSize = ((CAMetalLayer *) layer).drawableSize;
+	if (layer.backgroundColor
+	    && CGColorGetNumberOfComponents (layer.backgroundColor) >= 3)
+	  rgb = CGColorGetComponents (layer.backgroundColor);
+	/* Two records: labels hold at most 63 characters.  */
+	mac_loop_test_record ("layer %s bg=%s%.2f,%.2f,%.2f opaque=%d",
+			      layer.contentsGravity.UTF8String,
+			      rgb ? "" : "none:", rgb ? rgb[0] : 0,
+			      rgb ? rgb[1] : 0, rgb ? rgb[2] : 0, layer.opaque);
+	mac_loop_test_record ("layer %.0fx%.0f@%.0f drawable %.0fx%.0f ov=%lu lr=%d",
+			      layer.bounds.size.width,
+			      layer.bounds.size.height, layer.contentsScale,
+			      drawableSize.width, drawableSize.height,
+			      (unsigned long) overlay.layer.sublayers.count,
+			      view.inLiveResize);
+	return;
+      }
     case MAC_LOOP_TEST_SUBTITLE:
       {
 	NSString *subtitle = nil;
