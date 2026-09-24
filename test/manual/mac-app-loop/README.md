@@ -8,6 +8,11 @@ stages can be evaluated against the acceptance contract in
 and the migration plan's M9/M10 in
 [`../../../.wayfinder/comments/migration-plan/2026-09-23-discussion.md`](../../../.wayfinder/comments/migration-plan/2026-09-23-discussion.md).
 
+Since 2026-09-24 the persistent loop is the only event loop: the old
+loop, its selector `EMACS_MAC_PERSISTENT_LOOP` and the old/new modes of
+these scripts were removed (wayfinder S8).  Evidence files from before
+then compare both loops.
+
 Scripted checks here are a starting point, not a substitute. Per M10, a
 human signs off each OS acceptance run; the acceptance contract requires
 real interactions (actual menu commands, actual drags, actual Close/Quit
@@ -19,7 +24,7 @@ clicks), which cannot be automated from outside AppKit's tracking loops.
   external packages; byte-compiles cleanly. Key entry points:
   - `mac-app-loop-start` — call once (e.g. `-l fixture.el -f mac-app-loop-start`).
     Logs a `SESSION-START` line (Emacs version, `system-configuration`,
-    `EMACS_MAC_PERSISTENT_LOOP`, `window-system`, display pixel size),
+    `window-system`, display pixel size),
     installs the logging hooks, and starts the heartbeat.
   - `mac-app-loop-busy SECONDS` — pure-Lisp CPU loop, never calls
     `sit-for`/`sleep-for`/`accept-process-output`; C-g still interrupts it
@@ -65,28 +70,24 @@ clicks), which cannot be automated from outside AppKit's tracking loops.
 
   All 9 tests pass as of this writing; compiles with no warnings.
 
-- `run.sh` — launches a built `Emacs.app` bundle with the fixture loaded,
-  in either loop mode:
+- `run.sh` — launches a built `Emacs.app` bundle with the fixture loaded:
 
   ```sh
-  test/manual/mac-app-loop/run.sh old   # EMACS_MAC_PERSISTENT_LOOP=0 (default)
-  test/manual/mac-app-loop/run.sh new   # EMACS_MAC_PERSISTENT_LOOP=1
-  test/manual/mac-app-loop/run.sh new --eval '(mac-app-loop-setup-test-buffers)'
+  test/manual/mac-app-loop/run.sh
+  test/manual/mac-app-loop/run.sh --eval '(mac-app-loop-setup-test-buffers)'
   ```
 
   Always sets `EMACS_MAC_TRACE_LOOP=1` (for the C-side `mac-loop:` traces
   added separately) and a fresh `MAC_APP_LOOP_LOG` under
-  `${TMPDIR:-/tmp}/mac-app-loop/<timestamp>-<mode>.log`, with the process's
+  `${TMPDIR:-/tmp}/mac-app-loop/<timestamp>.log`, with the process's
   stderr captured alongside it as `<same>.stderr`. Prints both paths before
   launching. Defaults to `$REPO/mac/Emacs.app`; override with `EMACS_APP`.
   Sets `EMACSLOADPATH` to the checkout's `lisp` directory automatically when
   the bundle lacks `Contents/Resources/lisp` (see AGENTS.md's note on this).
 
-  Verified end-to-end against `/Applications/Emacs.app` in both modes
-  (`EMACS_APP=/Applications/Emacs.app run.sh old --eval '(kill-emacs)'` and
-  the `new` equivalent): each run produced a `SESSION-START` line with the
-  correct `EMACS_MAC_PERSISTENT_LOOP` value, a `FRAME-SIZE` line for the
-  initial frame, and a `KILL-EMACS` line, with an empty stderr log.
+  A run (`run.sh --eval '(kill-emacs)'`) produces a `SESSION-START`
+  line, a `FRAME-SIZE` line for the initial frame, and a `KILL-EMACS`
+  line, with an empty stderr log.
 
 - `resize-band.sh` (with `resize-band.el` and `resize-band.py`) —
   records a scripted 8 ms-step drag that grows the frame and measures
@@ -134,7 +135,7 @@ contract and migration plan M9:
 | Deployment target | `MACOSX_DEPLOYMENT_TARGET` / configure setting |
 | Renderer | CG (default) or Metal |
 | Configure flags | full `./configure` invocation |
-| Runtime env flags | `EMACS_MAC_PERSISTENT_LOOP`, `EMACS_MAC_TRACE_LOOP`, any menu-path flags in effect |
+| Runtime env flags | `EMACS_MAC_TRACE_LOOP`, `EMACS_MAC_RESIZE_WAIT_MS`, and any others in effect |
 | Lisp state | idle / busy (`mac-app-loop-busy`) / busy-no-quit / input-wait / minibuffer / multi-thread / delayed-quit |
 | Scenario | one row from the table below |
 | Steps | what was actually done, in order |

@@ -638,16 +638,6 @@ DEFUN ("mac-loop-uptime", Fmac_loop_uptime, Smac_loop_uptime, 0, 0, 0,
   return make_float (mac_system_uptime ());
 }
 
-DEFUN ("mac-persistent-event-loop-p", Fmac_persistent_event_loop_p,
-       Smac_persistent_event_loop_p, 0, 0, 0,
-       doc: /* Return non-nil if the persistent AppKit event loop is active.
-This lets Lisp tell which of the two mac-port event loops is running;
-see the "Persistent event loop" section of src/macappkit.m.  */)
-  (void)
-{
-  return mac_persistent_event_loop_active () ? Qt : Qnil;
-}
-
 /* X display function emulation */
 
 static void
@@ -6700,7 +6690,6 @@ mac_create_terminal (struct mac_display_info *dpyinfo)
   terminal->set_new_font_hook = mac_new_font;
   terminal->implicit_set_name_hook = mac_implicitly_set_name;
   terminal->menu_show_hook = mac_menu_show;
-  terminal->activate_menubar_hook = mac_activate_menubar;
   terminal->popup_dialog_hook = mac_popup_dialog;
   terminal->change_tab_bar_height_hook = mac_change_tab_bar_height;
   terminal->change_tool_bar_height_hook = mac_change_tool_bar_height;
@@ -6755,7 +6744,6 @@ syms_of_macterm (void)
   defsubr (&Smac_loop_test_results);
   defsubr (&Smac_loop_uptime);
   defsubr (&Smac_frame_fullscreen_serial);
-  defsubr (&Smac_persistent_event_loop_p);
 
   DEFSYM (Qcontrol, "control");
   DEFSYM (Qmeta, "meta");

@@ -495,7 +495,6 @@ typedef NSInteger NSGlyphProperty;
 
 @interface NSApplication (Emacs)
 - (void)postDummyEvent;
-- (void)runTemporarilyWithBlock:(void (^)(void))block;
 @end
 
 @interface NSScreen (Emacs)
@@ -567,10 +566,6 @@ typedef NSInteger NSGlyphProperty;
   /* The item selected in the popup menu.  */
   int menuItemSelection;
 
-  /* Non-nil means left mouse tracking has been suspended and will be
-     resumed when this block is called.  */
-  void (^trackingResumeBlock)(void);
-
   /* Whether a service provider for Emacs is registered as of
      applicationWillFinishLaunching: or not.  */
   BOOL serviceProviderRegistered;
@@ -604,9 +599,7 @@ typedef NSInteger NSGlyphProperty;
 - (void)storeInputEvent:(id)sender;
 - (void)setMenuItemSelectionToTag:(id)sender;
 - (void)storeEvent:(struct input_event *)bufp;
-- (void)setTrackingResumeBlock:(void (^)(void))block;
 - (NSTimeInterval)minimumIntervalForReadSocket;
-- (int)handleQueuedNSEventsWithHoldingQuitIn:(struct input_event *)bufp;
 - (int)handleNSEventWithHoldingQuitIn:(struct input_event *)bufp
 				event:(NSEvent *)event;
 - (void)setHoldQuit:(struct input_event *)bufp;
@@ -624,23 +617,6 @@ typedef NSInteger NSGlyphProperty;
 
 @interface EmacsWindow : NSWindow <NSMenuItemValidation>
 {
-  /* Left mouse up event used for suspending resize control
-     tracking.  */
-  NSEvent *mouseUpEvent;
-
-  /* Pointer location of the left mouse down event that initiated the
-     current resize control tracking session.  The value is in the
-     base coordinate system of the window.  */
-  NSPoint resizeTrackingStartLocation;
-
-  /* Window size when the current resize control tracking session was
-     started.  */
-  NSSize resizeTrackingStartWindowSize;
-
-  /* Whether the call to setupResizeTracking: is suspended for the
-     next left mouse down event.  */
-  BOOL setupResizeTrackingSuspended;
-
   /* Whether the window should be made visible when the application
      gets unhidden next time.  */
   BOOL needsOrderFrontOnUnhide;
@@ -653,9 +629,6 @@ typedef NSInteger NSGlyphProperty;
      EmacsWindow object.  */
   NSWindowTabGroup *observedTabGroup;
 }
-- (void)suspendResizeTracking:(NSEvent *)event
-	   positionAdjustment:(NSPoint)adjustment;
-- (void)resumeResizeTracking;
 - (BOOL)needsOrderFrontOnUnhide;
 - (void)setNeedsOrderFrontOnUnhide:(BOOL)flag;
 - (void)suspendConstrainingToScreen:(BOOL)flag;
@@ -724,11 +697,9 @@ struct mac_text_snapshot
   CALayer *animationLayer;
 
   /* The block called when the window ends live resize.  */
-  void (^liveResizeCompletionHandler) (void);
 
   /* Whether transition effect should be set up when the window will
      start live resize.  */
-  BOOL shouldLiveResizeTriggerTransition;
 
   /* Boolean to cache [emacsView isHiddenOrHasHiddenAncestor].  */
   BOOL emacsViewIsHiddenOrHasHiddenAncestor;
@@ -820,9 +791,6 @@ struct mac_text_snapshot
 - (NSBitmapImageRep *)bitmapImageRep;
 - (void)storeModifyFrameParametersEvent:(Lisp_Object)alist;
 - (BOOL)isWindowFrontmost;
-- (void)setupLiveResizeTransition;
-- (void)setShouldLiveResizeTriggerTransition:(BOOL)flag;
-- (void)setLiveResizeCompletionHandler:(void (^)(void))block;
 - (BOOL)shouldBeTitled;
 - (BOOL)shouldHaveShadow;
 - (void)updateWindowStyle;
@@ -1112,15 +1080,6 @@ struct mac_text_snapshot
 /* Like NSFontPanel, but allows suspend/resume slider tracking.  */
 
 @interface EmacsFontPanel : NSFontPanel
-{
-  /* Left mouse up event used for suspending slider tracking.  */
-  NSEvent *mouseUpEvent;
-
-  /* Slider being tracked.  */
-  NSSlider * __unsafe_unretained trackedSlider;
-}
-- (void)suspendSliderTracking:(NSEvent *)event;
-- (void)resumeSliderTracking;
 @end
 
 @interface EmacsController (FontPanel)
@@ -1160,12 +1119,6 @@ struct mac_text_snapshot
 
 @interface EmacsMenu : NSMenu
 {
-  BOOL nativePreparing, nativeTracking;
-  BOOL nativeNeedsPreparation, nativeActivationPrepared;
-  BOOL nativeRetryPending, nativeRetryCancelling;
-  __unsafe_unretained NSMenu *nativeRetryMenu;
-  NSMenu *nativeSavedHelpMenu, *nativeHelpPlaceholder;
-  unsigned long nativeGeneration;
   /* Generation stamped on the root menu when the persistent loop
      publishes a new menu-bar snapshot (see "Persistent event loop"
      and mac_persistent_menubar_selection in macmenu.c).  Zero means
@@ -1175,14 +1128,8 @@ struct mac_text_snapshot
      quit key can cancel tracking (D15).  */
   BOOL persistentTracking;
 }
-- (BOOL)nativeTracking;
 - (BOOL)persistentTracking;
-- (BOOL)nativePreparing;
-- (unsigned long)nativeGeneration;
-- (BOOL)nativeNeedsPreparation;
-- (void)setNativeActivationPrepared;
-- (void)scheduleNativeRetry:(NSMenu *)menu;
-- (BOOL)cancelNativeTrackingForQuitEvent:(NSEvent *)event;
+- (BOOL)cancelTrackingForQuitEvent:(NSEvent *)event;
 - (unsigned long)persistentMenuGeneration;
 - (void)setPersistentMenuGeneration:(unsigned long)generation;
 @end
@@ -1198,7 +1145,6 @@ struct mac_text_snapshot
 @end
 
 @interface EmacsController (Menu) <NSMenuDelegate, NSUserInterfaceItemSearching>
-- (void)trackMenuBar;
 @end
 
 @interface EmacsFrameController (Menu)

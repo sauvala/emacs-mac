@@ -52,28 +52,23 @@ along with GNU Emacs Mac port.  If not, see <https://www.gnu.org/licenses/>.  */
 static int popup_activated_flag;
 
 /* Root command tables independently of redisplay's current menu vector.
-   Native AppKit actions, and persistent-loop menu-bar actions, can
-   arrive after a later menu preparation.  Each entry is
-   (GENERATION . [FRAME VECTOR ITEMS-USED WINDOW BUFFER]).  WINDOW and
-   BUFFER are only filled in by the persistent-loop publisher
-   (mac_publish_menu_bar_snapshot); the native path leaves them nil,
-   since mac_native_menubar_selection does not consult them.  AppKit
-   releases a native entry explicitly when a generation can no longer
-   issue an action; the persistent-loop path instead keeps only the
-   most recent NATIVE_MENU_SNAPSHOT_KEEP generations (see
-   mac_trim_menu_bar_snapshots) since it has no explicit release point
-   analogous to menu preparation.  */
-static Lisp_Object native_menu_snapshots;
-static unsigned long native_menu_generation;
+   Menu-bar actions can arrive after a later menu-bar update.  Each
+   entry is (GENERATION . [FRAME VECTOR ITEMS-USED WINDOW BUFFER]),
+   published by mac_publish_menu_bar_snapshot.  Only the most recent
+   MENU_BAR_SNAPSHOT_KEEP generations are kept (see
+   mac_trim_menu_bar_snapshots), since a queued action has no explicit
+   release point.  */
+static Lisp_Object menu_bar_snapshots;
+static unsigned long menu_bar_snapshot_generation;
 
-enum native_menu_snapshot_slot
+enum menu_bar_snapshot_slot
   {
-    NATIVE_MENU_SNAPSHOT_FRAME,
-    NATIVE_MENU_SNAPSHOT_VECTOR,
-    NATIVE_MENU_SNAPSHOT_ITEMS_USED,
-    NATIVE_MENU_SNAPSHOT_WINDOW,
-    NATIVE_MENU_SNAPSHOT_BUFFER,
-    NATIVE_MENU_SNAPSHOT_SIZE
+    MENU_BAR_SNAPSHOT_FRAME,
+    MENU_BAR_SNAPSHOT_VECTOR,
+    MENU_BAR_SNAPSHOT_ITEMS_USED,
+    MENU_BAR_SNAPSHOT_WINDOW,
+    MENU_BAR_SNAPSHOT_BUFFER,
+    MENU_BAR_SNAPSHOT_SIZE
   };
 
 /* Number of past menu-bar-snapshot generations to keep once they are
@@ -84,20 +79,20 @@ enum native_menu_snapshot_slot
    handful of generations is enough in practice, and this keeps the
    lifetime rule simple to state and to check in
    test/manual/mac-menu/check.py.  */
-#define NATIVE_MENU_SNAPSHOT_KEEP 16
+#define MENU_BAR_SNAPSHOT_KEEP 16
 
 static Lisp_Object
-native_menu_snapshot_entry (unsigned long generation)
+menu_bar_snapshot_entry (unsigned long generation)
 {
-  return Fassq (make_fixnum (generation), native_menu_snapshots);
+  return Fassq (make_fixnum (generation), menu_bar_snapshots);
 }
 
 static void
-release_native_menu_snapshot (unsigned long generation)
+release_menu_bar_snapshot (unsigned long generation)
 {
   Lisp_Object previous = Qnil;
 
-  for (Lisp_Object tail = native_menu_snapshots; CONSP (tail);
+  for (Lisp_Object tail = menu_bar_snapshots; CONSP (tail);
        previous = tail, tail = XCDR (tail))
     {
       Lisp_Object entry = XCAR (tail);
@@ -106,7 +101,7 @@ release_native_menu_snapshot (unsigned long generation)
           && (unsigned long) XFIXNAT (XCAR (entry)) == generation)
 	{
 	  if (NILP (previous))
-	    native_menu_snapshots = XCDR (tail);
+	    menu_bar_snapshots = XCDR (tail);
 	  else
 	    XSETCDR (previous, XCDR (tail));
 	  return;
@@ -115,108 +110,37 @@ release_native_menu_snapshot (unsigned long generation)
 }
 
 static unsigned long
-next_native_menu_generation (void)
+next_menu_bar_snapshot_generation (void)
 {
   do
-    native_menu_generation
-      = (native_menu_generation == MOST_POSITIVE_FIXNUM
-	 ? 1 : native_menu_generation + 1);
-  while (!NILP (native_menu_snapshot_entry (native_menu_generation)));
+    menu_bar_snapshot_generation
+      = (menu_bar_snapshot_generation == MOST_POSITIVE_FIXNUM
+	 ? 1 : menu_bar_snapshot_generation + 1);
+  while (!NILP (menu_bar_snapshot_entry (menu_bar_snapshot_generation)));
 
-  return native_menu_generation;
-}
-
-static Lisp_Object
-prepare_native_menubar (Lisp_Object frame)
-{
-  struct frame *f = XFRAME (frame);
-  if (!FRAME_LIVE_P (f) || !FRAME_MAC_P (f))
-    return Qnil;
-  set_frame_menubar (f, true);
-  if (!FRAME_LIVE_P (f))
-    return Qnil;
-
-  Lisp_Object snapshot = make_vector (NATIVE_MENU_SNAPSHOT_SIZE, Qnil);
-  unsigned long generation = next_native_menu_generation ();
-
-  ASET (snapshot, NATIVE_MENU_SNAPSHOT_FRAME, frame);
-  ASET (snapshot, NATIVE_MENU_SNAPSHOT_VECTOR,
-	Fcopy_sequence (f->menu_bar_vector));
-  ASET (snapshot, NATIVE_MENU_SNAPSHOT_ITEMS_USED,
-	make_fixnum (f->menu_bar_items_used));
-  native_menu_snapshots
-    = Fcons (Fcons (make_fixnum (generation), snapshot),
-	     native_menu_snapshots);
-  return make_fixnum (generation);
-}
-
-static Lisp_Object
-native_menubar_error (Lisp_Object error)
-{
-  (void) error;
-  return Qnil;
-}
-
-unsigned long
-mac_prepare_native_menubar (void)
-{
-  /* Never unwind past the synchronous GUI/Lisp bridge on a Lisp error.  */
-  Lisp_Object generation
-    = internal_condition_case_1 (prepare_native_menubar, selected_frame, Qt,
-				 native_menubar_error);
-  return FIXNATP (generation) ? XFIXNAT (generation) : 0;
-}
-
-void
-mac_native_menubar_selection (unsigned long generation, int selection)
-{
-  Lisp_Object entry = native_menu_snapshot_entry (generation);
-  if (!CONSP (entry))
-    return;
-
-  Lisp_Object snapshot = XCDR (entry);
-  if (!VECTORP (snapshot) || ASIZE (snapshot) != NATIVE_MENU_SNAPSHOT_SIZE)
-    return;
-
-  Lisp_Object frame = AREF (snapshot, NATIVE_MENU_SNAPSHOT_FRAME);
-  Lisp_Object vector = AREF (snapshot, NATIVE_MENU_SNAPSHOT_VECTOR);
-  Lisp_Object items_used
-    = AREF (snapshot, NATIVE_MENU_SNAPSHOT_ITEMS_USED);
-  if (selection > 0 && FRAMEP (frame) && FRAME_LIVE_P (XFRAME (frame))
-      && VECTORP (vector) && FIXNATP (items_used)
-      && selection < XFIXNAT (items_used)
-      && XFIXNAT (items_used) <= ASIZE (vector))
-    find_and_call_menu_selection (XFRAME (frame), XFIXNAT (items_used), vector,
-				 (void *) (intptr_t) selection);
-}
-
-void
-mac_release_native_menubar (unsigned long generation)
-{
-  if (generation)
-    release_native_menu_snapshot (generation);
+  return menu_bar_snapshot_generation;
 }
 
 /* Drop snapshot entries beyond the most recent
-   NATIVE_MENU_SNAPSHOT_KEEP once NEWEST_GENERATION has been added, so
+   MENU_BAR_SNAPSHOT_KEEP once NEWEST_GENERATION has been added, so
    the alist does not grow without bound across repeated menu-bar
-   rebuilds.  native_menu_snapshots is newest-first (each publish
+   rebuilds.  menu_bar_snapshots is newest-first (each publish
    conses to the front), so this walks it in that order.  */
 
 static void
 mac_trim_menu_bar_snapshots (void)
 {
   int index = 0;
-  Lisp_Object tail = native_menu_snapshots, previous = Qnil;
+  Lisp_Object tail = menu_bar_snapshots, previous = Qnil;
 
   while (CONSP (tail))
     {
       Lisp_Object next = XCDR (tail);
 
-      if (index >= NATIVE_MENU_SNAPSHOT_KEEP)
+      if (index >= MENU_BAR_SNAPSHOT_KEEP)
 	{
 	  if (NILP (previous))
-	    native_menu_snapshots = next;
+	    menu_bar_snapshots = next;
 	  else
 	    XSETCDR (previous, next);
 	}
@@ -241,17 +165,17 @@ publish_menu_bar_snapshot (struct frame *f, Lisp_Object vector, int used)
 
   Lisp_Object window = FRAME_SELECTED_WINDOW (f);
   Lisp_Object buffer = WINDOWP (window) ? XWINDOW (window)->contents : Qnil;
-  Lisp_Object snapshot = make_vector (NATIVE_MENU_SNAPSHOT_SIZE, Qnil);
-  unsigned long generation = next_native_menu_generation ();
+  Lisp_Object snapshot = make_vector (MENU_BAR_SNAPSHOT_SIZE, Qnil);
+  unsigned long generation = next_menu_bar_snapshot_generation ();
 
-  ASET (snapshot, NATIVE_MENU_SNAPSHOT_FRAME, frame);
-  ASET (snapshot, NATIVE_MENU_SNAPSHOT_VECTOR, Fcopy_sequence (vector));
-  ASET (snapshot, NATIVE_MENU_SNAPSHOT_ITEMS_USED, make_fixnum (used));
-  ASET (snapshot, NATIVE_MENU_SNAPSHOT_WINDOW, window);
-  ASET (snapshot, NATIVE_MENU_SNAPSHOT_BUFFER, buffer);
-  native_menu_snapshots
+  ASET (snapshot, MENU_BAR_SNAPSHOT_FRAME, frame);
+  ASET (snapshot, MENU_BAR_SNAPSHOT_VECTOR, Fcopy_sequence (vector));
+  ASET (snapshot, MENU_BAR_SNAPSHOT_ITEMS_USED, make_fixnum (used));
+  ASET (snapshot, MENU_BAR_SNAPSHOT_WINDOW, window);
+  ASET (snapshot, MENU_BAR_SNAPSHOT_BUFFER, buffer);
+  menu_bar_snapshots
     = Fcons (Fcons (make_fixnum (generation), snapshot),
-	     native_menu_snapshots);
+	     menu_bar_snapshots);
   mac_trim_menu_bar_snapshots ();
 
   return generation;
@@ -287,16 +211,16 @@ mac_refresh_menu_bar_snapshot (struct frame *f)
   Lisp_Object buffer = WINDOWP (window) ? XWINDOW (window)->contents : Qnil;
 
   XSETFRAME (frame, f);
-  for (Lisp_Object tail = native_menu_snapshots; CONSP (tail);
+  for (Lisp_Object tail = menu_bar_snapshots; CONSP (tail);
        tail = XCDR (tail))
     {
       Lisp_Object snapshot = XCDR (XCAR (tail));
 
-      if (VECTORP (snapshot) && ASIZE (snapshot) == NATIVE_MENU_SNAPSHOT_SIZE
-	  && EQ (AREF (snapshot, NATIVE_MENU_SNAPSHOT_FRAME), frame))
+      if (VECTORP (snapshot) && ASIZE (snapshot) == MENU_BAR_SNAPSHOT_SIZE
+	  && EQ (AREF (snapshot, MENU_BAR_SNAPSHOT_FRAME), frame))
 	{
-	  if (EQ (AREF (snapshot, NATIVE_MENU_SNAPSHOT_WINDOW), window)
-	      && EQ (AREF (snapshot, NATIVE_MENU_SNAPSHOT_BUFFER), buffer))
+	  if (EQ (AREF (snapshot, MENU_BAR_SNAPSHOT_WINDOW), window)
+	      && EQ (AREF (snapshot, MENU_BAR_SNAPSHOT_BUFFER), buffer))
 	    return;
 
 	  unsigned long old = XFIXNAT (XCAR (XCAR (tail)));
@@ -317,11 +241,11 @@ bool
 mac_menu_bar_snapshot_live_p (unsigned long generation)
 {
   Lisp_Object entry
-    = generation ? native_menu_snapshot_entry (generation) : Qnil;
+    = generation ? menu_bar_snapshot_entry (generation) : Qnil;
 
   return (CONSP (entry) && VECTORP (XCDR (entry))
-	  && ASIZE (XCDR (entry)) == NATIVE_MENU_SNAPSHOT_SIZE
-	  && VECTORP (AREF (XCDR (entry), NATIVE_MENU_SNAPSHOT_VECTOR)));
+	  && ASIZE (XCDR (entry)) == MENU_BAR_SNAPSHOT_SIZE
+	  && VECTORP (AREF (XCDR (entry), MENU_BAR_SNAPSHOT_VECTOR)));
 }
 
 /* Queue a persistent-loop menu-bar action chosen from the root menu
@@ -333,16 +257,16 @@ mac_menu_bar_snapshot_live_p (unsigned long generation)
 void
 mac_persistent_menubar_selection (unsigned long generation, int selection)
 {
-  Lisp_Object entry = native_menu_snapshot_entry (generation);
+  Lisp_Object entry = menu_bar_snapshot_entry (generation);
   Lisp_Object frame = selected_frame;
   struct input_event buf;
 
   if (CONSP (entry) && VECTORP (XCDR (entry))
-      && ASIZE (XCDR (entry)) == NATIVE_MENU_SNAPSHOT_SIZE
-      && FRAMEP (AREF (XCDR (entry), NATIVE_MENU_SNAPSHOT_FRAME))
+      && ASIZE (XCDR (entry)) == MENU_BAR_SNAPSHOT_SIZE
+      && FRAMEP (AREF (XCDR (entry), MENU_BAR_SNAPSHOT_FRAME))
       && FRAME_LIVE_P (XFRAME (AREF (XCDR (entry),
-				     NATIVE_MENU_SNAPSHOT_FRAME))))
-    frame = AREF (XCDR (entry), NATIVE_MENU_SNAPSHOT_FRAME);
+				     MENU_BAR_SNAPSHOT_FRAME))))
+    frame = AREF (XCDR (entry), MENU_BAR_SNAPSHOT_FRAME);
 
   EVENT_INIT (buf);
   buf.kind = MENU_BAR_EVENT;
@@ -515,17 +439,17 @@ return nil.  */)
   CHECK_FIXNAT (generation);
   CHECK_FIXNAT (selection);
 
-  Lisp_Object entry = native_menu_snapshot_entry (XFIXNAT (generation));
+  Lisp_Object entry = menu_bar_snapshot_entry (XFIXNAT (generation));
   Lisp_Object snapshot = CONSP (entry) ? XCDR (entry) : Qnil;
 
-  if (!(VECTORP (snapshot) && ASIZE (snapshot) == NATIVE_MENU_SNAPSHOT_SIZE))
+  if (!(VECTORP (snapshot) && ASIZE (snapshot) == MENU_BAR_SNAPSHOT_SIZE))
     return build_string ("menu changed");
 
-  Lisp_Object frame = AREF (snapshot, NATIVE_MENU_SNAPSHOT_FRAME);
-  Lisp_Object vector = AREF (snapshot, NATIVE_MENU_SNAPSHOT_VECTOR);
-  Lisp_Object items_used = AREF (snapshot, NATIVE_MENU_SNAPSHOT_ITEMS_USED);
-  Lisp_Object window = AREF (snapshot, NATIVE_MENU_SNAPSHOT_WINDOW);
-  Lisp_Object buffer = AREF (snapshot, NATIVE_MENU_SNAPSHOT_BUFFER);
+  Lisp_Object frame = AREF (snapshot, MENU_BAR_SNAPSHOT_FRAME);
+  Lisp_Object vector = AREF (snapshot, MENU_BAR_SNAPSHOT_VECTOR);
+  Lisp_Object items_used = AREF (snapshot, MENU_BAR_SNAPSHOT_ITEMS_USED);
+  Lisp_Object window = AREF (snapshot, MENU_BAR_SNAPSHOT_WINDOW);
+  Lisp_Object buffer = AREF (snapshot, MENU_BAR_SNAPSHOT_BUFFER);
   EMACS_INT n = XFIXNAT (selection);
 
   if (!(FRAMEP (frame) && FRAME_LIVE_P (XFRAME (frame))))
@@ -639,10 +563,10 @@ expand only that menu and give it to the GUI.  Internal use only.  */)
   CHECK_FIXNAT (generation);
   CHECK_FIXNAT (index);
 
-  Lisp_Object entry = native_menu_snapshot_entry (XFIXNAT (generation));
+  Lisp_Object entry = menu_bar_snapshot_entry (XFIXNAT (generation));
   Lisp_Object frame = (CONSP (entry) && VECTORP (XCDR (entry))
-		       && ASIZE (XCDR (entry)) == NATIVE_MENU_SNAPSHOT_SIZE
-		       ? AREF (XCDR (entry), NATIVE_MENU_SNAPSHOT_FRAME)
+		       && ASIZE (XCDR (entry)) == MENU_BAR_SNAPSHOT_SIZE
+		       ? AREF (XCDR (entry), MENU_BAR_SNAPSHOT_FRAME)
 		       : Qnil);
   struct frame *f = FRAMEP (frame) ? XFRAME (frame) : NULL;
 
@@ -728,7 +652,7 @@ expand only that menu and give it to the GUI.  Internal use only.  */)
   unbind_to (count, Qnil);
 
   if (result != MAC_MENU_OPEN_REFRESH_APPLIED && new_generation)
-    release_native_menu_snapshot (new_generation);
+    release_menu_bar_snapshot (new_generation);
   if (result == MAC_MENU_OPEN_REFRESH_APPLIED
       || result == MAC_MENU_OPEN_REFRESH_DISPLAYED)
     {
@@ -742,32 +666,14 @@ expand only that menu and give it to the GUI.  Internal use only.  */)
       else
 	mac_queue_menu_bar_refresh ();
     }
-  if (mac_persistent_event_loop_active () && getenv ("EMACS_MAC_TRACE_LOOP"))
+  if (getenv ("EMACS_MAC_TRACE_LOOP"))
     fprintf (stderr, "mac-loop: menu open refresh %"pI"d: result %d, "
 	     "%.1f ms in Lisp\n", (EMACS_INT) XFIXNAT (serial), (int) result,
 	     (mac_system_uptime () - start) * 1000);
   return Qnil;
 }
 
-DEFUN ("mac-menu-bar-open-internal", Fmac_menu_bar_open_internal,
-       Smac_menu_bar_open_internal, 0, 1, "i",
-       doc: /* Start key navigation of the menu bar in FRAME.
-This initially opens the first menu bar item and you can then navigate with the
-arrow keys, select a menu entry with the return key or cancel with the
-escape key.  If FRAME has no menu bar this function does nothing.
 
-If FRAME is nil or not given, use the selected frame.  */)
-  (Lisp_Object frame)
-{
-  struct frame *f = decode_window_system_frame (frame);
-
-  if (!mac_focus_native_menubar (f))
-    mac_activate_menubar (f);
-
-  return Qnil;
-}
-
-
 /* Return true if the first PREVIOUS_USED entries of PREVIOUS, a
    menu-items vector saved as a C array, would show and run the same
    menu bar as the first USED entries of CURRENT.  Under the persistent
@@ -842,16 +748,13 @@ set_frame_menubar (struct frame *f, bool deep_p)
      `mac-update-pending-menu-bars' does it from an idle timer.  Menus
      opened while Lisp is busy are stale meanwhile; selections are
      revalidated when executed (D5).  */
-  if (mac_persistent_event_loop_active ())
+  if (!deep_p && menubar_widget && NILP (Fcurrent_idle_time ()))
     {
-      if (!deep_p && menubar_widget && NILP (Fcurrent_idle_time ()))
-	{
-	  f->output_data.mac->menu_bar_deep_pending = true;
-	  return;
-	}
-      deep_p = true;
-      f->output_data.mac->menu_bar_deep_pending = false;
+      f->output_data.mac->menu_bar_deep_pending = true;
+      return;
     }
+  deep_p = true;
+  f->output_data.mac->menu_bar_deep_pending = false;
 
   /* This seems to be unnecessary for Carbon.  */
 #if 0
@@ -970,15 +873,9 @@ set_frame_menubar (struct frame *f, bool deep_p)
 	 of the menu bar, skip redisplaying it.  Just exit.  */
 
       /* Compare the new menu items with the ones computed last time.  */
-      if (mac_persistent_event_loop_active ())
-	i = (menu_items_equivalent_p (previous_items, previous_menu_items_used,
-				      menu_items, menu_items_used)
-	     ? menu_items_used : 0);
-      else
-	for (i = 0; i < previous_menu_items_used; i++)
-	  if (menu_items_used == i
-	      || (!EQ (previous_items[i], AREF (menu_items, i))))
-	    break;
+      i = (menu_items_equivalent_p (previous_items, previous_menu_items_used,
+				    menu_items, menu_items_used)
+	   ? menu_items_used : 0);
       if (i == menu_items_used && i == previous_menu_items_used && i != 0)
 	{
 	  /* The menu items have not changed.  Don't bother updating
@@ -986,8 +883,7 @@ set_frame_menubar (struct frame *f, bool deep_p)
 	  free_menubar_widget_value_tree (first_wv);
 	  discard_menu_items ();
 	  unbind_to (specpdl_count, Qnil);
-	  if (mac_persistent_event_loop_active ())
-	    mac_refresh_menu_bar_snapshot (f);
+	  mac_refresh_menu_bar_snapshot (f);
 	  return;
 	}
 
@@ -1065,8 +961,7 @@ set_frame_menubar (struct frame *f, bool deep_p)
      menu.  A deep fill always installs a new root; a shallow one has
      no items to select.  */
   unsigned long snapshot_generation
-    = (deep_p && mac_persistent_event_loop_active ()
-       ? mac_publish_menu_bar_snapshot (f) : 0);
+    = deep_p ? mac_publish_menu_bar_snapshot (f) : 0;
 
   if (!mac_fill_menubar (first_wv->contents, deep_p, snapshot_generation))
     {
@@ -1075,8 +970,7 @@ set_frame_menubar (struct frame *f, bool deep_p)
 	 next deep update retries applying these contents, and under
 	 the persistent loop let the idle timer do it.  */
       f->menu_bar_items_used = 0;
-      if (mac_persistent_event_loop_active ())
-	f->output_data.mac->menu_bar_deep_pending = true;
+      f->output_data.mac->menu_bar_deep_pending = true;
     }
 
   free_menubar_widget_value_tree (first_wv);
@@ -1096,19 +990,19 @@ free_frame_menubar (struct frame *f)
      frame so that a queued or still-open selection is rejected as
      "frame closed", but release the command table, window and buffer
      now instead of when the generation is trimmed.  */
-  for (Lisp_Object tail = native_menu_snapshots; CONSP (tail);
+  for (Lisp_Object tail = menu_bar_snapshots; CONSP (tail);
        tail = XCDR (tail))
     {
       Lisp_Object snapshot = XCDR (XCAR (tail));
 
-      if (VECTORP (snapshot) && ASIZE (snapshot) == NATIVE_MENU_SNAPSHOT_SIZE
-	  && FRAMEP (AREF (snapshot, NATIVE_MENU_SNAPSHOT_FRAME))
-	  && XFRAME (AREF (snapshot, NATIVE_MENU_SNAPSHOT_FRAME)) == f)
+      if (VECTORP (snapshot) && ASIZE (snapshot) == MENU_BAR_SNAPSHOT_SIZE
+	  && FRAMEP (AREF (snapshot, MENU_BAR_SNAPSHOT_FRAME))
+	  && XFRAME (AREF (snapshot, MENU_BAR_SNAPSHOT_FRAME)) == f)
 	{
-	  ASET (snapshot, NATIVE_MENU_SNAPSHOT_VECTOR, Qnil);
-	  ASET (snapshot, NATIVE_MENU_SNAPSHOT_ITEMS_USED, make_fixnum (0));
-	  ASET (snapshot, NATIVE_MENU_SNAPSHOT_WINDOW, Qnil);
-	  ASET (snapshot, NATIVE_MENU_SNAPSHOT_BUFFER, Qnil);
+	  ASET (snapshot, MENU_BAR_SNAPSHOT_VECTOR, Qnil);
+	  ASET (snapshot, MENU_BAR_SNAPSHOT_ITEMS_USED, make_fixnum (0));
+	  ASET (snapshot, MENU_BAR_SNAPSHOT_WINDOW, Qnil);
+	  ASET (snapshot, MENU_BAR_SNAPSHOT_BUFFER, Qnil);
 	}
     }
 }
@@ -1639,20 +1533,17 @@ DEFUN ("menu-or-popup-active-p", Fmenu_or_popup_active_p, Smenu_or_popup_active_
 void
 syms_of_macmenu (void)
 {
-  staticpro (&native_menu_snapshots);
-  native_menu_snapshots = Qnil;
+  staticpro (&menu_bar_snapshots);
+  menu_bar_snapshots = Qnil;
   DEFSYM (Qdebug_on_next_call, "debug-on-next-call");
   defsubr (&Smenu_or_popup_active_p);
 
-  defsubr (&Smac_menu_bar_open_internal);
   defsubr (&Smac_menu_bar_execute_selection);
   defsubr (&Smac_update_pending_menu_bars);
   defsubr (&Smac_menu_bar_refresh_submenu);
   DEFSYM (Qmac_menu_bar_selection, "mac-menu-bar-selection");
   DEFSYM (Qmac_menu_bar_refresh, "mac-menu-bar-refresh");
   DEFSYM (Qmac_menu_bar_open_refresh, "mac-menu-bar-open-refresh");
-  Ffset (intern_c_string ("accelerate-menu"),
-	 intern_c_string (Smac_menu_bar_open_internal.s.symbol_name));
 
   DEFVAR_LISP ("mac-help-topics", Vmac_help_topics,
     doc: /* List of strings shown as Help topics by Help menu search.

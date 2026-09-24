@@ -1,13 +1,7 @@
 #!/bin/sh
-# run.sh - launch the mac-app-loop S0 fixture in the old or new event loop.
+# run.sh - launch the mac-app-loop S0 fixture.
 #
-# Usage: run.sh [old|new] [extra emacs args...]
-#
-#   old   EMACS_MAC_PERSISTENT_LOOP=0 (unset also means old; this makes the
-#         choice explicit in the log and the invocation)
-#   new   EMACS_MAC_PERSISTENT_LOOP=1
-#
-# With no mode argument, defaults to "old".
+# Usage: run.sh [extra emacs args...]
 #
 # Always sets EMACS_MAC_TRACE_LOOP=1 so C traces ("mac-loop:" lines, added
 # separately) go to stderr, and MAC_APP_LOOP_LOG to a fresh scratch path so
@@ -25,25 +19,6 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd)
-
-mode=${1:-old}
-if [ "$#" -ge 1 ]; then
-    shift
-fi
-
-case "$mode" in
-    old)
-        persistent_loop=0
-        ;;
-    new)
-        persistent_loop=1
-        ;;
-    *)
-        echo "run.sh: unknown mode '$mode' (expected 'old' or 'new')" >&2
-        echo "usage: run.sh [old|new] [extra emacs args...]" >&2
-        exit 2
-        ;;
-esac
 
 app=${EMACS_APP:-"$repo_root/mac/Emacs.app"}
 emacs_bin="$app/Contents/MacOS/Emacs"
@@ -67,15 +42,13 @@ fi
 scratch_dir="${TMPDIR:-/tmp}/mac-app-loop"
 mkdir -p "$scratch_dir"
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
-log_file="$scratch_dir/${stamp}-${mode}.log"
-stderr_file="$scratch_dir/${stamp}-${mode}.stderr"
+log_file="$scratch_dir/${stamp}.log"
+stderr_file="$scratch_dir/${stamp}.stderr"
 
-EMACS_MAC_PERSISTENT_LOOP=$persistent_loop
 EMACS_MAC_TRACE_LOOP=1
 MAC_APP_LOOP_LOG=$log_file
-export EMACS_MAC_PERSISTENT_LOOP EMACS_MAC_TRACE_LOOP MAC_APP_LOOP_LOG
+export EMACS_MAC_TRACE_LOOP MAC_APP_LOOP_LOG
 
-echo "run.sh: mode=$mode EMACS_MAC_PERSISTENT_LOOP=$persistent_loop"
 echo "run.sh: app=$app$loadpath_args"
 echo "run.sh: lisp log:   $log_file"
 echo "run.sh: stderr log: $stderr_file"

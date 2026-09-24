@@ -3,8 +3,8 @@
 (let ((dir (car command-line-args-left)))
   (dolist (file (directory-files dir t "\\.eld\\'"))
     (let ((r (with-temp-buffer (insert-file-contents file) (read (current-buffer)))))
-      (princ (format "%-22s loop=%s max-gap=%4.0fms long-gaps=%d"
-                     (plist-get r :scenario) (plist-get r :loop)
+      (princ (format "%-22s max-gap=%4.0fms long-gaps=%d"
+                     (plist-get r :scenario)
                      (* 1000 (or (plist-get r :gui-max-gap) 0))
                      (or (plist-get r :gui-long-gaps) 0)))
       (dolist (k '(:access :error :busy :buffer :point :commands :before :after

@@ -402,10 +402,9 @@ exercising."
   (mac-app-loop--log-file)
   (mac-app-loop-log
    "SESSION-START"
-   "emacs-version=%S system-configuration=%S EMACS_MAC_PERSISTENT_LOOP=%S window-system=%S display-pixel-size=%S"
+   "emacs-version=%S system-configuration=%S window-system=%S display-pixel-size=%S"
    emacs-version
    system-configuration
-   (getenv "EMACS_MAC_PERSISTENT_LOOP")
    window-system
    (ignore-errors (list (display-pixel-width) (display-pixel-height))))
   (mac-app-loop--install-hooks)

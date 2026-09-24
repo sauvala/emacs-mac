@@ -1,7 +1,7 @@
 ;;; scenarios.el --- scripted persistent-loop scenarios  -*- lexical-binding: t -*-
 
 ;; Run inside a GUI Emacs of this checkout, for example:
-;;   EMACS_MAC_PERSISTENT_LOOP=1 mac/Emacs.app/Contents/MacOS/Emacs -Q \
+;;   mac/Emacs.app/Contents/MacOS/Emacs -Q \
 ;;     -l test/manual/mac-app-loop/scenarios.el \
 ;;     --eval '(mac-loop-scenario-run (quote busy-native))'
 ;; The result is written as a Lisp plist to $MAC_LOOP_RESULT (default
@@ -77,8 +77,6 @@ window; posted control keys become Emacs events directly."
   (let* ((test (mac-loop-test-results t))
          (file (or (getenv "MAC_LOOP_RESULT") "/tmp/mac-loop-result.eld"))
          (plist (append (list :scenario name
-                              :loop (or (getenv "EMACS_MAC_PERSISTENT_LOOP")
-                                        "0")
                               :gui-max-gap (nth 0 test)
                               :gui-long-gaps (nth 1 test)
                               :access (nth 3 test))
@@ -364,8 +362,7 @@ new loop to show \"Dyn 1\" when opened while Lisp is idle, the cached
 label without waiting while Lisp computes, a selection from the
 refreshed menu to run once, a timeout of about 50 ms when
 `menu-bar-update-hook' is slow (the late answer is not applied to the
-displayed menu), and a new root generation after tracking ends.  The old loop does not
-refresh on open."
+displayed menu), and a new root generation after tracking ends."
   (mac-loop-scenario--install-looptest-menu)
   (setq mac-loop-scenario--looptest-dyn 0)
   (define-key global-map [menu-bar looptest dyn]
@@ -518,9 +515,8 @@ Lisp drains the selection: it must be rejected as \"frame closed\"
 
 (defun mac-loop-scenario-menu-fill-cost ()
   "Time forced menu-bar updates with a plain setup, then with many
-buffers and several major modes that add menus.  The persistent loop
-fills the whole menu tree on each update; the old loop fills only the
-top level, so the difference is the deep-fill cost."
+buffers and several major modes that add menus.  Each update fills the
+whole menu tree, so the difference is the deep-fill cost."
   (let ((plain (mac-loop-scenario--menu-update-time 50))
         (gcs gcs-done))
     (mac-loop-scenario--load-menus)

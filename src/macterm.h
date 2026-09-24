@@ -557,9 +557,6 @@ extern void cleanup_all_suspended_apple_events (void);
 
 /* Defined in macmenu.c */
 extern void mac_menu_set_in_use (bool);
-extern unsigned long mac_prepare_native_menubar (void);
-extern void mac_native_menubar_selection (unsigned long, int);
-extern void mac_release_native_menubar (unsigned long);
 extern unsigned long mac_publish_menu_bar_snapshot (struct frame *);
 extern void mac_persistent_menubar_selection (unsigned long, int);
 extern bool mac_menu_bar_snapshot_live_p (unsigned long);
@@ -577,7 +574,6 @@ extern enum mac_menu_open_refresh_result
 extern Lisp_Object mac_popup_dialog (struct frame *, Lisp_Object, Lisp_Object);
 extern bool name_is_separator (const char *);
 extern bool mac_fill_menubar (widget_value *, bool, unsigned long);
-extern bool mac_focus_native_menubar (struct frame *);
 extern int create_and_show_popup_menu (struct frame *, widget_value *,
 				       int, int, bool);
 extern int create_and_show_dialog (struct frame *, widget_value *);
@@ -872,7 +868,6 @@ extern void mac_loop_test_schedule (struct frame *,
 				    const struct mac_loop_test_action *, int);
 extern Lisp_Object mac_loop_test_results (bool);
 extern EMACS_INT mac_frame_fullscreen_serial (struct frame *);
-extern bool mac_persistent_event_loop_active (void);
 extern bool mac_menu_bar_tracking_p (void);
 extern void mac_note_menu_bar_refresh_needed (void);
 extern void mac_queue_menu_bar_refresh (void);

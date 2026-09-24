@@ -116,19 +116,12 @@ enum {
   (@"NSTouchBarItemIdentifierCandidateList")
 #endif
 
-static void mac_within_gui_and_here (void (^) (void),
-				     void (^) (void));
 static void mac_within_gui_allowing_inner_lisp (void (^) (void));
 static void mac_within_lisp (void (^) (void));
 static void mac_within_lisp_deferred_unless_popup (void (^) (void));
 
 static void mac_draw_queue_sync(void);
 
-/* The persistent event loop is the only event loop: the GUI thread
-   runs -[NSApplication run] for the process lifetime and touches Lisp
-   state only with "Lisp access"; see the "Persistent event loop"
-   section.  Transitional: the old loop's branches are being removed.  */
-#define mac_persistent_loop_p true
 static bool mac_trace_loop_p;
 
 #define MAC_TRACE_LOOP(...)						\
@@ -188,7 +181,7 @@ static int mac_loop_pending_indicator_count;
    when Lisp is busy.  */
 #define MAC_LOOP_QUERY_NEEDS_LISP(type, fallback, call)			\
   do {									\
-    if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())	\
+    if (!mac_loop_gui_has_lisp_access ())				\
       {									\
 	int token_ = mac_loop_begin_lisp_access ();			\
 									\
@@ -205,7 +198,7 @@ static int mac_loop_pending_indicator_count;
    the GUI thread with access and return.  */
 #define MAC_LOOP_CALLBACK_NEEDS_LISP(call)				\
   do {									\
-    if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())	\
+    if (!mac_loop_gui_has_lisp_access ())				\
       {									\
 	mac_loop_with_access_now_or_later (^{call;});			\
 	return;								\
@@ -218,7 +211,7 @@ static int mac_loop_pending_indicator_count;
    literal) for the same receiver, instead of queueing another one.  */
 #define MAC_LOOP_STATE_CALLBACK_NEEDS_LISP(key, call)			\
   do {									\
-    if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())	\
+    if (!mac_loop_gui_has_lisp_access ())				\
       {									\
 	mac_loop_with_access_now_or_later_coalesced (self, key,	\
 						     ^{call;});		\
@@ -258,8 +251,7 @@ static void mac_loop_note_snapshot_answer (void);
    otherwise return FALLBACK.  */
 #define MAC_LOOP_CONTENT_QUERY(type, fallback, call)			\
   do {									\
-    if (mac_persistent_loop_p && pthread_main_np ()			\
-	&& !mac_loop_gui_owns_lock)					\
+    if (pthread_main_np () && !mac_loop_gui_owns_lock)		\
       {									\
 	if (!mac_try_content_access ())					\
 	  return fallback;						\
@@ -269,59 +261,9 @@ static void mac_loop_note_snapshot_answer (void);
       }									\
   } while (false)
 
-/* Old loop: whether buffer text might be being altered, so that
-   accessibility must not read it.  The persistent loop decides this
-   with mac_try_content_access instead.  */
-#define MAC_AX_BUFFER_MAY_BE_ALTERED_P()			\
-  (!mac_persistent_loop_p					\
-   && poll_suppress_count == 0 && !NILP (Vinhibit_quit))
-
 static int mac_loop_select (int, fd_set *, fd_set *, fd_set *,
 			    struct timespec *, sigset_t *);
 static void mac_loop_begin_launch (void);
-
-#define MAC_SELECT_ALLOW_LISP_EVALUATION 1
-#if MAC_SELECT_ALLOW_LISP_EVALUATION
-static bool mac_select_allow_lisp_evaluation;
-#endif
-
-/* A configured default enables both paths for Finder/Dock launches.
-   Environment flags remain available for opt-in testing of other builds.  */
-static bool
-mac_native_menus_enabled_p (void)
-{
-  /* The persistent loop does not use the native-menu experiments.  */
-  if (mac_persistent_loop_p)
-    return false;
-#ifdef MAC_NATIVE_MENUS_DEFAULT
-  return true;
-#else
-  return getenv ("EMACS_MAC_NATIVE_MENUS") != NULL;
-#endif
-}
-
-static bool
-mac_worker_menus_enabled_p (void)
-{
-  if (mac_persistent_loop_p)
-    return false;
-#ifdef MAC_NATIVE_MENUS_DEFAULT
-  return true;
-#else
-  return getenv ("EMACS_MAC_WORKER_MENUS") != NULL;
-#endif
-}
-
-/* Opt-in diagnostics for native menu activation.  Do not log menu titles
-   or Lisp contents: only lifecycle ordering and callback eligibility.  */
-static void
-mac_trace_menu_lifecycle (const char *phase, NSMenu *menu, NSInteger tag)
-{
-  if (getenv ("EMACS_MAC_TRACE_MENUS"))
-    NSLog (@"Emacs menu: %s menu=%p main=%d popup=%d lisp=%d tag=%ld",
-           phase, menu, menu == [NSApp mainMenu], popup_activated (),
-           mac_select_allow_lisp_evaluation, (long) tag);
-}
 
 @implementation NSData (Emacs)
 
@@ -706,42 +648,14 @@ mac_cgevent_set_unicode_string_from_event_ref (CGEventRef cgevent,
   [self postDummyEvent];
 }
 
-/* Temporarily run the main event loop during the call of the given
-   block.  */
-
-- (void)runTemporarilyWithBlock:(void (^)(void))block
-{
-  [[NSRunLoop currentRunLoop]
-    performSelector:@selector(stopAfterCallingBlock:) target:self
-#if USE_ARC && defined (__clang__) && __clang_major__ < 5
-    /* `copy' is unnecessary for ARC on clang Apple LLVM version 5.0.
-       Without `copy', earlier versions leak memory.  */
-	   argument:[block copy]
-#else
-	   argument:block
-#endif
-	      order:0 modes:@[NSDefaultRunLoopMode]];
-  [self run];
-}
-
 @end				// NSApplication (Emacs)
 
 static void
 mac_within_app (void (^block) (void))
 {
-  if (mac_persistent_loop_p)
-    {
-      /* The application is always running.  */
-      if (!pthread_main_np ())
-	mac_within_gui (block);
-      else
-	block ();
-      return;
-    }
+  /* The application is always running.  */
   if (!pthread_main_np ())
-    mac_within_gui (^{[NSApp runTemporarilyWithBlock:block];});
-  else if (![NSApp isRunning])
-    [NSApp runTemporarilyWithBlock:block];
+    mac_within_gui (block);
   else
     block ();
 }
@@ -1344,14 +1258,12 @@ static void mac_update_accessibility_display_options (void);
 
 static EventRef mac_peek_next_event (void);
 
-/* True if we are executing handleQueuedNSEventsWithHoldingQuitIn:.  */
-static bool handling_queued_nsevents_p;
 
 @implementation EmacsApplication
 
 - (void)sendEvent:(NSEvent *)event
 {
-  if (mac_persistent_loop_p && mac_loop_dispatch_depth == 0)
+  if (mac_loop_dispatch_depth == 0)
     mac_loop_send_event (event);
   else
     [super sendEvent:event];
@@ -1371,11 +1283,12 @@ static bool handling_queued_nsevents_p;
 {
   NSEvent *event = [super nextEventMatchingMask:mask untilDate:expiration
 				       inMode:mode dequeue:dequeue];
-  /* Native tracking can consume keys without asking menu key-equivalent
-     delegates.  Do not intercept peeks or evaluate Lisp in this loop.  */
+  /* Menu tracking can consume keys without asking menu key-equivalent
+     delegates, so a quit key cancels menu-bar tracking here (D15).  Do
+     not intercept peeks or evaluate Lisp in this loop.  */
   if (dequeue && event.type == NSEventTypeKeyDown
       && [self.mainMenu isKindOfClass:EmacsMenu.class]
-      && [(EmacsMenu *) self.mainMenu cancelNativeTrackingForQuitEvent:event])
+      && [(EmacsMenu *) self.mainMenu cancelTrackingForQuitEvent:event])
     return nil;
   return event;
 }
@@ -1387,23 +1300,20 @@ static bool handling_queued_nsevents_p;
 
 - (void)terminate:(id)sender
 {
-  if (mac_persistent_loop_p)
-    {
-      /* W8: at most one pending Quit; drop repeats while Lisp has not
-	 resolved the previous one (prompted, cancelled, or exited).  */
-      if (!mac_loop_quit_begin ())
-	return;
+  /* W8: at most one pending Quit; drop repeats while Lisp has not
+     resolved the previous one (prompted, cancelled, or exited).  */
+  if (!mac_loop_quit_begin ())
+    return;
 
-      /* The raw event below is disposed of when dispatching returns,
-	 so it must not be suspended for later; dispatch it only with
-	 Lisp access.  */
-      if (!mac_loop_gui_has_lisp_access ())
-	{
-	  mac_loop_with_access_now_or_later (^{
-	      [self dispatchQuitAppleEvent];
-	    });
-	  return;
-	}
+  /* The raw event below is disposed of when dispatching returns, so
+     it must not be suspended for later; dispatch it only with Lisp
+     access.  */
+  if (!mac_loop_gui_has_lisp_access ())
+    {
+      mac_loop_with_access_now_or_later (^{
+	  [self dispatchQuitAppleEvent];
+	});
+      return;
     }
 
   [self dispatchQuitAppleEvent];
@@ -1435,8 +1345,6 @@ static bool handling_queued_nsevents_p;
 
   if (![mainMenu isEqual:currentMainMenu])
     {
-      mac_trace_menu_lifecycle ("replace-root-old", currentMainMenu, 0);
-      mac_trace_menu_lifecycle ("replace-root-new", mainMenu, 0);
       if ([currentMainMenu isKindOfClass:EmacsMenu.class])
 	[[NSNotificationCenter defaultCenter] removeObserver:currentMainMenu];
       if ([mainMenu isKindOfClass:EmacsMenu.class])
@@ -1453,7 +1361,6 @@ static bool handling_queued_nsevents_p;
 		 object:mainMenu];
 	}
       [super setMainMenu:mainMenu];
-      mac_trace_menu_lifecycle ("replace-root-done", mainMenu, 0);
     }
 }
 
@@ -1563,16 +1470,8 @@ static bool handling_queued_nsevents_p;
       setrlimit (RLIMIT_NOFILE, &rlim);
     }
 
-  if (mac_persistent_loop_p)
-    {
-      /* Keep running; let the waiting Lisp thread continue.  */
-      mac_loop_complete_launch ();
-      return;
-    }
-
-  /* Exit from the main event loop.  */
-  [NSApp stop:nil];
-  [NSApp postDummyEvent];
+  /* Keep running; let the waiting Lisp thread continue.  */
+  mac_loop_complete_launch ();
 }
 
 - (BOOL)applicationSupportsSecureRestorableState:(NSApplication *)app
@@ -1717,25 +1616,7 @@ static bool handling_queued_nsevents_p;
 
 - (void)setMenuItemSelectionToTag:(id)sender
 {
-  mac_trace_menu_lifecycle ("action", [sender menu], [sender tag]);
-  NSMenu *root = [sender menu];
-  while ([root supermenu])
-    root = [root supermenu];
-  if ([root isKindOfClass:EmacsMenu.class]
-      && [(EmacsMenu *) root nativeNeedsPreparation] && !popup_activated ())
-    return;
-  if ([root isKindOfClass:EmacsMenu.class]
-      && [(EmacsMenu *) root nativeGeneration] && !popup_activated ())
-    {
-      unsigned long generation = [(EmacsMenu *) root nativeGeneration];
-      int selection = [sender tag];
-      mac_within_lisp_deferred_if_gui_thread (^{
-          mac_native_menubar_selection (generation, selection);
-        });
-      [NSApp postDummyEvent];
-      return;
-    }
-  if (mac_persistent_loop_p && !popup_activated ())
+  if (!popup_activated ())
     {
       /* Menu-bar tracking is not intercepted by the persistent loop,
 	 so nothing polls menuItemSelection.  Prefer the snapshot bound
@@ -1787,38 +1668,34 @@ static bool handling_queued_nsevents_p;
 
 /* Event handling  */
 
-static EventRef peek_if_next_event_activates_menu_bar (void);
 
 /* Store BUFP to kbd_buffer.  */
 
 - (void)storeEvent:(struct input_event *)bufp
 {
-  if (mac_persistent_loop_p)
+  if (!pthread_main_np ())
     {
-      if (!pthread_main_np ())
-	{
-	  /* A callback queued to the Lisp thread.  */
-	  if (bufp->kind != HELP_EVENT)
-	    kbd_buffer_store_event_hold (bufp, mac_loop_lisp_hold_quit);
-	  return;
-	}
-      if (!mac_loop_gui_has_lisp_access ())
-	{
-	  /* Only events without fresh Lisp objects are stored without
-	     access; help echo needs Lisp and is dropped.  */
-	  if (bufp->kind != HELP_EVENT)
-	    mac_loop_queue_input_event (bufp);
-	  return;
-	}
-      if (hold_quit == NULL && bufp->kind != HELP_EVENT)
-	{
-	  /* Never call handle_interrupt on the GUI thread.  */
-	  kbd_buffer_store_event_hold (bufp, &mac_loop_gui_hold_quit);
-	  count++;
-	  if (mac_loop_request_depth == 0)
-	    mac_loop_wake_lisp ();
-	  return;
-	}
+      /* A callback queued to the Lisp thread.  */
+      if (bufp->kind != HELP_EVENT)
+	kbd_buffer_store_event_hold (bufp, mac_loop_lisp_hold_quit);
+      return;
+    }
+  if (!mac_loop_gui_has_lisp_access ())
+    {
+      /* Only events without fresh Lisp objects are stored without
+	 access; help echo needs Lisp and is dropped.  */
+      if (bufp->kind != HELP_EVENT)
+	mac_loop_queue_input_event (bufp);
+      return;
+    }
+  if (hold_quit == NULL && bufp->kind != HELP_EVENT)
+    {
+      /* Never call handle_interrupt on the GUI thread.  */
+      kbd_buffer_store_event_hold (bufp, &mac_loop_gui_hold_quit);
+      count++;
+      if (mac_loop_request_depth == 0)
+	mac_loop_wake_lisp ();
+      return;
     }
   if (bufp->kind == HELP_EVENT)
     {
@@ -1860,25 +1737,6 @@ static EventRef peek_if_next_event_activates_menu_bar (void);
   hold_quit = bufp;
 }
 
-- (void)setTrackingResumeBlock:(void (^)(void))block
-{
-  MRC_RELEASE (trackingResumeBlock);
-  trackingResumeBlock = [block copy];
-}
-
-#define MOUSE_TRACKING_SET_RESUMPTION(controller, obj, sel_name)	\
-  [(controller) setTrackingResumeBlock:^{[(obj) sel_name];}]
-
-/* These macros can only be used inside EmacsController.  */
-#define MOUSE_TRACKING_SUSPENDED_P()	(trackingResumeBlock != nil)
-#define MOUSE_TRACKING_RESUME()		trackingResumeBlock ()
-#define MOUSE_TRACKING_RESET()		[self setTrackingResumeBlock:nil]
-
-- (BOOL)isMouseTrackingSuspended
-{
-  return MOUSE_TRACKING_SUSPENDED_P ();
-}
-
 /* Minimum time interval between successive mac_read_socket calls.  */
 
 #define READ_SOCKET_MIN_INTERVAL (1/60.0)
@@ -1889,7 +1747,7 @@ static BOOL extendReadSocketIntervalOnce;
 {
   NSTimeInterval interval = READ_SOCKET_MIN_INTERVAL;
 
-  if (MOUSE_TRACKING_SUSPENDED_P () || extendReadSocketIntervalOnce)
+  if (extendReadSocketIntervalOnce)
     interval *= 6;
   else if (!(floor (NSAppKitVersionNumber) <= NSAppKitVersionNumber10_10_Max))
     /* A large interval value affects responsiveness on OS X
@@ -1978,131 +1836,15 @@ static BOOL extendReadSocketIntervalOnce;
     }
 }
 
-/* Handle NSEvents in the queue with holding quit event in *BUFP.
-   Return the number of stored Emacs events.
-
-   We handle them inside the application loop in order to avoid the
-   hang in the following situation:
-
-     1. Save some file in Emacs.
-     2. Remove the file in Terminal.
-     3. Try to drag the proxy icon in the Emacs title bar.
-     4. "Document Drag Error" window will pop up, but can't pop it
-        down by clicking the OK button.  */
-
-- (int)handleQueuedNSEventsWithHoldingQuitIn:(struct input_event *)bufp
-{
-  int __block result;
-
-  mac_within_app (^{
-      /* Mac OS X 10.2 doesn't regard untilDate:nil as polling.  */
-      NSDate *expiration = [NSDate distantPast];
-      struct mac_display_info *dpyinfo = &one_mac_display_info;
-
-      hold_quit = bufp;
-      count = 0;
-
-      if (MOUSE_TRACKING_SUSPENDED_P ())
-	{
-	  NSEvent *leftMouseEvent =
-	    [NSApp
-	      nextEventMatchingMask:(NSEventMaskLeftMouseDragged
-				     | NSEventMaskLeftMouseUp)
-			  untilDate:expiration
-			     inMode:NSDefaultRunLoopMode dequeue:NO];
-
-	  if (leftMouseEvent)
-	    {
-	      if ([leftMouseEvent type] == NSEventTypeLeftMouseDragged)
-		MOUSE_TRACKING_RESUME ();
-	      MOUSE_TRACKING_RESET ();
-	    }
-	}
-
-      while (1)
-	{
-	  NSEvent *event;
-	  NSUInteger mask;
-
-	  if (dpyinfo->saved_menu_event == NULL)
-	    {
-	      EventRef menu_event = peek_if_next_event_activates_menu_bar ();
-
-	      if (menu_event)
-		{
-		  struct input_event inev;
-
-		  dpyinfo->saved_menu_event = RetainEvent (menu_event);
-		  RemoveEventFromQueue (GetMainEventQueue (), menu_event);
-
-		  EVENT_INIT (inev);
-		  inev.arg = Qnil;
-		  inev.frame_or_window = mac_event_frame ();
-		  inev.kind = MENU_BAR_ACTIVATE_EVENT;
-		  [self storeEvent:&inev];
-		}
-	    }
-
-	  mask = ((!MOUSE_TRACKING_SUSPENDED_P ()
-		   && dpyinfo->saved_menu_event == NULL)
-		  ? NSEventMaskAny : (NSEventMaskAny & ~ANY_MOUSE_EVENT_MASK));
-	  event = [NSApp nextEventMatchingMask:mask untilDate:expiration
-			 inMode:NSDefaultRunLoopMode dequeue:YES];
-
-	  if (event == nil)
-	    break;
-	  [self handleOneNSEvent:event];
-	}
-
-      hold_quit = NULL;
-
-      result = count;
-    });
-
-  return result;
-}
-
-static BOOL
-emacs_windows_need_display_p (void)
-{
-  Lisp_Object tail, frame;
-
-  FOR_EACH_FRAME (tail, frame)
-    {
-      struct frame *f = XFRAME (frame);
-
-      if (FRAME_MAC_P (f))
-	{
-	  EmacsWindow *window = FRAME_MAC_WINDOW_OBJECT (f);
-
-	  if ([window isVisible] && [window viewsNeedDisplay])
-	    return YES;
-	}
-    }
-
-  return NO;
-}
-
 - (void)processDeferredReadSocket:(NSTimer *)theTimer
 {
-  if (mac_persistent_loop_p)
-    {
-      /* Nothing polls the GUI; let Lisp read what arrived while
-	 read_socket was throttled.  Waking it when nothing did would
-	 make it call read_socket again within the interval, which
-	 rearms this timer, so an idle Emacs would never sleep.  */
-      if (mac_loop_lisp_items_pending_p ()
-	  || __atomic_load_n (&mac_loop_deferred_count, __ATOMIC_ACQUIRE))
-	mac_loop_wake_lisp ();
-      return;
-    }
-  if (!handling_queued_nsevents_p)
-    {
-      if (mac_peek_next_event () || emacs_windows_need_display_p ())
-	[NSApp postDummyEvent];
-      else
-	mac_flush_1 (NULL);
-    }
+  /* Nothing polls the GUI; let Lisp read what arrived while
+     read_socket was throttled.  Waking it when nothing did would make
+     it call read_socket again within the interval, which rearms this
+     timer, so an idle Emacs would never sleep.  */
+  if (mac_loop_lisp_items_pending_p ()
+      || __atomic_load_n (&mac_loop_deferred_count, __ATOMIC_ACQUIRE))
+    mac_loop_wake_lisp ();
 }
 
 - (void)cancelHelpEchoForEmacsFrame:(struct frame *)f
@@ -2225,7 +1967,7 @@ mac_selector_kind (SEL selector)
 	      ? MAC_SELECTOR_SERVICES : MAC_SELECTOR_NONE);
 
   mac_loop_end_lisp_access (token);
-  if (mac_persistent_loop_p && pthread_main_np ())
+  if (pthread_main_np ())
     {
       if (cache == nil)
 	cache = [[NSMutableDictionary alloc] init];
@@ -2260,7 +2002,7 @@ mac_selector_kind (SEL selector)
 
 - (void)forwardInvocation:(NSInvocation *)anInvocation
 {
-  if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())
+  if (!mac_loop_gui_has_lisp_access ())
     {
       /* The handlers build Lisp events; run them with access.  */
       [anInvocation retainArguments];
@@ -2428,84 +2170,17 @@ mac_selector_kind (SEL selector)
 
 @end				// EmacsController
 
-/* The persistent loop registers none of the old loop's undocumented
-   event-loop preferences.  For validation, EMACS_MAC_LOOP_PREFS may
-   name some of them (comma-separated, or "all") to register anyway on
-   the OS versions where the old loop would.  */
-
-static void
-mac_loop_register_event_loop_preferences (void)
-{
-  static const struct
-  {
-    NSString *key;
-    id value;
-    int min_major;
-  } prefs[] =
-    {
-      {@"NSEventConcurrentProcessingEnabled", @"NO", 26},
-      {@"NSApplicationUpdateCycleEnabled", @"NO", 26},
-      {@"NSWindowResizeNeedsTrackingLoop", @YES, 27},
-      {@"NSControlPrefersGestureRecognizerTracking", @NO, 27},
-    };
-  const char *spec = getenv ("EMACS_MAC_LOOP_PREFS");
-  NSArray *names = (spec
-		    ? [@(spec) componentsSeparatedByString:@","] : @[]);
-  bool all_p = [names containsObject:@"all"];
-  NSMutableDictionary *defaults = [NSMutableDictionary dictionary];
-
-  for (int i = 0; i < countof (prefs); i++)
-    if ((all_p || [names containsObject:prefs[i].key])
-	&& mac_operating_system_version.major >= prefs[i].min_major)
-      {
-	defaults[prefs[i].key] = prefs[i].value;
-	MAC_TRACE_LOOP ("registering preference %s\n",
-			prefs[i].key.UTF8String);
-      }
-  if (defaults.count)
-    [NSUserDefaults.standardUserDefaults registerDefaults:defaults];
-}
-
 OSStatus
 install_application_handler (void)
 {
   mac_within_gui (^{
-      if (mac_persistent_loop_p)
-	mac_loop_register_event_loop_preferences ();
-      else if (mac_operating_system_version.major >= 26)
-	/* Disable some event-related macOS 26 features so as to avoid
-	   the following problems:
-	   1. Can't get events from the Carbon main event queue.
-	   2. Rerouting a C-g event to the GUI queue from -[EmacsMenu
-	      performKeyEquivalent:] causes hang.
-	   3. Deferring a menu bar click event may fail and report
-	      "Canceling unexpected menu tracking:".  */
-	[NSUserDefaults.standardUserDefaults
-	    registerDefaults:@{@"NSEventConcurrentProcessingEnabled" : @"NO",
-	      @"NSApplicationUpdateCycleEnabled" : @"NO"}];
-
-      if (!mac_persistent_loop_p
-	  && mac_operating_system_version.major >= 27)
-	/* Native resize and titlebar control gestures fail with the
-	   application update cycle disabled.  Preserve the existing
-	   event-loop settings and select traditional tracking before
-	   AppKit caches these settings.  */
-	[NSUserDefaults.standardUserDefaults
-	    registerDefaults:@{@"NSWindowResizeNeedsTrackingLoop" : @YES,
-	      @"NSControlPrefersGestureRecognizerTracking" : @NO}];
-
       [EmacsApplication sharedApplication];
       emacsController = [[EmacsController alloc] init];
       [NSApp setDelegate:emacsController];
 
-      if (mac_persistent_loop_p)
-	/* `main' runs the application after this request, which
-	   completes at applicationDidFinishLaunching:.  */
-	mac_loop_begin_launch ();
-      else
-	/* Will be stopped at applicationDidFinishLaunching: in the
-	   delegate.  */
-	[NSApp run];
+      /* `main' runs the application after this request, which
+	 completes at applicationDidFinishLaunching:.  */
+      mac_loop_begin_launch ();
     });
 
   return noErr;
@@ -2559,8 +2234,6 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 }
 
 #define DEFAULT_NUM_COLS (80)
-#define RESIZE_CONTROL_WIDTH (15)
-#define RESIZE_CONTROL_HEIGHT (15)
 
 @implementation EmacsWindow
 
@@ -2589,7 +2262,6 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
   [observedTabGroup removeObserver:self forKeyPath:@"overviewVisible"];
 #if !USE_ARC
   [observedTabGroup release];
-  [mouseUpEvent release];
   [super dealloc];
 #endif
 }
@@ -2635,96 +2307,6 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
   XSETFRAME (result, [((EmacsFrameController *) [self delegate]) emacsFrame]);
 
   return result;
-}
-
-- (void)setupResizeTracking:(NSEvent *)event
-{
-  resizeTrackingStartWindowSize = [self frame].size;
-  resizeTrackingStartLocation = [event locationInWindow];
-}
-
-- (void)suspendResizeTracking:(NSEvent *)event
-	   positionAdjustment:(NSPoint)adjustment
-{
-  mouseUpEvent =
-    MRC_RETAIN ([event mouseEventByChangingType:NSEventTypeLeftMouseUp
-				    andLocation:event.locationInWindow]);
-  [NSApp postEvent:mouseUpEvent atStart:YES];
-  MOUSE_TRACKING_SET_RESUMPTION (emacsController, self, resumeResizeTracking);
-}
-
-- (void)resumeResizeTracking
-{
-  NSPoint location;
-  NSEvent *mouseDownEvent;
-  NSRect frame = [self frame];
-  NSPoint hysteresisCancelLocation;
-  NSEvent *hysteresisCancelDragEvent;
-
-  if (resizeTrackingStartLocation.x * 2
-      < resizeTrackingStartWindowSize.width)
-    {
-      location.x = resizeTrackingStartLocation.x;
-      if (resizeTrackingStartLocation.x < RESIZE_CONTROL_WIDTH)
-	hysteresisCancelLocation.x = location.x + RESIZE_CONTROL_WIDTH;
-      else
-	hysteresisCancelLocation.x = location.x;
-    }
-  else
-    {
-      location.x = (NSWidth (frame) + resizeTrackingStartLocation.x
-		    - resizeTrackingStartWindowSize.width);
-      if (resizeTrackingStartLocation.x
-	  >= resizeTrackingStartWindowSize.width - RESIZE_CONTROL_WIDTH)
-	hysteresisCancelLocation.x = location.x - RESIZE_CONTROL_WIDTH;
-      else
-	hysteresisCancelLocation.x = location.x;
-    }
-  if (resizeTrackingStartLocation.y * 2
-      <= resizeTrackingStartWindowSize.height)
-    {
-      location.y = resizeTrackingStartLocation.y;
-      if (resizeTrackingStartLocation.y <= RESIZE_CONTROL_HEIGHT)
-	hysteresisCancelLocation.y = location.y + RESIZE_CONTROL_HEIGHT;
-      else
-	hysteresisCancelLocation.y = location.y;
-    }
-  else
-    {
-      location.y = (NSHeight (frame) + resizeTrackingStartLocation.y
-		    - resizeTrackingStartWindowSize.height);
-      if (resizeTrackingStartLocation.y
-	  > resizeTrackingStartWindowSize.height - RESIZE_CONTROL_HEIGHT)
-	hysteresisCancelLocation.y = location.y - RESIZE_CONTROL_HEIGHT;
-      else
-	hysteresisCancelLocation.y = location.y;
-    }
-
-  hysteresisCancelDragEvent =
-    [mouseUpEvent mouseEventByChangingType:NSEventTypeLeftMouseDragged
-			       andLocation:hysteresisCancelLocation];
-  [NSApp postEvent:hysteresisCancelDragEvent atStart:YES];
-
-  mouseDownEvent = [mouseUpEvent
-		     mouseEventByChangingType:NSEventTypeLeftMouseDown
-				  andLocation:location];
-  MRC_RELEASE (mouseUpEvent);
-  mouseUpEvent = nil;
-  [NSApp postEvent:mouseDownEvent atStart:YES];
-  setupResizeTrackingSuspended = YES;
-}
-
-- (void)sendEvent:(NSEvent *)event
-{
-  if ([event type] == NSEventTypeLeftMouseDown)
-    {
-      if (setupResizeTrackingSuspended)
-	setupResizeTrackingSuspended = NO;
-      else
-	[self setupResizeTracking:event];
-    }
-
-  [super sendEvent:event];
 }
 
 - (BOOL)needsOrderFrontOnUnhide
@@ -2792,12 +2374,7 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
       && [delegate window:self shouldForwardAction:_cmd to:target])
     [NSApp sendAction:_cmd to:target from:sender];
   else
-    {
-      EmacsFrameController *frameController = (EmacsFrameController *) delegate;
-      [frameController setShouldLiveResizeTriggerTransition:YES];
-      [super zoom:sender];
-      [frameController setShouldLiveResizeTriggerTransition:NO];
-    }
+    [super zoom:sender];
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem
@@ -3268,8 +2845,7 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
   /* W7: the frame is actually being deleted, which resolves any
      pending close request for it immediately (rather than waiting for
      the generic mac_loop_select-driven clear).  */
-  if (mac_persistent_loop_p)
-    [self macLoopClearClosePending];
+  [self macLoopClearClosePending];
 
   /* We temporarily run application when closing a window.  That
      causes emacsView to receive drawRect: before closing a tabbed
@@ -4052,7 +3628,7 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
   /* W7: dedupe repeated close clicks while Lisp has not resolved a
      previous DELETE_WINDOW_EVENT for this frame.  */
-  if (mac_persistent_loop_p && ![self macLoopBeginClosePending])
+  if (![self macLoopBeginClosePending])
     return NO;
 
   EVENT_INIT (inev);
@@ -4109,7 +3685,7 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
     }
   else
     {
-      if (leftMouseDragged || [emacsController isMouseTrackingSuspended])
+      if (leftMouseDragged)
 	result = [self hintedWindowFrameSize:proposedFrameSize
 				allowsLarger:YES];
       else
@@ -4125,35 +3701,6 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 	    result.height = NSHeight (screenVisibleFrame);
 	}
     }
-
-  if (leftMouseDragged
-      /* On macOS 27, keep a drag in one live-resize session instead of
-	 repeatedly ending and restarting tracking with synthetic events.
-	 Use the resize transition below, as for an Option-drag.  */
-      && mac_operating_system_version.major < 27
-      /* The persistent loop lets Lisp draw during one live-resize
-	 session on every OS.  */
-      && !mac_persistent_loop_p
-      /* Updating screen during resize by mouse dragging is
-	 implemented by generating fake release and press events.
-	 This seems to be too intrusive for "window snapping"
-	 introduced in macOS 10.12, so we suppress it when pixelwise
-	 frame resizing is in effect.  */
-      && (floor (NSAppKitVersionNumber) <= NSAppKitVersionNumber10_11
-	  || (FRAME_SIZE_HINTS (emacsFrame)->width_inc != 1
-	      && FRAME_SIZE_HINTS (emacsFrame)->height_inc != 1))
-      && (!([currentEvent modifierFlags]
-	    & (NSEventModifierFlagShift | NSEventModifierFlagOption))))
-    {
-      NSRect frameRect = [window frame];
-      NSPoint adjustment = NSMakePoint (result.width - NSWidth (frameRect),
-					result.height - NSHeight (frameRect));
-
-      [window suspendResizeTracking:currentEvent positionAdjustment:adjustment];
-    }
-  else if ([window inLiveResize]
-	   && [currentEvent type] != NSEventTypeLeftMouseUp)
-    [self setupLiveResizeTransition];
 
   return result;
 }
@@ -4511,72 +4058,6 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
   return rootLayer;
 }
 
-- (void)setShouldLiveResizeTriggerTransition:(BOOL)flag
-{
-  shouldLiveResizeTriggerTransition = flag;
-}
-
-- (void)setLiveResizeCompletionHandler:(void (^)(void))block
-{
-  MRC_RELEASE (liveResizeCompletionHandler);
-  liveResizeCompletionHandler = [block copy];
-}
-
-- (void)setupLiveResizeTransition
-{
-  /* W2/W3: the persistent loop lets Lisp redraw live while it is
-     idle, and otherwise keeps the last presentation anchored top-left
-     over the published background colour.  The snapshot layer would
-     hide the live redraw, and building it reads the window tree and
-     faces, which the GUI thread may not do while Lisp is busy.  */
-  if (mac_persistent_loop_p)
-    return;
-
-  if (liveResizeCompletionHandler == nil
-      /* Resizing in Split View on macOS 10.15 no longer
-	 scale-and-blurs non-main window.  */
-      && (!(floor (NSAppKitVersionNumber) <= NSAppKitVersionNumber10_14)
-	  || emacsWindow.isMainWindow))
-    {
-      EmacsFrameController * __unsafe_unretained weakSelf = self;
-      CALayer *layer =
-	[self liveResizeTransitionLayerWithDefaultBackground:YES];
-
-      [CATransaction setDisableActions:YES];
-      [[overlayView layer] addSublayer:layer];
-      [CATransaction commit];
-      [self setVibrantScrollersHidden:YES];
-      [self setLiveResizeCompletionHandler:^{
-	  [NSAnimationContext
-	    runAnimationGroup:^(NSAnimationContext *context) {
-	      [context setDuration:(10 / 60.0)];
-	      layer.beginTime = [layer convertTime:(CACurrentMediaTime ())
-					 fromLayer:nil] + 10 / 60.0;
-	      layer.fillMode = kCAFillModeBackwards;
-	      layer.opacity = 0;
-	    } completionHandler:^{
-	      [layer removeFromSuperlayer];
-	      [weakSelf setVibrantScrollersHidden:NO];
-	    }];
-	}];
-    }
-}
-
-- (void)windowWillStartLiveResize:(NSNotification *)notification
-{
-  if (shouldLiveResizeTriggerTransition)
-    [self setupLiveResizeTransition];
-}
-
-- (void)windowDidEndLiveResize:(NSNotification *)notification
-{
-  if (liveResizeCompletionHandler)
-    {
-      liveResizeCompletionHandler ();
-      [self setLiveResizeCompletionHandler:nil];
-    }
-}
-
 - (NSSize)window:(NSWindow *)window willUseFullScreenContentSize:(NSSize)proposedSize
 {
   return proposedSize;
@@ -4609,16 +4090,12 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
       return;
     }
 
-  if (mac_persistent_loop_p)
-    /* The event may be handled after later transitions; tag it so
-       that only the latest one takes effect.  */
-    [self storeModifyFrameParametersEvent:
-	    (list2 (Fcons (Qfullscreen, value),
-		    Fcons (intern ("mac-fullscreen-serial"),
-			   make_fixnum (++fullscreenParameterSerial))))];
-  else
-    [self storeModifyFrameParametersEvent:(list1 (Fcons (Qfullscreen,
-							 value)))];
+  /* The event may be handled after later transitions; tag it so that
+     only the latest one takes effect.  */
+  [self storeModifyFrameParametersEvent:
+	  (list2 (Fcons (Qfullscreen, value),
+		  Fcons (intern ("mac-fullscreen-serial"),
+			 make_fixnum (++fullscreenParameterSerial))))];
   fullscreenFrameParameterAfterTransition = FULLSCREEN_PARAM_NONE;
 }
 
@@ -4721,8 +4198,6 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 - (void)windowDidEnterFullScreen:(NSNotification *)notification
 {
   [self handleFullScreenTransitionCompletionForWindow:emacsWindow success:YES];
-  /* For resize in a split-view space on OS X 10.11.  */
-  [self setShouldLiveResizeTriggerTransition:YES];
   /* This is necessary for executables compiled on OS X 10.10 or
      earlier and run on OS X 10.11.  Without this, Emacs placed on the
      left side of a split-view space tries to occupy maximum area.  */
@@ -4766,12 +4241,6 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 	  }];
     }];
 
-  [self setShouldLiveResizeTriggerTransition:NO];
-  [self addFullScreenTransitionCompletionHandler:^(EmacsWindow *window,
-						   BOOL success) {
-      if (!success)
-	[weakSelf setShouldLiveResizeTriggerTransition:YES];
-    }];
 
   if (!(floor (NSAppKitVersionNumber) <= NSAppKitVersionNumber10_10_Max))
     {
@@ -6094,8 +5563,7 @@ mac_set_frame_window_background (struct frame *f, unsigned long color)
 				     RED_FROM_ULONG (color) / 255.0,
 				     GREEN_FROM_ULONG (color) / 255.0,
 				     BLUE_FROM_ULONG (color) / 255.0);
-      if (mac_persistent_loop_p)
-	[frameController setEmacsViewLayerBackgroundColor:backgroundColor];
+      [frameController setEmacsViewLayerBackgroundColor:backgroundColor];
 #endif
       /* This formula comes from frame-set-background-mode in
 	 frame.el.  */
@@ -7163,7 +6631,7 @@ static BOOL emacsViewUpdateLayerDisabled;
   int x = NSMinX (aRect), y = NSMinY (aRect);
   int width = NSWidth (aRect), height = NSHeight (aRect);
 
-  if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())
+  if (!mac_loop_gui_has_lisp_access ())
     /* Keep the last presentation; Lisp redraws when it can.  */
     return;
   if (FRAME_METAL_CTX (f))
@@ -7179,7 +6647,7 @@ static BOOL emacsViewUpdateLayerDisabled;
   int x = NSMinX (aRect), y = NSMinY (aRect);
   int width = NSWidth (aRect), height = NSHeight (aRect);
 
-  if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())
+  if (!mac_loop_gui_has_lisp_access ())
     /* Keep the last presentation; Lisp redraws when it can.  */
     return;
   set_global_focus_view_frame (f);
@@ -8210,10 +7678,7 @@ event_phase_to_symbol (NSEventPhase phase)
       if (actualRange)
 	*actualRange = aRange;
     }
-  else if ((mac_persistent_loop_p
-	    || poll_suppress_count != 0 || NILP (Vinhibit_quit))
-	   /* Might be called during the select emulation.  */
-	   && mac_try_content_access ())
+  else if (mac_try_content_access ())
     {
       struct frame *f = [self emacsFrame];
       struct window *w = XWINDOW (f->selected_window);
@@ -8326,7 +7791,7 @@ mac_ts_active_input_location (void)
 }
 
 /* Copy the text snapshot of the frame into SNAPSHOT (S5).  Return
-   whether it is valid; it never is under the old loop.  */
+   whether it is valid.  */
 
 - (BOOL)getTextSnapshot:(struct mac_text_snapshot *)snapshot
 {
@@ -8346,7 +7811,7 @@ mac_ts_active_input_location (void)
   if (![self hasMarkedText])
     return NSMakeRange (NSNotFound, 0);
 
-  if (!(mac_persistent_loop_p && pthread_main_np ()))
+  if (!pthread_main_np ())
     location = mac_ts_active_input_location ();
   else if (mac_try_content_access ())
     {
@@ -8374,8 +7839,7 @@ mac_ts_active_input_location (void)
   struct frame *f = [self emacsFrame];
   NSRange result;
 
-  /* Might be called during the select emulation, or while Lisp is
-     busy under the persistent loop.  */
+  /* Might be called while Lisp is busy.  */
   if (!mac_try_content_access ())
     {
       struct mac_text_snapshot snapshot;
@@ -8433,7 +7897,7 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
 void
 mac_publish_text_snapshot (struct frame *f)
 {
-  if (!mac_persistent_loop_p || !FRAME_MAC_P (f) || !FRAME_MAC_WINDOW (f)
+  if (!FRAME_MAC_P (f) || !FRAME_MAC_WINDOW (f)
       || !WINDOWP (f->selected_window)
       || !BUFFERP (XWINDOW (f->selected_window)->contents))
     return;
@@ -8642,9 +8106,7 @@ mac_publish_text_snapshot (struct frame *f)
 
   /* Don't try to get buffer contents as the gap might be being
      altered. */
-  if (MAC_AX_BUFFER_MAY_BE_ALTERED_P ()
-      /* Might be called during the select emulation.  */
-      || !mac_try_content_access ())
+  if (!mac_try_content_access ())
     return nil;
 
   range = CFRangeMake (0, mac_ax_number_of_characters (f));
@@ -8757,8 +8219,7 @@ mac_loop_metal_sync_frame_ready (void)
   /* AppKit animates fullscreen transitions itself, with live-resize
      notifications; waiting for Lisp there only lengthens the
      animation's main-thread stalls.  */
-  if (mac_persistent_loop_p && FRAME_METAL_CTX (f)
-      && mac_loop_resize_frame_wait () > 0
+  if (FRAME_METAL_CTX (f) && mac_loop_resize_frame_wait () > 0
       && ![FRAME_CONTROLLER (f) macLoopFullScreenTransitionInProgress])
     {
       double start = mac_system_uptime ();
@@ -8877,7 +8338,7 @@ mac_loop_metal_sync_frame_ready (void)
 
 - (void)viewFrameDidChange:(NSNotification *)notification
 {
-  if (mac_persistent_loop_p && [self inLiveResize])
+  if ([self inLiveResize])
     {
       [self macLoopLiveResizeFrameDidChange];
       return;
@@ -10613,7 +10074,7 @@ mac_get_default_scroll_bar_height (struct frame *f)
 - (void)noteToolBarMouseMovement:(NSEvent *)event
 {
   /* Help echo only; skip it while Lisp is busy.  */
-  if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())
+  if (!mac_loop_gui_has_lisp_access ())
     return;
 
   struct frame *f = emacsFrame;
@@ -11021,65 +10482,6 @@ free_frame_tool_bar (struct frame *f)
  ************************************************************************/
 
 @implementation EmacsFontPanel
-
-#if !USE_ARC
-- (void)dealloc
-{
-  [mouseUpEvent release];
-  [super dealloc];
-}
-#endif
-
-- (void)suspendSliderTracking:(NSEvent *)event
-{
-  mouseUpEvent =
-    MRC_RETAIN ([event mouseEventByChangingType:NSEventTypeLeftMouseUp
-				    andLocation:[event locationInWindow]]);
-  [NSApp postEvent:mouseUpEvent atStart:YES];
-  MOUSE_TRACKING_SET_RESUMPTION (emacsController, self, resumeSliderTracking);
-}
-
-- (void)resumeSliderTracking
-{
-  NSPoint location = [mouseUpEvent locationInWindow];
-  NSRect trackRect;
-  NSEvent *mouseDownEvent;
-
-  trackRect = [trackedSlider convertRect:[[trackedSlider cell] trackRect]
-			     toView:nil];
-  if (location.x < NSMinX (trackRect))
-    location.x = NSMinX (trackRect);
-  else if (location.x >= NSMaxX (trackRect))
-    location.x = NSMaxX (trackRect) - 1;
-  if (location.y <= NSMinY (trackRect))
-    location.y = NSMinY (trackRect) + 1;
-  else if (location.y > NSMaxY (trackRect))
-    location.y = NSMaxY (trackRect);
-
-  mouseDownEvent = [mouseUpEvent
-		     mouseEventByChangingType:NSEventTypeLeftMouseDown
-				  andLocation:location];
-  MRC_RELEASE (mouseUpEvent);
-  mouseUpEvent = nil;
-  [NSApp postEvent:mouseDownEvent atStart:YES];
-}
-
-- (void)sendEvent:(NSEvent *)event
-{
-  if ([event type] == NSEventTypeLeftMouseDown)
-    {
-      NSView *contentView = [self contentView], *hitView;
-
-      hitView = [contentView hitTest:[[contentView superview]
-				       convertPoint:[event locationInWindow]
-				       fromView:nil]];
-      if ([hitView isKindOfClass:NSSlider.class])
-	trackedSlider = (NSSlider *) hitView;
-    }
-
-  [super sendEvent:event];
-}
-
 @end				// EmacsFontPanel
 
 @implementation EmacsController (FontPanel)
@@ -11130,7 +10532,6 @@ free_frame_tool_bar (struct frame *f)
 - (void)changeFont:(NSFontManager *)sender
 {
   EmacsFontPanel *fontPanel = (EmacsFontPanel *) [sender fontPanel:NO];
-  NSEvent *currentEvent;
   NSFont *oldFont, *newFont;
   Lisp_Object arg = Qnil;
   struct input_event inev;
@@ -11140,10 +10541,6 @@ free_frame_tool_bar (struct frame *f)
      mac_font_dialog) if the panel is shown for the first time.  */
   if ([[fontPanel delegate] isMemberOfClass:EmacsFontDialogController.class])
     return;
-
-  currentEvent = [NSApp currentEvent];
-  if ([currentEvent type] == NSEventTypeLeftMouseDragged)
-    [fontPanel suspendSliderTracking:currentEvent];
 
   oldFont = [self fontForFace:DEFAULT_FACE_ID character:0 position:-1
 		       object:Qnil];
@@ -11474,75 +10871,6 @@ mac_peek_next_event (void)
   return event;
 }
 
-/* Return next event in the main queue if it exists and is a mouse
-   down on the menu bar.  Otherwise return NULL.  */
-
-static EventRef
-peek_if_next_event_activates_menu_bar (void)
-{
-  EventRef event = mac_peek_next_event ();
-  OSType event_class;
-  UInt32 event_kind;
-
-  if (event == NULL)
-    return NULL;
-
-  event_class = GetEventClass (event);
-  event_kind = GetEventKind (event);
-  if (event_class == kEventClassKeyboard
-      && event_kind == kEventRawKeyDown)
-    {
-      UInt32 code;
-      Boolean isEnabled;
-
-      if (_IsSymbolicHotKeyEvent (event, &code, &isEnabled)
-	  && isEnabled && code == 7) /* Move focus to the menu bar */
-	{
-	  OSStatus err;
-	  UInt32 modifiers;
-
-	  err = GetEventParameter (event, kEventParamKeyModifiers, typeUInt32,
-				   NULL, sizeof (UInt32), NULL, &modifiers);
-	  if (err == noErr
-	      && !(modifiers
-		   & ((mac_pass_command_to_system ? 0 : cmdKey)
-		      | (mac_pass_control_to_system ? 0 : controlKey))))
-	    return event;
-	}
-    }
-  else if (event_class == kEventClassMouse
-	   && event_kind == kEventMouseDown)
-    {
-      OSStatus err;
-      HIPoint point;
-
-      err = GetEventParameter (event, kEventParamMouseLocation,
-			       typeHIPoint, NULL, sizeof (HIPoint), NULL,
-			       &point);
-      if (err == noErr)
-	{
-	  NSRect baseScreenFrame = mac_get_base_screen_frame ();
-	  NSPoint mouseLocation =
-	    NSMakePoint (point.x + NSMinX (baseScreenFrame),
-			 - point.y + NSMaxY (baseScreenFrame));
-	  NSScreen *screen = [NSScreen screenContainingPoint:mouseLocation];
-
-	  if ([screen canShowMenuBar])
-	    {
-	      NSRect frame = [screen frame];
-	      CGFloat menuBarHeight = [[NSApp mainMenu] menuBarHeight];
-
-	      frame.origin.y = NSMaxY (frame) - menuBarHeight;
-	      frame.size.height = menuBarHeight;
-	      if (NSMouseInRect (mouseLocation, frame, NO))
-		return event;
-	    }
-	}
-    }
-
-  return NULL;
-}
-
 /* Emacs calls this whenever it wants to read an input event from the
    user. */
 
@@ -11608,12 +10936,7 @@ mac_read_socket (struct terminal *terminal, struct input_event *hold_quit)
 	}
 
       mac_draw_queue_sync ();
-      handling_queued_nsevents_p = true;
-      if (mac_persistent_loop_p)
-	count = mac_loop_read_socket_events (hold_quit);
-      else
-	count = [emacsController handleQueuedNSEventsWithHoldingQuitIn:hold_quit];
-      handling_queued_nsevents_p = false;
+      count = mac_loop_read_socket_events (hold_quit);
 
       /* If the focus was just given to an autoraising frame,
 	 raise it now.  */
@@ -12026,11 +11349,6 @@ mac_font_dialog (struct frame *f)
 				 Menu
  ************************************************************************/
 
-static void update_services_menu_types (void);
-static void mac_fake_menu_bar_click (EventPriority);
-static void mac_press_native_menubar (struct frame *, NSInteger, NSString *,
-				     EmacsMenu *, NSWindow *);
-
 static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localizedMenuTitleForWindow;
 
 /* Maximum interval time in seconds between key down and modifier key
@@ -12153,154 +11471,31 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 
 @implementation EmacsMenu
 
-- (BOOL)nativeTracking { return nativeTracking; }
 - (BOOL)persistentTracking { return persistentTracking; }
-- (BOOL)nativePreparing { return nativePreparing; }
-- (unsigned long)nativeGeneration { return nativeGeneration; }
-- (BOOL)nativeNeedsPreparation { return nativeNeedsPreparation; }
-- (void)setNativeActivationPrepared { nativeActivationPrepared = YES; }
 - (unsigned long)persistentMenuGeneration { return persistentMenuGeneration; }
 - (void)setPersistentMenuGeneration:(unsigned long)generation
 {
   persistentMenuGeneration = generation;
 }
 
-- (BOOL)cancelNativeTrackingForQuitEvent:(NSEvent *)event
+- (BOOL)cancelTrackingForQuitEvent:(NSEvent *)event
 {
   /* D15: under the persistent loop, the first quit key during
      menu-bar tracking cancels it and is consumed; it sets no quit
      request and runs no Lisp.  */
-  if (mac_persistent_loop_p)
-    {
-      if (self != NSApp.mainMenu || !persistentTracking || popup_activated ()
-	  || event.type != NSEventTypeKeyDown
-	  || !mac_keydown_cgevent_quit_p (event.coreGraphicsEvent))
-	return NO;
-
-      MAC_TRACE_LOOP ("quit key cancels menu-bar tracking\n");
-      for (NSMenuItem *item in self.itemArray)
-	[item.submenu cancelTrackingWithoutAnimation];
-      [self cancelTrackingWithoutAnimation];
-      [NSApp postDummyEvent];
-      return YES;
-    }
-
-  if (self != NSApp.mainMenu || !nativeTracking || popup_activated ()
-      || mac_operating_system_version.major < 27
-      || !mac_native_menus_enabled_p ()
+  if (self != NSApp.mainMenu || !persistentTracking || popup_activated ()
       || event.type != NSEventTypeKeyDown
       || !mac_keydown_cgevent_quit_p (event.coreGraphicsEvent))
     return NO;
 
-  mac_trace_menu_lifecycle ("native-keyboard-quit", self, 0);
-  if (nativeRetryMenu)
-    [NSObject cancelPreviousPerformRequestsWithTarget:self
-		selector:@selector(cancelAndRetryNativeMenu:)
-		object:nativeRetryMenu];
-  nativeRetryMenu = nil;
-  nativeRetryPending = NO;
-  nativeActivationPrepared = NO;
+  MAC_TRACE_LOOP ("quit key cancels menu-bar tracking\n");
   /* Cancel the attached submenus as well as the root: cancelling only
-     the root has not reliably ended AppKit's native tracking loop.  */
+     the root has not reliably ended AppKit's tracking loop.  */
   for (NSMenuItem *item in self.itemArray)
     [item.submenu cancelTrackingWithoutAnimation];
   [self cancelTrackingWithoutAnimation];
   [NSApp postDummyEvent];
   return YES;
-}
-
-- (void)restoreNativeHelpMenu
-{
-  if (!nativeHelpPlaceholder)
-    return;
-  /* A newer root may already have installed its own Help menu.  */
-  if (NSApp.helpMenu == nativeHelpPlaceholder)
-    NSApp.helpMenu = nativeSavedHelpMenu;
-  MRC_RELEASE (nativeSavedHelpMenu);
-  nativeSavedHelpMenu = nil;
-  MRC_RELEASE (nativeHelpPlaceholder);
-  nativeHelpPlaceholder = nil;
-  mac_trace_menu_lifecycle ("restore-help-search", self, 0);
-}
-
-- (void)scheduleNativeRetry:(NSMenu *)menu
-{
-  if (!nativeNeedsPreparation || nativeRetryPending
-      || self != NSApp.mainMenu || menu.supermenu != self)
-    return;
-  nativeRetryPending = YES;
-  nativeRetryMenu = menu; /* Retained by the delayed perform request.  */
-  /* menuNeedsUpdate: permits changing items before AppKit displays them.
-     Do not flash the previous Lisp snapshot while waiting for the safe
-     preparation context.  Keep the submenu itself attached so that the
-     tracking-mode callback can still cancel the actual tracking session.
-     The retry performs a deep rebuild before pressing this heading.  */
-  mac_trace_menu_lifecycle ("hide-worker-submenu", menu, menu.numberOfItems);
-  [menu removeAllItems];
-  [self performSelector:@selector(cancelAndRetryNativeMenu:)
-	     withObject:menu afterDelay:0
-		inModes:@[NSEventTrackingRunLoopMode]];
-}
-
-- (void)cancelAndRetryNativeMenu:(NSMenu *)menu
-{
-  nativeRetryMenu = nil;
-  NSInteger index = [self indexOfItemWithSubmenu:menu];
-  if (self != NSApp.mainMenu || !nativeTracking
-      || !nativeNeedsPreparation || index < 0)
-    {
-      nativeRetryPending = NO;
-      return;
-    }
-  NSString *title = [self itemAtIndex:index].title;
-  /* Help's search field can make its popup the key window by this point.
-     Capture the owning document window, then require it to regain key
-     status and still match the selected frame before retrying.  */
-  NSWindow *window = NSApp.mainWindow;
-  if (getenv ("EMACS_MAC_TRACE_MENUS"))
-    NSLog (@"Emacs worker menu: capture index=%ld owner=%p (%@) key=%p (%@)",
-	   (long) index, window, NSStringFromClass (window.class),
-	   NSApp.keyWindow, NSStringFromClass (NSApp.keyWindow.class));
-  nativeRetryCancelling = YES;
-  mac_trace_menu_lifecycle ("cancel-worker-submenu", menu, index);
-  [menu cancelTrackingWithoutAnimation];
-  [NSApp postDummyEvent];
-  /* This runs only after native tracking has returned.  The copied
-     block retains native request objects, not an unrooted Lisp frame.  */
-  mac_within_lisp_deferred_if_gui_thread (^{
-      if (getenv ("EMACS_MAC_TRACE_MENUS"))
-	NSLog (@"Emacs worker menu: Lisp resumed gui=%d", pthread_main_np ());
-      @try
-	{
-	  BOOL __block retry;
-	  mac_within_gui (^{ retry = nativeRetryPending; });
-	  if (retry)
-	    mac_press_native_menubar (SELECTED_FRAME (), index, title, self, window);
-	}
-      @finally
-	{
-	  mac_within_gui (^{
-	      nativeRetryPending = NO;
-	      nativeRetryCancelling = NO;
-	    });
-	}
-    });
-}
-
-- (void)dealloc
-{
-  [self restoreNativeHelpMenu];
-  /* Queue cleanup behind any selection already captured from this root.
-     The block must not retain SELF while it is being deallocated.  */
-  unsigned long generation = nativeGeneration;
-  mac_trace_menu_lifecycle ("dealloc-root", self, generation);
-  if (generation)
-    mac_within_lisp_deferred_if_gui_thread (^{
-        mac_release_native_menubar (generation);
-      });
-#if !USE_ARC
-  [super dealloc];
-#endif
 }
 
 /* Forward unprocessed shortcut key events to the first responder of
@@ -12311,7 +11506,7 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
   NSWindow *window;
   NSResponder *firstResponder;
 
-  if ([self cancelNativeTrackingForQuitEvent:theEvent])
+  if ([self cancelTrackingForQuitEvent:theEvent])
     return YES;
 
   if ([super performKeyEquivalent:theEvent])
@@ -12460,32 +11655,13 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 
 - (void)menuDidBeginTracking:(NSNotification *)notification
 {
-  mac_trace_menu_lifecycle ("begin", self, 0);
-  if (mac_persistent_loop_p)
-    {
-      persistentTracking = !popup_activated ();
-      if (persistentTracking)
-	__atomic_store_n (&mac_menu_bar_tracking, true, __ATOMIC_RELEASE);
-      return;
-    }
-  if (nativeTracking)
-    return;
-  if ((nativeGeneration || nativeNeedsPreparation) && !popup_activated ())
-    {
-      nativeTracking = YES;
-      nativeActivationPrepared = NO;
-      return;
-    }
-  if (!popup_activated () && !mac_persistent_loop_p)
-    {
-      NSLog (@"Canceling unexpected menu tracking: %@", [NSApp currentEvent]);
-      [self cancelTracking];
-    }
+  persistentTracking = !popup_activated ();
+  if (persistentTracking)
+    __atomic_store_n (&mac_menu_bar_tracking, true, __ATOMIC_RELEASE);
 }
 
 - (void)menuDidEndTracking:(NSNotification *)notification
 {
-  mac_trace_menu_lifecycle ("end", self, 0);
   if (persistentTracking)
     {
       __atomic_store_n (&mac_menu_bar_tracking, false, __ATOMIC_RELEASE);
@@ -12496,69 +11672,6 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 	mac_loop_queue_lisp_block (^{ mac_queue_menu_bar_refresh (); });
     }
   persistentTracking = NO;
-  nativeTracking = NO;
-  [self restoreNativeHelpMenu];
-  if (nativeRetryPending && !nativeRetryCancelling)
-    {
-      [NSObject cancelPreviousPerformRequestsWithTarget:self
-		    selector:@selector(cancelAndRetryNativeMenu:)
-		    object:nativeRetryMenu];
-      nativeRetryMenu = nil;
-      nativeRetryPending = NO;
-    }
-}
-
-- (void)update
-{
-  mac_trace_menu_lifecycle ("update", self, 0);
-  if (mac_worker_menus_enabled_p () && mac_native_menus_enabled_p ()
-      && mac_operating_system_version.major >= 27
-      && self == NSApp.mainMenu && !nativePreparing && !nativeTracking
-      && !popup_activated () && !mac_select_allow_lisp_evaluation)
-    {
-      nativeNeedsPreparation = !(nativeActivationPrepared && nativeGeneration);
-      if (nativeNeedsPreparation && !nativeHelpPlaceholder
-	  && NSApp.helpMenu.supermenu == self)
-	{
-	  /* AppKit adds Help search independently of our submenu items.
-	     An off-bar Help menu suppresses that UI during the unprepared
-	     tracking attempt; nil would let AppKit choose a menu itself.  */
-	  nativeSavedHelpMenu = MRC_RETAIN (NSApp.helpMenu);
-	  nativeHelpPlaceholder = [[NSMenu alloc] initWithTitle:@""];
-	  NSApp.helpMenu = nativeHelpPlaceholder;
-	  mac_trace_menu_lifecycle ("suppress-help-search", self, 0);
-	}
-    }
-  if (mac_native_menus_enabled_p ()
-      && mac_operating_system_version.major >= 27
-      && self == [NSApp mainMenu] && !nativePreparing && !nativeTracking
-      && !popup_activated () && mac_select_allow_lisp_evaluation)
-    {
-      unsigned long previousGeneration = nativeGeneration;
-      [self restoreNativeHelpMenu];
-      nativeNeedsPreparation = NO;
-      nativeActivationPrepared = NO;
-      nativePreparing = YES;
-      @try
-        {
-          mac_within_lisp (^{
-              nativeGeneration = mac_prepare_native_menubar ();
-            });
-        }
-      @finally
-        {
-          nativePreparing = NO;
-        }
-      /* A selection may already be queued when this update prepares a
-         newer command table.  Retire the old table on the same FIFO,
-         rather than replacing its Lisp roots during preparation.  */
-      if (previousGeneration)
-        mac_within_lisp_deferred_if_gui_thread (^{
-            mac_release_native_menubar (previousGeneration);
-          });
-      mac_trace_menu_lifecycle ("prepared", self, nativeGeneration);
-    }
-  [super update];
 }
 
 @end				// EmacsMenu
@@ -12822,16 +11935,11 @@ mac_fill_menu_bar_submenu (unsigned long serial, widget_value *wv,
 
 - (void)menuNeedsUpdate:(NSMenu *)menu
 {
-  if (mac_persistent_loop_p)
-    mac_menu_bar_refresh_on_open (menu);
-  else if ([NSApp.mainMenu isKindOfClass:EmacsMenu.class])
-    [(EmacsMenu *) NSApp.mainMenu scheduleNativeRetry:menu];
+  mac_menu_bar_refresh_on_open (menu);
 }
 
 - (void)menuWillOpen:(NSMenu *)menu
 {
-  if (!mac_persistent_loop_p)
-    return;
   if (mac_menu_open_menus == nil)
     mac_menu_open_menus = [[NSMutableSet alloc] init];
   [mac_menu_open_menus addObject:menu];
@@ -12861,9 +11969,6 @@ mac_fill_menu_bar_submenu (unsigned long serial, widget_value *wv,
       return;
     }
 
-  if (!mac_persistent_loop_p)
-    return;
-
   /* D13: outside a parked popup (menu-bar highlighting), help-echo is
      advisory and must never block the GUI thread waiting for Lisp.
      Queue it fire-and-forget and coalesce so that only the latest of
@@ -12884,57 +11989,6 @@ mac_fill_menu_bar_submenu (unsigned long serial, widget_value *wv,
       show_help_echo ((helpObject && mac_menu_bar_snapshot_live_p (snapshot)
 		       ? helpObject.lispObject : Qnil),
 		      Qnil, Qnil, Qnil);
-    });
-}
-
-/* Start menu bar tracking and return when it is completed.
-
-   The tracking is done inside the application loop because otherwise
-   we can't pop down an error dialog caused by a Service invocation,
-   for example.  */
-
-- (void)trackMenuBar
-{
-  mac_within_app (^{
-      mac_trace_menu_lifecycle ("pump-enter", [NSApp mainMenu], 0);
-      /* Mac OS X 10.2 doesn't regard untilDate:nil as polling.  */
-      NSDate *expiration = [NSDate distantPast];
-
-      while (1)
-	{
-	  NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
-				  untilDate:expiration
-				  inMode:NSDefaultRunLoopMode dequeue:YES];
-	  NSDate *limitDate;
-
-	  if (event == nil)
-	    {
-	      /* There can be a pending mouse down event on the menu
-		 bar at least on Mac OS X 10.5 with Command-Shift-/ ->
-		 search with keyword -> select.  Also, some
-		 kEventClassMenu event is still pending on Mac OS X
-		 10.6 when selecting menu item via search field on the
-		 Help menu.  */
-	      if (mac_peek_next_event ())
-		continue;
-	    }
-	  else
-	    {
-	      [NSApp sendEvent:event];
-	      continue;
-	    }
-
-	  /* This seems to be necessary for selecting menu item via
-	     search field in the Help menu on Mac OS X 10.6.  */
-	  limitDate = [[NSRunLoop currentRunLoop]
-			limitDateForMode:NSDefaultRunLoopMode];
-	  if (limitDate == nil
-	      || [limitDate timeIntervalSinceNow] > 0)
-	    break;
-	}
-
-      mac_trace_menu_lifecycle ("pump-exit", [NSApp mainMenu], 0);
-      [emacsController updatePresentationOptions];
     });
 }
 
@@ -12987,7 +12041,7 @@ mac_fill_menu_bar_submenu (unsigned long serial, widget_value *wv,
 			   resultLimit:(NSInteger)resultLimit
 		    matchedItemHandler:(void (^)(NSArray *items))handleMatchedItems
 {
-  if (mac_persistent_loop_p && !pthread_main_np ())
+  if (!pthread_main_np ())
     {
       /* AppKit may search on a background queue; read the topics on
 	 the GUI thread under the access rules.  */
@@ -13106,150 +12160,6 @@ mac_track_menu_with_block (void (^block) (void))
   Vshow_help_function = old_show_help_function;
 }
 
-/* Activate the menu bar of frame F.
-
-   To activate the menu bar, we use the button-press event that was
-   saved in dpyinfo->saved_menu_event.
-
-   Return the selection.  */
-
-static int
-mac_activate_menubar_1 (struct frame *f)
-{
-  struct mac_display_info *dpyinfo = FRAME_DISPLAY_INFO (f);
-  EventRef menu_event;
-
-  update_services_menu_types ();
-  menu_event = dpyinfo->saved_menu_event;
-  if (menu_event)
-    {
-      dpyinfo->saved_menu_event = NULL;
-      PostEventToQueue (GetMainEventQueue (), menu_event, kEventPriorityHigh);
-      ReleaseEvent (menu_event);
-    }
-  else
-    mac_fake_menu_bar_click (kEventPriorityHigh);
-  mac_menu_set_in_use (true);
-  mac_track_menu_with_block (^{[emacsController trackMenuBar];});
-  mac_menu_set_in_use (false);
-
-  return [emacsController getAndClearMenuItemSelection];
-}
-
-/* Activate the menu bar of frame F.
-   This is called from keyboard.c when it gets the
-   MENU_BAR_ACTIVATE_EVENT out of the Emacs event queue.
-
-   To activate the menu bar, we call mac_activate_menubar_1.
-
-   But first we recompute the menu bar contents (the whole tree).
-
-   The reason for saving the button event until here, instead of
-   passing it to the toolkit right away, is that we can safely
-   execute Lisp code.  */
-
-void
-mac_activate_menubar (struct frame *f)
-{
-  int selection;
-
-  eassert (FRAME_MAC_P (f));
-
-  set_frame_menubar (f, true);
-  block_input ();
-  selection = mac_activate_menubar_1 (f);
-  unblock_input ();
-
-  if (selection)
-    find_and_call_menu_selection (f, f->menu_bar_items_used, f->menu_bar_vector,
-				  (void *) (intptr_t) selection);
-}
-
-/* Press a native menu item using a bridge that permits menu preparation.
-   A deferred retry must still belong to the same root, heading and window.  */
-
-static void
-mac_press_native_menubar (struct frame *f, NSInteger index, NSString *title,
-			 EmacsMenu *expectedMenu, NSWindow *expectedWindow)
-{
-  if (expectedMenu)
-    {
-      bool __block current;
-      mac_within_gui (^{
-	  current = expectedMenu == NSApp.mainMenu
-	    && expectedWindow == NSApp.keyWindow
-	    && FRAME_LIVE_P (f) && FRAME_MAC_P (f)
-	    && FRAME_MAC_WINDOW_OBJECT (f) == expectedWindow;
-	  if (getenv ("EMACS_MAC_TRACE_MENUS"))
-	    NSLog (@"Emacs worker menu: ownership current=%d root=%d key=%d frame=%d expected=%p key-now=%p main-now=%p",
-		   current, expectedMenu == NSApp.mainMenu,
-		   expectedWindow == NSApp.keyWindow,
-		   FRAME_LIVE_P (f) && FRAME_MAC_P (f)
-		   && FRAME_MAC_WINDOW_OBJECT (f) == expectedWindow,
-		   expectedWindow, NSApp.keyWindow, NSApp.mainWindow);
-	});
-      if (!current)
-	return;
-    }
-
-  set_frame_menubar (f, true);
-  mac_within_gui_allowing_inner_lisp (^{
-      /* Menu preparation can synchronously call Lisp during the press.
-         This bridge permits it even outside the select event loop.  */
-      bool saved_allow_lisp = mac_select_allow_lisp_evaluation;
-      mac_select_allow_lisp_evaluation = true;
-      @try
-	{
-	  mac_within_app (^{
-	      [emacsController showMenuBar];
-	      [[NSApp mainMenu] update];
-	      NSMenu *menu = [NSApp mainMenu];
-	      NSMenuItem *item = index >= 0 && index < menu.numberOfItems
-		? MRC_RETAIN ([menu itemAtIndex:index]) : nil;
-	      @try
-		{
-		  BOOL pressed = NO;
-		  if (item && item.enabled && !item.hidden
-		      && (!title || [item.title isEqualToString:title])
-		      && (!expectedWindow || NSApp.keyWindow == expectedWindow)
-		      && (!expectedMenu
-			  || ([menu isKindOfClass:EmacsMenu.class]
-			      && [(EmacsMenu *) menu nativeGeneration]
-			      && ![(EmacsMenu *) menu nativeNeedsPreparation])))
-		    {
-		      if (mac_worker_menus_enabled_p ()
-			  && [menu isKindOfClass:EmacsMenu.class])
-			[(EmacsMenu *) menu setNativeActivationPrepared];
-		      pressed = [item accessibilityPerformPress];
-		    }
-		  mac_trace_menu_lifecycle ("keyboard-press", [NSApp mainMenu],
-				    pressed);
-		}
-	      @finally
-		{
-		  MRC_RELEASE (item);
-		}
-	    });
-	}
-      @finally
-	{
-	  mac_select_allow_lisp_evaluation = saved_allow_lisp;
-	}
-    });
-}
-
-/* Return false only outside the native opt-in: a failed native press
-   may already have changed menu tracking state.  */
-bool
-mac_focus_native_menubar (struct frame *f)
-{
-  if (mac_operating_system_version.major < 27
-      || !mac_native_menus_enabled_p ())
-    return false;
-  mac_press_native_menubar (f, 0, nil, nil, nil);
-  return true;
-}
-
 /* Set up the initial menu bar.  */
 
 static void
@@ -13349,13 +12259,13 @@ mac_menu_bar_title (const char *name)
 
 /* Fill menu bar with the items defined by FIRST_WV.  If DEEP_P,
    consider the entire menu trees we supply, rather than just the menu
-   bar item names.  Return false if native tracking prevented the update,
+   bar item names.  Return false if menu-bar tracking prevented the update,
    so the caller can invalidate its display cache and retry.
 
-   Under the persistent loop, GENERATION is the snapshot generation
-   the caller (set_frame_menubar) already published for the command
-   table these widget values were built from (0 if not applicable, or
-   under the old loop where it is unused).  When this fill installs a
+   GENERATION is the snapshot generation the caller
+   (set_frame_menubar) already published for the command table these
+   widget values were built from (0 if not applicable).  When this fill
+   installs a
    new root menu, that root is stamped with GENERATION so that
    -[EmacsMenu setMenuItemSelectionToTag:] can bind a later selection
    back to the matching snapshot (D4/D5).  */
@@ -13376,8 +12286,7 @@ mac_fill_menubar (widget_value *first_wv, bool deep_p,
 	 tracks the menu bar, so an idle update can arrive then; the
 	 caller retries after tracking ends.  */
       if ([mainMenu isKindOfClass:EmacsMenu.class]
-          && ([(EmacsMenu *) mainMenu nativeTracking]
-	      || [(EmacsMenu *) mainMenu persistentTracking]))
+	  && [(EmacsMenu *) mainMenu persistentTracking])
 	{
 	  if (mac_loop_test_recording_p)
 	    mac_loop_test_record ("menu fill deferred while tracking");
@@ -13409,8 +12318,6 @@ mac_fill_menubar (widget_value *first_wv, bool deep_p,
 
 	  submenu = [[NSMenu alloc] initWithTitle:title];
 	  [submenu setAutoenablesItems:NO];
-	  if (mac_worker_menus_enabled_p ())
-	    [submenu setDelegate:emacsController];
 
 	  if (title == localizedMenuTitleForHelp)
 	    helpMenu = submenu;
@@ -13433,66 +12340,13 @@ mac_fill_menubar (widget_value *first_wv, bool deep_p,
 
       if (needs_update_p)
 	{
-
-          if ([mainMenu isKindOfClass:EmacsMenu.class]
-              && [(EmacsMenu *) mainMenu nativePreparing])
-            {
-              /* Keep the root, and matching top-level items/submenus,
-                 alive across AppKit's update-to-tracking transition.  */
-              NSInteger count = [newMenu numberOfItems];
-              for (NSInteger i = 0; i < count; i++)
-                {
-                  NSMenuItem *item = MRC_RETAIN ([newMenu itemAtIndex:0]);
-                  [newMenu removeItem:item];
-                  NSMenuItem *old = i + 1 < [mainMenu numberOfItems]
-                    ? [mainMenu itemAtIndex:i + 1] : nil;
-                  if (old && [old.title isEqualToString:item.title]
-                      && old.submenu && item.submenu)
-                    {
-                      NSMenu *source = item.submenu, *target = old.submenu;
-                      [target removeAllItems];
-                      while ([source numberOfItems])
-                        {
-                          NSMenuItem *child = MRC_RETAIN ([source itemAtIndex:0]);
-                          [source removeItem:child];
-                          [target addItem:child];
-                          MRC_RELEASE (child);
-                        }
-                      [target setDelegate:emacsController];
-                      if (source == helpMenu) helpMenu = target;
-                      if (source == windowMenu) windowMenu = target;
-                    }
-                  else
-                    {
-                      if (old) [mainMenu removeItemAtIndex:i + 1];
-                      [mainMenu insertItem:item atIndex:i + 1];
-                    }
-                  MRC_RELEASE (item);
-                }
-              while ([mainMenu numberOfItems] > count + 1)
-                [mainMenu removeItemAtIndex:[mainMenu numberOfItems] - 1];
-            }
-          else
-            {
-	  /* Tracking-end can precede visual dismissal on macOS 27.
-	     Cancel before detaching any part of the old tree, while its
-	     observers are still registered, to avoid a stranded popup.  */
-	  if (mac_operating_system_version.major >= 27
-	      && mac_native_menus_enabled_p ())
-	    {
-	      mac_trace_menu_lifecycle ("cancel-before-replace", mainMenu, 0);
-	      [mainMenu cancelTracking];
-	      mac_trace_menu_lifecycle ("cancel-before-replace-done", mainMenu, 0);
-	    }
 	  NSMenuItem *appleMenuItem = MRC_RETAIN ([mainMenu itemAtIndex:0]);
 
-	  mac_trace_menu_lifecycle ("detach-apple-item", mainMenu, 0);
 	  [mainMenu removeItem:appleMenuItem];
 	  [newMenu insertItem:appleMenuItem atIndex:0];
 	  MRC_RELEASE (appleMenuItem);
 
 	  [NSApp setMainMenu:newMenu];
-            }
 
 	  if (windowMenu && [windowMenu numberOfItems])
 	    [NSApp setWindowsMenu:windowMenu];
@@ -13505,63 +12359,6 @@ mac_fill_menubar (widget_value *first_wv, bool deep_p,
       applied = true;
     });
   return applied;
-}
-
-static void
-mac_fake_menu_bar_click (EventPriority priority)
-{
-  OSStatus err = noErr;
-  const EventKind kinds[] = {kEventMouseDown, kEventMouseUp};
-  Point point = {0, 10};	/* vertical, horizontal */
-  NSScreen *mainScreen = [NSScreen mainScreen];
-  int i;
-
-  if ([mainScreen canShowMenuBar])
-    {
-      NSRect baseScreenFrame, mainScreenFrame;
-
-      baseScreenFrame = mac_get_base_screen_frame ();
-      mainScreenFrame = [mainScreen frame];
-      point.h += NSMinX (mainScreenFrame) - NSMinX (baseScreenFrame);
-      point.v += - NSMaxY (mainScreenFrame) + NSMaxY (baseScreenFrame);
-    }
-
-  mac_within_gui (^{[emacsController showMenuBar];});
-
-  /* CopyEventAs is not available on Mac OS X 10.2.  */
-  for (i = 0; i < 2; i++)
-    {
-      EventRef event;
-
-      if (err == noErr)
-	err = CreateEvent (NULL, kEventClassMouse, kinds[i], 0,
-			   kEventAttributeNone, &event);
-      if (err == noErr)
-	{
-	  const UInt32 modifiers = 0, count = 1;
-	  const EventMouseButton button = kEventMouseButtonPrimary;
-	  const struct {
-	    EventParamName name;
-	    EventParamType type;
-	    ByteCount size;
-	    const void *data;
-	  } params[] = {
-	    {kEventParamMouseLocation, typeQDPoint, sizeof (Point), &point},
-	    {kEventParamKeyModifiers, typeUInt32, sizeof (UInt32), &modifiers},
-	    {kEventParamMouseButton, typeMouseButton,
-	     sizeof (EventMouseButton), &button},
-	    {kEventParamClickCount, typeUInt32, sizeof (UInt32), &count}};
-	  int j;
-
-	  for (j = 0; j < countof (params); j++)
-	    if (err == noErr)
-	      err = SetEventParameter (event, params[j].name, params[j].type,
-				       params[j].size, params[j].data);
-	  if (err == noErr)
-	    err = PostEventToQueue (GetMainEventQueue (), event, priority);
-	  ReleaseEvent (event);
-	}
-    }
 }
 
 /* Pop up the menu for frame F defined by FIRST_WV at X/Y and loop until the
@@ -14531,7 +13328,7 @@ mac_handle_apple_event_descriptors (NSAppleEventDescriptor *event,
 - (void)handleAppleEvent:(NSAppleEventDescriptor *)event
 	  withReplyEvent:(NSAppleEventDescriptor *)replyEvent
 {
-  if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())
+  if (!mac_loop_gui_has_lisp_access ())
     {
       int token = mac_loop_begin_lisp_access ();
 
@@ -14676,11 +13473,7 @@ static NSDragOperation mac_dnd_wanted_action;
 {
   /* Lisp evaluation is safe in the `x-begin-drag' context, because no
      other Lisp threads are running unlike the `mac_select' one.  */
-  return mac_dnd_in_progress
-#if MAC_SELECT_ALLOW_LISP_EVALUATION
-    || mac_select_allow_lisp_evaluation
-#endif
-    ;
+  return mac_dnd_in_progress;
 }
 
 - (NSDragOperation)draggingEntered:(id <NSDraggingInfo>)sender
@@ -15328,29 +14121,6 @@ handle_services_invocation (NSInvocation *invocation)
 	  ReleaseEvent (event);
 	}
     }
-}
-
-static void
-update_services_menu_types (void)
-{
-  NSMutableArrayOf (NSPasteboardType) *array =
-    [NSMutableArray arrayWithCapacity:0];
-  Lisp_Object rest;
-
-  for (rest = Vselection_converter_alist; CONSP (rest);
-       rest = XCDR (rest))
-    if (CONSP (XCAR (rest)) && SYMBOLP (XCAR (XCAR (rest))))
-      {
-	NSPasteboardType dataType =
-	  get_pasteboard_data_type_from_symbol (XCAR (XCAR (rest)), nil);
-
-	if (dataType)
-	  [array addObject:dataType];
-      }
-
-  mac_within_gui (^{
-      [NSApp registerServicesMenuSendTypes:array returnTypes:array];
-    });
 }
 
 
@@ -17508,10 +16278,6 @@ ax_get_selected_text (EmacsMainView *emacsView)
   CFRange selectedRange;
   CFStringRef string;
 
-  if (MAC_AX_BUFFER_MAY_BE_ALTERED_P ())
-    /* Don't try to get buffer contents as the gap might be being
-       altered. */
-    return nil;
 
   mac_ax_selected_text_range (f, &selectedRange);
   string = mac_ax_create_string_for_range (f, &selectedRange, NULL);
@@ -17525,10 +16291,6 @@ ax_get_insertion_point_line_number (EmacsMainView *emacsView)
   struct frame *f = [emacsView emacsFrame];
   EMACS_INT line;
 
-  if (MAC_AX_BUFFER_MAY_BE_ALTERED_P ())
-    /* Don't try to get buffer contents as the gap might be being
-       altered. */
-    return nil;
 
   line = mac_ax_line_for_index (f, -1);
 
@@ -17600,8 +16362,7 @@ ax_get_selected_text_ranges (EmacsMainView *emacsView)
 
   /* Under the persistent loop, the role and AppKit's own attributes
      need no Lisp access, and the Emacs ones need a safe point.  */
-  if (index != NSNotFound && mac_persistent_loop_p && pthread_main_np ()
-      && !mac_loop_gui_owns_lock)
+  if (index != NSNotFound && pthread_main_np () && !mac_loop_gui_owns_lock)
     {
       if (!mac_try_content_access ())
 	return [self accessibilitySnapshotAttributeValue:attribute];
@@ -17697,10 +16458,6 @@ ax_get_line_for_index (EmacsMainView *emacsView, id parameter)
   struct frame *f = [emacsView emacsFrame];
   EMACS_INT line;
 
-  if (MAC_AX_BUFFER_MAY_BE_ALTERED_P ())
-    /* Don't try to get buffer contents as the gap might be being
-       altered. */
-    return nil;
 
   line = mac_ax_line_for_index (f, [(NSNumber *)parameter longValue]);
 
@@ -17714,10 +16471,6 @@ ax_get_range_for_line (EmacsMainView *emacsView, id parameter)
   EMACS_INT line;
   NSRange range;
 
-  if (MAC_AX_BUFFER_MAY_BE_ALTERED_P ())
-    /* Don't try to get buffer contents as the gap might be being
-       altered. */
-    return nil;
 
   line = [(NSNumber *)parameter longValue];
   if (mac_ax_range_for_line (f, line, (CFRange *) &range))
@@ -17733,10 +16486,6 @@ ax_get_string_for_range (EmacsMainView *emacsView, id parameter)
   struct frame *f = [emacsView emacsFrame];
   CFStringRef string;
 
-  if (MAC_AX_BUFFER_MAY_BE_ALTERED_P ())
-    /* Don't try to get buffer contents as the gap might be being
-       altered. */
-    return nil;
 
   string = mac_ax_create_string_for_range (f, (CFRange *) &range, NULL);
 
@@ -18788,96 +17537,6 @@ mac_sound_play (CFTypeRef mac_sound, Lisp_Object volume, Lisp_Object device)
 			Thread Synchronization
 ***********************************************************************/
 
-/* Binary semaphores for synchronization between GUI and Lisp
-   threads.  */
-static dispatch_semaphore_t mac_gui_semaphore, mac_lisp_semaphore;
-
-/* Queues of blocks to be executed in GUI or Lisp thread
-   respectively.  */
-static NSMutableArray *mac_gui_queue, *mac_lisp_queue;
-
-/* Queues of blocks to be executed in Lisp thread at the end of the
-   call to mac_within_gui_and_here.  */
-static NSMutableArray *mac_deferred_lisp_queue;
-
-/* Dispatch source to break the run loop in the GUI thread for the
-   select emulation.  */
-static dispatch_source_t mac_select_dispatch_source;
-
-/* Command to execute in the GUI thread after the run loop is
-   broken.  */
-static enum
-{
-  MAC_SELECT_COMMAND_TERMINATE	= 1 << 0,
-  MAC_SELECT_COMMAND_SUSPEND	= 1 << 1
-} mac_select_next_command;
-
-static void
-mac_init_thread_synchronization (void)
-{
-  BEGIN_AUTORELEASE_POOL;
-
-  mac_gui_semaphore = dispatch_semaphore_create (0);
-  mac_lisp_semaphore = dispatch_semaphore_create (0);
-
-  mac_gui_queue = [[NSMutableArray alloc] initWithCapacity:2];
-  mac_lisp_queue = [[NSMutableArray alloc] initWithCapacity:1];
-  mac_deferred_lisp_queue = [[NSMutableArray alloc] initWithCapacity:0];
-
-  mac_select_next_command = MAC_SELECT_COMMAND_TERMINATE;
-  mac_select_dispatch_source =
-    dispatch_source_create (DISPATCH_SOURCE_TYPE_DATA_OR, 0, 0,
-			    dispatch_get_main_queue ());
-  if (mac_select_dispatch_source == NULL)
-    {
-      fprintf (stderr, "Can't create dispatch source\n");
-      exit (1);
-    }
-  dispatch_source_set_event_handler (mac_select_dispatch_source, ^{
-      mac_select_next_command |=
-	dispatch_source_get_data (mac_select_dispatch_source);
-    });
-  dispatch_resume (mac_select_dispatch_source);
-
-  END_AUTORELEASE_POOL;
-}
-
-/* Keep synchronously executing blocks in `mac_gui_queue', which has
-   been set by `mac_within_gui_and_here', in the GUI thread until the
-   dequeued block is nil.  */
-
-static void
-mac_gui_loop (void)
-{
-  eassert (pthread_main_np ());
-  void (^block) (void);
-
-  do
-    {
-      BEGIN_AUTORELEASE_POOL;
-      dispatch_semaphore_wait (mac_gui_semaphore, DISPATCH_TIME_FOREVER);
-      block = [mac_gui_queue dequeue];
-      if (block)
-	block ();
-      dispatch_semaphore_signal (mac_lisp_semaphore);
-      END_AUTORELEASE_POOL;
-    }
-  while (block);
-}
-
-static void
-mac_gui_loop_once (void)
-{
-  void (^block) (void);
-
-  BEGIN_AUTORELEASE_POOL;
-  dispatch_semaphore_wait (mac_gui_semaphore, DISPATCH_TIME_FOREVER);
-  block = [mac_gui_queue dequeue];
-  eassert (block);
-  block ();
-  dispatch_semaphore_signal (mac_lisp_semaphore);
-  END_AUTORELEASE_POOL;
-}
 
 /* Ask execution of BLOCK to the GUI thread synchronously.  The
    calling thread must not be the GUI thread.  BLOCK will be executed
@@ -18888,84 +17547,19 @@ mac_gui_loop_once (void)
 void
 mac_within_gui (void (^block) (void))
 {
-  mac_within_gui_and_here (block, NULL);
-}
-
-/* Ask execution of BLOCK_GUI to the GUI thread.  The calling thread
-   must not be the GUI thread.  If BLOCK_HERE is non-nil, then it is
-   also executed in the calling Lisp thread simultaneously.  Control
-   returns when the both executions has finished.  */
-
-static void
-mac_within_gui_and_here (void (^block_gui) (void),
-			 void (^block_here) (void))
-{
-  if (mac_persistent_loop_p)
-    {
-      /* Only mac_select uses BLOCK_HERE, and the persistent loop
-	 has its own select emulation.  */
-      eassert (!block_here);
-      mac_loop_within_gui (block_gui);
-      return;
-    }
-
-  eassert (!pthread_main_np ());
-  eassert (mac_gui_queue.count <= 1);
-
-  [mac_gui_queue enqueue:block_gui];
-  dispatch_source_merge_data (mac_select_dispatch_source,
-			      MAC_SELECT_COMMAND_SUSPEND);
-  dispatch_semaphore_signal (mac_gui_semaphore);
-  if (block_here)
-    block_here ();
-  dispatch_semaphore_wait (mac_lisp_semaphore, DISPATCH_TIME_FOREVER);
-  if (mac_deferred_lisp_queue.count)
-    {
-      NSMutableArray *queue = mac_deferred_lisp_queue;
-
-      mac_deferred_lisp_queue = [[NSMutableArray alloc] initWithCapacity:0];
-      do
-	{
-	  void (^block) (void) = [queue dequeue];
-
-	  block ();
-	}
-      while (queue.count);
-      MRC_RELEASE (queue);
-      eassert (mac_deferred_lisp_queue.count == 0);
-    }
+  mac_loop_within_gui (block);
 }
 
 /* Ask execution of BLOCK to the GUI thread synchronously with
    allowing block executions in the calling Lisp thread via
-   `mac_within_lisp' from the BLOCK_GUI context.  The calling thread
-   must not be the GUI thread.  */
+   `mac_within_lisp' from the BLOCK_GUI context.  Every request
+   services such inner Lisp blocks.  */
 
 static void
 mac_within_gui_allowing_inner_lisp (void (^block) (void))
 {
   eassert (!pthread_main_np ());
-  if (mac_persistent_loop_p)
-    {
-      /* Every persistent-loop request services inner Lisp blocks.  */
-      mac_loop_within_gui (block);
-      return;
-    }
-
-  bool __block completed_p = false;
-
-  mac_within_gui (^{
-      block ();
-      completed_p = true;
-    });
-  while (!completed_p)
-    {
-      void (^block_lisp) (void) = [mac_lisp_queue dequeue];
-
-      block_lisp ();
-      mac_within_gui (nil);
-      dispatch_semaphore_wait (mac_lisp_semaphore, DISPATCH_TIME_FOREVER);
-    }
+  mac_loop_within_gui (block);
 }
 
 /* Ask synchronous execution of BLOCK to the Lisp thread that has
@@ -18978,24 +17572,14 @@ static void
 mac_within_lisp (void (^block) (void))
 {
   eassert (pthread_main_np ());
-  if (mac_persistent_loop_p)
+  /* Synchronous only while the Lisp thread is parked on a request;
+     otherwise the GUI thread must not wait for Lisp, so queue the
+     block instead.  */
+  if (!mac_loop_within_lisp (block))
     {
-      /* Synchronous only while the Lisp thread is parked on a
-	 request; otherwise the GUI thread must not wait for Lisp, so
-	 queue the block instead.  */
-      if (!mac_loop_within_lisp (block))
-	{
-	  MAC_TRACE_LOOP ("within-lisp deferred (no parked request)\n");
-	  mac_loop_queue_lisp_block (block);
-	}
-      return;
+      MAC_TRACE_LOOP ("within-lisp deferred (no parked request)\n");
+      mac_loop_queue_lisp_block (block);
     }
-  eassert (mac_lisp_queue.count == 0);
-  eassert (block);
-
-  [mac_lisp_queue enqueue:block];
-  dispatch_semaphore_signal (mac_lisp_semaphore);
-  mac_gui_loop ();
 }
 
 /* Ask deferred execution of BLOCK to the Lisp thread.  This should be
@@ -19009,14 +17593,8 @@ mac_within_lisp_deferred (void (^block) (void))
   eassert (pthread_main_np ());
   eassert (block);
 
-  if (mac_persistent_loop_p)
-    {
-      if (!mac_loop_defer_to_request (block))
-	mac_loop_queue_lisp_block (block);
-      return;
-    }
-
-  [mac_deferred_lisp_queue enqueue:(MRC_AUTORELEASE ([block copy]))];
+  if (!mac_loop_defer_to_request (block))
+    mac_loop_queue_lisp_block (block);
 }
 
 /* Ask execution of BLOCK to the Lisp thread.  Process BLOCK
@@ -19058,23 +17636,6 @@ mac_within_lisp_deferred_if_gui_thread (void (^block) (void))
 static int mac_select_fds[2];
 
 struct mac_select_latency_stats mac_select_latency_stats;
-
-/* Whether buffer and glyph matrix access from the GUI thread is
-   restricted to the case that no Lisp thread is running.  */
-static bool mac_buffer_and_glyph_matrix_access_restricted_p;
-
-static void
-mac_record_select_latency (double *total, double *maximum, double start)
-{
-  double elapsed = mac_system_uptime () - start;
-
-  if (elapsed < 0.0)
-    elapsed = 0.0;
-
-  *total += elapsed;
-  if (*maximum < elapsed)
-    *maximum = elapsed;
-}
 
 void
 mac_get_select_latency_stats (struct mac_select_latency_stats *stats,
@@ -19153,38 +17714,10 @@ mac_handle_alarm_signal (void)
     write_one_byte_to_fd (mac_select_fds[1]);
 }
 
-/* Restrict/unrestrict buffer and glyph matrix access from the GUI
-   thread to the case that no Lisp thread is running.  */
-
-static void
-mac_set_buffer_and_glyph_matrix_access_restricted (bool flag)
-{
-#if MAC_OS_X_VERSION_MIN_REQUIRED < 101400
-  /* Temporarily disable autodisplay if the Lisp thread may switch to
-     another one and some drawing may happen there.  */
-  Lisp_Object tail, frame;
-
-  FOR_EACH_FRAME (tail, frame)
-    {
-      struct frame *f = XFRAME (frame);
-
-      if (FRAME_MAC_P (f)
-	  && !FRAME_MAC_DOUBLE_BUFFERED_P (f))
-	{
-	  EmacsWindow *window = FRAME_MAC_WINDOW_OBJECT (f);
-
-	  [window setAutodisplay:!flag];
-	}
-    }
-#endif
-
-  mac_buffer_and_glyph_matrix_access_restricted_p = flag;
-}
-
 static bool
 mac_try_buffer_and_glyph_matrix_access (void)
 {
-  if (mac_persistent_loop_p && pthread_main_np ())
+  if (pthread_main_np ())
     {
       /* Nested accesses end in reverse order on the GUI thread.  */
       int token = mac_loop_begin_lisp_access ();
@@ -19193,10 +17726,7 @@ mac_try_buffer_and_glyph_matrix_access (void)
 	return false;
       eassert (mac_loop_access_token_depth < countof (mac_loop_access_tokens));
       mac_loop_access_tokens[mac_loop_access_token_depth++] = token;
-      return true;
     }
-  if (mac_buffer_and_glyph_matrix_access_restricted_p)
-    return !thread_try_acquire_global_lock ();
 
   return true;
 }
@@ -19204,253 +17734,22 @@ mac_try_buffer_and_glyph_matrix_access (void)
 static void
 mac_end_buffer_and_glyph_matrix_access (void)
 {
-  if (mac_persistent_loop_p && pthread_main_np ())
+  if (pthread_main_np ())
     {
       eassert (mac_loop_access_token_depth > 0);
       mac_loop_end_lisp_access
 	(mac_loop_access_tokens[--mac_loop_access_token_depth]);
-      return;
     }
-  if (mac_buffer_and_glyph_matrix_access_restricted_p)
-    thread_release_global_lock ();
 }
 
 int
 mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 	    struct timespec *timeout, sigset_t *sigmask)
 {
-  bool __block has_event_p, thread_may_switch_p;
-  int __block r;
-
-  if (mac_persistent_loop_p && initialized)
-    return mac_loop_select (nfds, rfds, wfds, efds, timeout, sigmask);
-
   if (!initialized)
     return thread_select (pselect, nfds, rfds, wfds, efds, timeout, sigmask);
 
-  double select_start = mac_system_uptime ();
-  mac_select_latency_stats.calls++;
-
-  read_all_from_nonblocking_fd (mac_select_fds[0]);
-
-  if (inhibit_window_system || noninteractive || nfds <= mac_select_fds[1]
-      || rfds == NULL || !FD_ISSET (mac_select_fds[1], rfds))
-    {
-      fd_set rfds_fallback;
-
-      if (rfds == NULL)
-	{
-	  FD_ZERO (&rfds_fallback);
-	  rfds = &rfds_fallback;
-	}
-      FD_SET (mac_select_fds[0], rfds);
-      if (nfds <= mac_select_fds[0])
-	nfds = mac_select_fds[0] + 1;
-
-      r = thread_select (pselect, nfds, rfds, wfds, efds, timeout, sigmask);
-
-      if (r > 0 && FD_ISSET (mac_select_fds[0], rfds))
-	{
-	  /* SIGALRM is delivered.  */
-	  FD_CLR (mac_select_fds[0], rfds);
-	  errno = EINTR;
-	  r = -1;
-	}
-
-      mac_select_latency_stats.fallback_calls++;
-      mac_record_select_latency (&mac_select_latency_stats.total_seconds,
-				 &mac_select_latency_stats.max_seconds,
-				 select_start);
-      return r;
-    }
-
-  /* Check if some input is already available.  We need to block input
-     because run loop may call back drawRect:.  */
-  double gui_probe_start = mac_system_uptime ();
-  mac_select_latency_stats.gui_probe_calls++;
-  block_input ();
-  mac_within_gui_and_here (^{
-      [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-			       beforeDate:[NSDate date]];
-      has_event_p = (mac_peek_next_event () != NULL);
-    },
-    ^{
-      fd_set orfds, owfds, oefds;
-      struct timespec select_timeout = make_timespec (0, 0);
-
-      orfds = *rfds;
-      if (wfds) owfds = *wfds;
-      if (efds) oefds = *efds;
-
-      read_all_from_nonblocking_fd (mac_select_fds[1]);
-
-      FD_CLR (mac_select_fds[1], rfds);
-      r = pselect (nfds, rfds, wfds, efds, &select_timeout, sigmask);
-      if (r == 0)
-	{
-	  *rfds = orfds;
-	  if (wfds) *wfds = owfds;
-	  if (efds) *efds = oefds;
-	}
-    });
-  unblock_input ();
-  mac_record_select_latency (&mac_select_latency_stats.gui_probe_seconds,
-			     &mac_select_latency_stats.max_gui_probe_seconds,
-			     gui_probe_start);
-
-  /* unblock_input above might have read some events.  */
-  if (has_event_p || detect_input_pending ())
-    {
-      /* Pretend that `select' is interrupted by a signal.  */
-      errno = EINTR;
-
-      mac_record_select_latency (&mac_select_latency_stats.total_seconds,
-				 &mac_select_latency_stats.max_seconds,
-				 select_start);
-      return -1;
-    }
-  else if (r != 0 || (timeout && timespec_sign (*timeout) == 0))
-    {
-      mac_record_select_latency (&mac_select_latency_stats.total_seconds,
-				 &mac_select_latency_stats.max_seconds,
-				 select_start);
-      return r;
-    }
-
-  double gui_wait_start = mac_system_uptime ();
-  mac_select_latency_stats.gui_wait_calls++;
-  block_input ();
-  turn_on_atimers (false);
-  thread_may_switch_p = !NILP (XCDR (Fall_threads ()));
-#if MAC_SELECT_ALLOW_LISP_EVALUATION
-  mac_select_allow_lisp_evaluation = !thread_may_switch_p;
-  bool __block completed_p = false;
-#endif
-  mac_within_gui_and_here (^{
-      if (thread_may_switch_p)
-	mac_set_buffer_and_glyph_matrix_access_restricted (true);
-      while (true)
-	{
-	  mac_select_next_command = 0;
-	  /* On macOS 10.12, the application sometimes becomes
-	     unresponsive to Dock icon clicks (though it reacts to
-	     Command-Tab) if we directly run a run loop and the
-	     application windows are covered by other applications for
-	     a while.  */
-	  mac_within_app (^{
-	      NSRunLoop *currentRunLoop = [NSRunLoop currentRunLoop];
-	      NSDate *limit = [NSDate distantFuture];
-	      bool written_p = false;
-
-	      /* On Mac OS X 10.7, delayed visible toolbar item
-		 validation (see the documentation of -[NSToolbar
-		 validateVisibleItems]) is treated as if it were an
-		 input source firing rather than a timer function (as
-		 in Mac OS X 10.6).  So it makes -[NSRunLoop
-		 runMode:beforeDate:] return despite no available
-		 input to process.  In such cases, we want to call
-		 -[NSRunLoop runMode:beforeDate:] again so as to avoid
-		 wasting CPU time caused by vacuous reactivation of
-		 delayed visible toolbar item validation via window
-		 update events issued in the application event
-		 loop.  */
-	      do
-		{
-		  [currentRunLoop runMode:NSDefaultRunLoopMode
-			       beforeDate:limit];
-		  mac_select_latency_stats.run_loop_iterations++;
-		  bool useful_wakeup_p = (mac_peek_next_event () != NULL
-					  || detect_input_pending ()
-					  || emacs_windows_need_display_p ());
-		  if (!written_p && useful_wakeup_p)
-		    {
-		      write_one_byte_to_fd (mac_select_fds[0]);
-		      written_p = true;
-		      mac_select_latency_stats.run_loop_wakeups_with_work++;
-		    }
-		  else if (!useful_wakeup_p && !mac_select_next_command)
-		    mac_select_latency_stats.run_loop_wakeups_without_work++;
-		  if ((mac_select_next_command & MAC_SELECT_COMMAND_SUSPEND)
-		      && mac_gui_queue.count == 0)
-		    /* Bogus suspend command: would be a residual from
-		       the previous round.  */
-		    mac_select_next_command &= ~MAC_SELECT_COMMAND_SUSPEND;
-		}
-	      while (!mac_select_next_command);
-	    });
-	  if (mac_select_next_command & MAC_SELECT_COMMAND_TERMINATE)
-	    break;
-	  else
-	    mac_gui_loop_once ();
-	}
-      if (thread_may_switch_p)
-	mac_set_buffer_and_glyph_matrix_access_restricted (false);
-#if MAC_SELECT_ALLOW_LISP_EVALUATION
-      mac_select_allow_lisp_evaluation = false;
-      completed_p = true;
-#endif
-    },
-    ^{
-#if MAC_SELECT_ALLOW_LISP_EVALUATION
-      if (thread_may_switch_p)
-	{
-#endif
-	  r = thread_select (pselect, nfds, rfds, wfds, efds, timeout, sigmask);
-	  dispatch_source_merge_data (mac_select_dispatch_source,
-				      MAC_SELECT_COMMAND_TERMINATE);
-#if MAC_SELECT_ALLOW_LISP_EVALUATION
-	}
-      else
-	{
-	  dispatch_queue_t queue =
-	    dispatch_get_global_queue (DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
-
-	  dispatch_async (queue, ^{
-	      r = pselect (nfds, rfds, wfds, efds, timeout, sigmask);
-	      dispatch_source_merge_data (mac_select_dispatch_source,
-					  MAC_SELECT_COMMAND_TERMINATE);
-	    });
-	  dispatch_semaphore_wait (mac_lisp_semaphore, DISPATCH_TIME_FOREVER);
-	  while (!completed_p)
-	    {
-	      void (^block_lisp) (void) = [mac_lisp_queue dequeue];
-	      bool was_waiting_for_input = waiting_for_input;
-
-	      waiting_for_input = 0;
-	      block_lisp ();
-	      waiting_for_input = was_waiting_for_input;
-	      mac_within_gui (nil);
-	      dispatch_semaphore_wait (mac_lisp_semaphore,
-				       DISPATCH_TIME_FOREVER);
-	    }
-	  dispatch_semaphore_signal (mac_lisp_semaphore);
-	}
-#endif
-      if (r > 0 && FD_ISSET (mac_select_fds[1], rfds))
-	/* Pretend that `select' is interrupted by a signal.  */
-	r = -1;
-    });
-  turn_on_atimers (true);
-  unblock_input ();
-  mac_record_select_latency (&mac_select_latency_stats.gui_wait_seconds,
-			     &mac_select_latency_stats.max_gui_wait_seconds,
-			     gui_wait_start);
-
-  if (r < 0 || detect_input_pending ())
-    {
-      /* Pretend that `select' is interrupted by a signal.  */
-      errno = EINTR;
-
-      mac_record_select_latency (&mac_select_latency_stats.total_seconds,
-				 &mac_select_latency_stats.max_seconds,
-				 select_start);
-      return -1;
-    }
-
-  mac_record_select_latency (&mac_select_latency_stats.total_seconds,
-			     &mac_select_latency_stats.max_seconds,
-			     select_start);
-  return r;
+  return mac_loop_select (nfds, rfds, wfds, efds, timeout, sigmask);
 }
 
 
@@ -19458,10 +17757,9 @@ mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 			 Persistent event loop
 ***********************************************************************/
 
-/* With EMACS_MAC_PERSISTENT_LOOP=1 (or the configured default), the
-   GUI thread runs -[NSApplication run] for the process lifetime
-   instead of running AppKit only while Lisp waits in mac_select or
-   calls read_socket.
+/* The GUI thread runs -[NSApplication run] for the process lifetime.
+   (The old event loop, removed in 2026, ran AppKit only while Lisp
+   waited in mac_select or called read_socket.)
 
    Lisp-to-GUI requests (mac_within_gui) are queued, delivered through
    a run-loop source in the common modes, and completed individually.
@@ -19593,13 +17891,12 @@ mac_loop_note_snapshot_answer (void)
    input with the global lock released (taken here by try-lock), or
    such access already held.  Access borrowed from a Lisp request does
    not, since the parked Lisp thread may be inside an edit or
-   redisplay: read_socket runs from maybe_quit.  This replaces the
-   poll_suppress_count and inhibit-quit heuristics of the old loop.  */
+   redisplay: read_socket runs from maybe_quit.  */
 
 static bool
 mac_try_content_access (void)
 {
-  if (mac_persistent_loop_p && pthread_main_np ()
+  if (pthread_main_np ()
       && !mac_loop_gui_owns_lock && mac_loop_request_depth > 0)
     {
       MAC_TRACE_LOOP ("content query during a request: unavailable\n");
@@ -19807,8 +18104,8 @@ mac_loop_wait_for_lisp (bool (^done) (void), double timeout)
   return true;
 }
 
-/* GUI thread: defer BLOCK to the end of the current request, as the
-   old loop does.  Return false if no request is being executed.  */
+/* GUI thread: defer BLOCK to the end of the current request.  Return
+   false if no request is being executed.  */
 
 static bool
 mac_loop_defer_to_request (void (^block) (void))
@@ -19967,7 +18264,7 @@ mac_loop_try_global_lock (void)
 static int
 mac_loop_begin_lisp_access (void)
 {
-  if (!mac_persistent_loop_p || !pthread_main_np ())
+  if (!pthread_main_np ())
     return MAC_LOOP_BORROWED_ACCESS;
   if (mac_loop_request_depth > 0 || mac_loop_gui_owns_lock)
     {
@@ -20004,7 +18301,7 @@ mac_loop_end_lisp_access (int token)
 static bool
 mac_loop_gui_has_lisp_access (void)
 {
-  return (!mac_persistent_loop_p || !pthread_main_np ()
+  return (!pthread_main_np ()
 	  || mac_loop_request_depth > 0 || mac_loop_gui_owns_lock);
 }
 
@@ -20107,8 +18404,7 @@ mac_loop_event_emacs_bound_p (NSEvent *event)
 }
 
 /* GUI thread, with Lisp access: handle the deferred NSEvents and then
-   EVENT (if non-nil) as the old loop's read_socket would.  Return the
-   number of stored events.  */
+   EVENT (if non-nil).  Return the number of stored events.  */
 
 static int
 mac_loop_handle_events_with_access (NSEvent *event)
@@ -20720,10 +19016,6 @@ mac_restamp_menu_bar_generation (unsigned long old, unsigned long new)
     });
 }
 
-/* Lisp-visible predicate (mac-persistent-event-loop-p in macterm.c)
-   and C callers outside this file (macmenu.c) that need to know which
-   loop is active without a raw extern of the static flag above.  */
-
 /* Any thread: whether the user is tracking the menu bar under the
    persistent loop.  */
 
@@ -20743,11 +19035,6 @@ mac_note_menu_bar_refresh_needed (void)
   __atomic_store_n (&mac_menu_bar_refresh_needed, true, __ATOMIC_RELEASE);
 }
 
-bool
-mac_persistent_event_loop_active (void)
-{
-  return mac_persistent_loop_p;
-}
 
 /* Test support for the persistent loop (test/manual/mac-app-loop).
    Actions are scheduled on the GUI thread's main dispatch queue, which
@@ -21267,10 +19554,8 @@ main (int argc, char **argv)
     }
 
   mac_loop_select_mode ();
-  mac_init_thread_synchronization ();
   mac_init_select_fds ();
-  if (mac_persistent_loop_p)
-    mac_loop_init ();
+  mac_loop_init ();
 
   err = pthread_attr_init (&attr);
   if (!err)
@@ -21335,10 +19620,7 @@ main (int argc, char **argv)
     }
   pthread_attr_destroy (&attr);
 
-  if (mac_persistent_loop_p)
-    mac_loop_gui_main ();
-  else
-    mac_gui_loop ();
+  mac_loop_gui_main ();
 
   emacs_abort ();
 }

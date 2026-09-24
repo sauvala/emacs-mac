@@ -13,7 +13,7 @@ out=${TMPDIR:-/tmp}/mac-app-loop
 mkdir -p "$out"
 for w in ${*:-0 30}; do
   rec="$out/resize-band-$w.mov"; rm -f "$rec"
-  EMACS_MAC_PERSISTENT_LOOP=1 EMACS_MAC_RESIZE_WAIT_MS=$w \
+  EMACS_MAC_RESIZE_WAIT_MS=$w \
     "$app/Contents/MacOS/Emacs" -Q -l "$script_dir/resize-band.el" 2>/dev/null &
   pid=$!
   sleep 2.6

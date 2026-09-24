@@ -2103,30 +2103,17 @@ A hook function can determine the current appearance by checking the
 
 (defvar mac-popup-menu-add-contextual-menu)
 
-(declare-function accelerate-menu "macmenu.c" (&optional frame) t)
-(declare-function mac-persistent-event-loop-p "macterm.c" ())
 (declare-function mac-update-pending-menu-bars "macmenu.c" ())
 
-(defun mac-menu-bar-open (&optional frame)
-  "Open the menu bar if it is shown.
-`popup-menu' is used if it is off.
-
-Under the persistent AppKit event loop (see `mac-persistent-event-loop-p'),
-`popup-menu' is always used: `accelerate-menu' drives the real menu bar
-by faking a Carbon click, which the persistent-loop menu design (D9 in
-.wayfinder/comments/menu-callbacks/2026-09-23-discussion.md) avoids in
-favor of showing the menu-bar keymap as an ordinary popup.  Real
-keyboard navigation of the menu bar under that loop is left to the
-system \"Move focus to menu bar\" shortcut (Control-F2 by default)."
+(defun mac-menu-bar-open (&optional _frame)
+  "Show the menu-bar keymap as a popup menu.
+The menu-bar design of the mac port (D9 in
+.wayfinder/comments/menu-callbacks/2026-09-23-discussion.md) does not
+drive the real menu bar from Lisp.  Keyboard navigation of the real
+menu bar is left to the system \"Move focus to menu bar\" shortcut
+\(Control-F2 by default)."
   (interactive "i")
-  (cond
-   ((and (not (zerop (or (frame-parameter nil 'menu-bar-lines) 0)))
-	 (fboundp 'accelerate-menu)
-	 (not (and (fboundp 'mac-persistent-event-loop-p)
-		   (mac-persistent-event-loop-p))))
-    (accelerate-menu frame))
-   (t
-    (popup-menu (mouse-menu-bar-map) last-nonmenu-event))))
+  (popup-menu (mouse-menu-bar-map) last-nonmenu-event))
 
 (defun mac-mouse-buffer-menu (event)
   "Like `mouse-buffer-menu', but contextual menu is added if possible."
@@ -3144,11 +3131,9 @@ standard ones in `x-handle-args'."
 	      (mouse-wheel-mode 0)
 	      (mac-mouse-wheel-mode 1)))
 
-  ;; Under the persistent event loop, menu-bar updates that redisplay
-  ;; postponed while a command ran are done once Emacs is idle.
-  (when (and (fboundp 'mac-persistent-event-loop-p)
-             (mac-persistent-event-loop-p))
-    (run-with-idle-timer 0.2 t 'mac-update-pending-menu-bars))
+  ;; Menu-bar updates that redisplay postponed while a command ran are
+  ;; done once Emacs is idle.
+  (run-with-idle-timer 0.2 t 'mac-update-pending-menu-bars)
 
   (add-hook 'menu-bar-update-hook 'mac-setup-help-topics)
   (run-with-idle-timer 0.1 nil 'mac-setup-help-topics)
