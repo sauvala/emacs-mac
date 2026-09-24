@@ -8,7 +8,8 @@
                      (* 1000 (or (plist-get r :gui-max-gap) 0))
                      (or (plist-get r :gui-long-gaps) 0)))
       (dolist (k '(:access :error :busy :buffer :point :commands :before :after
-                   :second-live :frames :ticks :thread-alive :during))
+                   :second-live :frames :ticks :thread-alive :during
+                   :delete-frame-count :quit-count :subtitles))
         (when (plist-member r k)
           (princ (format " %s=%S" k (plist-get r k)))))
       (terpri))))

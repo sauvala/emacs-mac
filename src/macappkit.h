@@ -737,6 +737,25 @@ typedef NSInteger NSGlyphProperty;
   /* Map from child windows to alpha values that are saved while they
      are made completely transparent temporarily.  */
   NSMapTableOf (NSWindow *, NSNumber *) *savedChildWindowAlphaMap;
+
+  /* Persistent loop only (W7/W8, see the "Persistent event loop"
+     section in macappkit.m).  True while a windowShouldClose: request
+     for this frame has not yet been resolved by Lisp (the frame was
+     deleted, a prompt appeared, or the close was refused); further
+     close clicks are dropped while true.  */
+  BOOL macLoopClosePending;
+
+  /* Bumped whenever macLoopClosePending is set or cleared, so a
+     delayed indicator block can recognize it no longer applies.  */
+  unsigned long macLoopCloseGeneration;
+
+  /* Count of reasons (close and/or Quit) the "Waiting for Emacs…"
+     window subtitle should currently be shown for this window.  */
+  int macLoopIndicatorPendingCount;
+
+  /* The subtitle to restore once macLoopIndicatorPendingCount returns
+     to zero, or nil if no indicator is currently shown.  */
+  NSString *macLoopSavedSubtitle;
 }
 - (instancetype)initWithEmacsFrame:(struct frame *)emacsFrame;
 - (void)setupEmacsView;
@@ -779,6 +798,11 @@ typedef NSInteger NSGlyphProperty;
 - (BOOL)shouldBeTitled;
 - (BOOL)shouldHaveShadow;
 - (void)updateWindowStyle;
+/* Persistent loop only (W7/W8); see macappkit.m.  */
+- (BOOL)macLoopBeginClosePending;
+- (void)macLoopClearClosePending;
+- (void)macLoopShowQuitIndicator;
+- (void)macLoopClearQuitIndicator;
 @end
 
 

@@ -160,6 +160,14 @@ static int mac_loop_read_socket_events (struct input_event *);
 static void mac_loop_complete_launch (void);
 static void mac_loop_note_menu_selection (NSInteger);
 static void mac_loop_with_access_now_or_later (void (^) (void));
+static bool mac_loop_quit_begin (void);
+static void mac_loop_quit_clear (void);
+static void mac_loop_resolve_pending_indicators (void);
+
+/* Persistent loop (W7/W8): number of pending close/Quit requests not
+   yet resolved by Lisp.  mac_loop_select checks this so idle Lisp
+   clears them without walking frames when nothing is pending.  */
+static int mac_loop_pending_indicator_count;
 
 /* Use at the start of a query method (accessibility, text input) that
    reads Lisp or buffer state and returns a value of TYPE.  Without Lisp
@@ -1319,6 +1327,11 @@ static bool handling_queued_nsevents_p;
   OSErr err;
   NSAppleEventManager *manager = [NSAppleEventManager sharedAppleEventManager];
   AppleEvent appleEvent, reply;
+
+  /* W8: at most one pending Quit; drop repeats while Lisp has not
+     resolved the previous one (prompted, cancelled, or exited).  */
+  if (mac_persistent_loop_p && !mac_loop_quit_begin ())
+    return;
 
   err = create_apple_event (kCoreEventClass, kAEQuitApplication, &appleEvent);
   if (err == noErr)
@@ -3149,6 +3162,12 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)closeWindow
 {
+  /* W7: the frame is actually being deleted, which resolves any
+     pending close request for it immediately (rather than waiting for
+     the generic mac_loop_select-driven clear).  */
+  if (mac_persistent_loop_p)
+    [self macLoopClearClosePending];
+
   /* We temporarily run application when closing a window.  That
      causes emacsView to receive drawRect: before closing a tabbed
      window on macOS 10.12.  It is too late to remove the view in the
@@ -3172,6 +3191,7 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
   [overlayView.layer removeObserver:self forKeyPath:@"sublayers"];
   [animationLayer removeObserver:self forKeyPath:@"sublayers"];
   [overlayView.layer removeObserver:self forKeyPath:@"showingBorder"];
+  MRC_RELEASE (macLoopSavedSubtitle);
 #if !USE_ARC
   [savedChildWindowAlphaMap release];
   [emacsView release];
@@ -3180,6 +3200,90 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
   [overlayView release];
   [super dealloc];
 #endif
+}
+
+/* Persistent loop only (W7/W8): "Waiting for Emacs…" window subtitle,
+   shown when Lisp has not resolved a close or Quit request within
+   100 ms.  macLoopIndicatorPendingCount tracks how many of the two
+   reasons currently apply to this window, so one being resolved does
+   not clobber the saved subtitle while the other is still pending.  */
+
+- (void)macLoopShowIndicatorIfNeeded
+{
+  if (macLoopIndicatorPendingCount == 0 || macLoopSavedSubtitle != nil)
+    return;
+  if (![emacsWindow respondsToSelector:@selector(setSubtitle:)])
+    return;
+  macLoopSavedSubtitle = [(emacsWindow.subtitle ?: @"") copy];
+  emacsWindow.subtitle = @"Waiting for Emacs…";
+}
+
+- (void)macLoopRestoreIndicatorIfDone
+{
+  if (macLoopIndicatorPendingCount > 0 || macLoopSavedSubtitle == nil)
+    return;
+  if ([emacsWindow respondsToSelector:@selector(setSubtitle:)])
+    emacsWindow.subtitle = macLoopSavedSubtitle;
+  MRC_RELEASE (macLoopSavedSubtitle);
+  macLoopSavedSubtitle = nil;
+}
+
+/* W7: begin a close-pending request for this frame's window.  Return
+   YES if this is the first pending close (the caller should store
+   DELETE_WINDOW_EVENT), or NO if a close is already pending (the
+   caller should drop this click).  */
+
+- (BOOL)macLoopBeginClosePending
+{
+  if (macLoopClosePending)
+    return NO;
+
+  macLoopClosePending = YES;
+  macLoopIndicatorPendingCount++;
+  __atomic_add_fetch (&mac_loop_pending_indicator_count, 1, __ATOMIC_RELEASE);
+
+  unsigned long generation = ++macLoopCloseGeneration;
+
+  dispatch_after (dispatch_time (DISPATCH_TIME_NOW,
+				 (int64_t) (0.1 * NSEC_PER_SEC)),
+		  dispatch_get_main_queue (), ^{
+      if (macLoopClosePending && macLoopCloseGeneration == generation)
+	[self macLoopShowIndicatorIfNeeded];
+    });
+
+  return YES;
+}
+
+/* W7: clear close-pending state for this frame's window.  Called once
+   Lisp has resolved the request (the frame was deleted -- see
+   -closeWindow -- a prompt appeared, or the close was refused).  */
+
+- (void)macLoopClearClosePending
+{
+  if (!macLoopClosePending)
+    return;
+
+  macLoopClosePending = NO;
+  macLoopCloseGeneration++;
+  macLoopIndicatorPendingCount--;
+  __atomic_sub_fetch (&mac_loop_pending_indicator_count, 1, __ATOMIC_RELEASE);
+  [self macLoopRestoreIndicatorIfDone];
+}
+
+/* W8: apply/clear the Quit indicator on this window; the delay and
+   dedupe live in mac_loop_quit_begin/mac_loop_quit_clear since Quit is
+   process-wide rather than per-window.  */
+
+- (void)macLoopShowQuitIndicator
+{
+  macLoopIndicatorPendingCount++;
+  [self macLoopShowIndicatorIfNeeded];
+}
+
+- (void)macLoopClearQuitIndicator
+{
+  macLoopIndicatorPendingCount--;
+  [self macLoopRestoreIndicatorIfDone];
 }
 
 - (BOOL)acceptsFocus
@@ -3794,6 +3898,11 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 {
   struct frame *f = emacsFrame;
   struct input_event inev;
+
+  /* W7: dedupe repeated close clicks while Lisp has not resolved a
+     previous DELETE_WINDOW_EVENT for this frame.  */
+  if (mac_persistent_loop_p && ![self macLoopBeginClosePending])
+    return NO;
 
   EVENT_INIT (inev);
   inev.arg = Qnil;
@@ -19201,6 +19310,111 @@ mac_loop_begin_launch (void)
   mac_loop_launch_requested_p = true;
 }
 
+/* GUI thread: window(s) that currently show the W8 Quit indicator, so
+   it can be cleared without re-deriving the target set.  */
+static NSMutableArray *mac_loop_quit_indicator_controllers;
+static bool mac_loop_quit_pending;
+static unsigned long mac_loop_quit_generation;
+
+/* W8: at most one pending Quit.  Return true if this is the first
+   pending Quit request, so the caller should proceed to dispatch
+   kAEQuitApplication; false if one is already pending, so the caller
+   should drop this request.  */
+
+static bool
+mac_loop_quit_begin (void)
+{
+  eassert (pthread_main_np ());
+
+  if (mac_loop_quit_pending)
+    return false;
+
+  mac_loop_quit_pending = true;
+  __atomic_add_fetch (&mac_loop_pending_indicator_count, 1, __ATOMIC_RELEASE);
+
+  unsigned long generation = ++mac_loop_quit_generation;
+
+  dispatch_after (dispatch_time (DISPATCH_TIME_NOW,
+				 (int64_t) (0.1 * NSEC_PER_SEC)),
+		  dispatch_get_main_queue (), ^{
+      if (!mac_loop_quit_pending || mac_loop_quit_generation != generation)
+	return;
+
+      NSMutableArray *targets = [NSMutableArray arrayWithCapacity:1];
+      NSWindow *keyWindow = NSApp.keyWindow;
+
+      if ([keyWindow isKindOfClass:EmacsWindow.class])
+	[targets addObject:keyWindow];
+      else
+	for (NSWindow *window in NSApp.windows)
+	  if ([window isKindOfClass:EmacsWindow.class] && window.isVisible)
+	    [targets addObject:window];
+
+      if (mac_loop_quit_indicator_controllers == nil)
+	mac_loop_quit_indicator_controllers =
+	  [[NSMutableArray alloc] initWithCapacity:targets.count];
+      for (EmacsWindow *window in targets)
+	{
+	  EmacsFrameController *controller =
+	    (EmacsFrameController *) window.delegate;
+
+	  if ([controller isKindOfClass:EmacsFrameController.class])
+	    {
+	      [controller macLoopShowQuitIndicator];
+	      [mac_loop_quit_indicator_controllers addObject:controller];
+	    }
+	}
+    });
+
+  return true;
+}
+
+/* Clear W8 Quit-pending state and any indicator it applied.  Called
+   once Lisp has resolved the Quit request: a prompt is up, it was
+   cancelled, or (moot, since the process is exiting) it proceeded.  */
+
+static void
+mac_loop_quit_clear (void)
+{
+  eassert (pthread_main_np ());
+
+  if (!mac_loop_quit_pending)
+    return;
+
+  mac_loop_quit_pending = false;
+  mac_loop_quit_generation++;
+  __atomic_sub_fetch (&mac_loop_pending_indicator_count, 1, __ATOMIC_RELEASE);
+  for (EmacsFrameController *controller in mac_loop_quit_indicator_controllers)
+    [controller macLoopClearQuitIndicator];
+  [mac_loop_quit_indicator_controllers removeAllObjects];
+}
+
+/* GUI thread, with Lisp access: resolve W7/W8 pending indicators for
+   all frames and for Quit.  Called from mac_loop_select once Lisp
+   reaches its next input wait after a close or Quit was requested: a
+   minibuffer prompt or the frame's own deletion (see -closeWindow)
+   counts as acknowledgment (W7/W8).  */
+
+static void
+mac_loop_resolve_pending_indicators (void)
+{
+  Lisp_Object tail, frame;
+
+  eassert (pthread_main_np ());
+  FOR_EACH_FRAME (tail, frame)
+    {
+      struct frame *f = XFRAME (frame);
+
+      if (FRAME_MAC_P (f))
+	{
+	  EmacsFrameController *controller = FRAME_CONTROLLER (f);
+
+	  [controller macLoopClearClosePending];
+	}
+    }
+  mac_loop_quit_clear ();
+}
+
 /* Menu-bar item selection under the persistent loop.  Menu tracking
    is not intercepted, so deliver the classic selection through the
    Lisp thread.  */
@@ -19235,6 +19449,16 @@ mac_loop_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
   bool keyboard_p = (rfds && nfds > mac_select_fds[1]
 		     && FD_ISSET (mac_select_fds[1], rfds));
   int r;
+
+  /* W7/W8: Lisp is about to wait for input, i.e., it is idle, so any
+     close or Quit request it has not yet handled is now either
+     resolved (frame deleted -- cleared already by -closeWindow -- or
+     the request was refused) or has a prompt up (also treated as
+     resolved).  */
+  if (__atomic_load_n (&mac_loop_pending_indicator_count, __ATOMIC_ACQUIRE))
+    mac_within_gui (^{
+	mac_loop_resolve_pending_indicators ();
+      });
 
   read_all_from_nonblocking_fd (mac_select_fds[0]);
   if (mac_trace_loop_p && getenv ("EMACS_MAC_TRACE_LOOP")[0] == '2')
@@ -19603,6 +19827,16 @@ mac_loop_test_perform (struct mac_loop_test_action action,
       [NSApp terminate:nil];
       mac_loop_test_record ("terminate");
       return;
+    case MAC_LOOP_TEST_SUBTITLE:
+      {
+	NSString *subtitle = nil;
+
+	if ([window respondsToSelector:@selector (subtitle)])
+	  subtitle = window.subtitle;
+	mac_loop_test_record ("subtitle %s",
+			      subtitle ? subtitle.UTF8String : "");
+	return;
+      }
     default:
       mac_loop_test_record ("probe %.0f window %.0fx%.0f%s", action.x,
 			    NSWidth (frame), NSHeight (frame),

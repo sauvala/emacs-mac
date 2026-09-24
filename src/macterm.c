@@ -502,6 +502,7 @@ where DELAY is seconds from now and KIND is one of:
   terminate            invoke the native window or application operation.
   set-size W H         set the window size natively.
   probe N              only record a timestamp.
+  subtitle             record the window's current subtitle text.
 The actions run on the GUI thread even while Lisp is busy.  */)
   (Lisp_Object actions, Lisp_Object frame)
 {
@@ -521,7 +522,8 @@ The actions run on the GUI thread even while Lisp is busy.  */)
 	 {"zoom", MAC_LOOP_TEST_ZOOM}, {"fullscreen", MAC_LOOP_TEST_FULLSCREEN},
 	 {"close", MAC_LOOP_TEST_CLOSE}, {"activate", MAC_LOOP_TEST_ACTIVATE},
 	 {"set-size", MAC_LOOP_TEST_SET_SIZE}, {"probe", MAC_LOOP_TEST_PROBE},
-	 {"terminate", MAC_LOOP_TEST_TERMINATE}};
+	 {"terminate", MAC_LOOP_TEST_TERMINATE},
+	 {"subtitle", MAC_LOOP_TEST_SUBTITLE}};
       int k;
 
       CHECK_CONS (spec);
