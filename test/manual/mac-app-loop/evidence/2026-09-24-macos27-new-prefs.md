@@ -74,7 +74,7 @@ during and after a posted corner drag:
 | --- | --- | --- | --- |
 | Layer background | none (opaque layer: exposed area undefined) | frame background | frame background |
 | Gravity | `bottomLeft` in a flipped layer (top-left) | same | same |
-| Mid-drag layer / drawable | 908x656 pt / 1666x1200 px | 908x656 pt / 1666x1200 px (old drawable kept) | 908x656 pt / 1816x1312 px (tracks the drag) |
+| Mid-drag layer / drawable | 908x656 pt / 1666x1200 px | 908x656 pt / 1666x1200 px (old drawable kept; see the update below) | 908x656 pt / 1816x1312 px (tracks the drag) |
 | Overlay sublayers mid-drag | 2 (snapshot added) | 1 (no snapshot) | 1 (no snapshot) |
 | After the drag | drawable matches | drawable matches 950x688 pt | drawable matches |
 
@@ -84,6 +84,26 @@ grown area is the frame background, and the old content is anchored
 top-left without stretching. This shows the layer's configuration, not
 its composited pixels. Rapid reversals and the actual on-screen result
 still need an interactive look.
+
+### Deferred live-resize steps (later on 2026-09-24)
+
+Live-resize steps that arrive while Lisp is busy are now deferred as one
+coalesced callback instead of skipped. New scenario
+`stalled-resize-layer`: a corner drag during a 1.5 s busy loop, then the
+pointer held still until the mouse-up at 3.5 s.
+
+| Probe | Old loop | New loop |
+| --- | --- | --- |
+| 1.2 s (busy, mid-drag) | 950x688 pt / 1666x1200 px, snapshot overlay | 950x688 pt / 1900x1376 px, no overlay |
+| 3.0 s (idle, pointer still) | 950x688 pt / 1666x1200 px (stale until mouse-up) | 950x688 pt / 1900x1376 px |
+| GUI max gap | 827 ms | 11 ms |
+
+Before this change, the new loop also kept the old drawable at 3.0 s.
+In `busy-resize-layer` the mid-drag drawable now follows the layer
+(1816x1312 px), because busy Lisp applies the step from `read_socket`.
+Nothing is presented until Lisp redisplays, so what is on screen is
+unchanged. The full default list (25 scenarios) passed in both loops
+with the same outcomes as before.
 
 ## Not covered
 

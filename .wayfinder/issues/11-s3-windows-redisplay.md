@@ -47,7 +47,9 @@ discussion):
   layer is not used, and the fullscreen snapshot is built only with Lisp
   access.
 - W2: live-resize steps reach Lisp while it is idle, so it redraws during
-  the drag. Steps are skipped while Lisp is busy.
+  the drag. While Lisp is busy, one coalesced callback carries the
+  latest step, so the window catches up after the busy period even if
+  the pointer stays still (scenario `stalled-resize-layer`).
 - W6/W10: deferred state callbacks coalesce per object and kind. The
   unlocked Metal context resize on backing changes is gone.
 - Per-preference scripted runs: see

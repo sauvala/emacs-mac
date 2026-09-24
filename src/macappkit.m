@@ -8442,9 +8442,11 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
 
 /* Persistent loop (W2/W3): pass the size of each live-resize step to
    Lisp while it is idle, so that it redraws at that size during the
-   drag.  While Lisp is busy, skip the step rather than deferring it:
-   -viewDidEndLiveResize delivers the final size, and the layer shows
-   the last presentation over the frame background meanwhile.  */
+   drag.  While Lisp is busy, the layer shows the last presentation
+   over the frame background, and a single coalesced callback applies
+   the latest size once Lisp can take it, so that the window catches
+   up even if the pointer then stays still.  -viewDidEndLiveResize
+   delivers the final size.  */
 
 - (void)macLoopLiveResizeFrameDidChange
 {
@@ -8456,12 +8458,36 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
 
   MAC_TRACE_LOOP ("live resize step %.0fx%.0f %s\n", NSWidth (frameRect),
 		  NSHeight (frameRect),
-		  token == MAC_LOOP_NO_ACCESS ? "skipped" : "applied");
+		  token == MAC_LOOP_NO_ACCESS ? "deferred" : "applied");
   if (token == MAC_LOOP_NO_ACCESS)
+    {
+      if (mac_loop_test_recording_p)
+	mac_loop_test_record ("live resize step deferred");
+      MAC_LOOP_STATE_CALLBACK_NEEDS_LISP ("live-resize-step",
+					  [self macLoopApplyLiveResizeStep]);
+      return;
+    }
+
+  [self macLoopApplyLiveResizeStep];
+  mac_loop_end_lisp_access (token);
+  if (token == MAC_LOOP_LOCKED_ACCESS)
+    mac_loop_wake_lisp ();
+}
+
+/* With Lisp access: apply the current size of a live resize, if one is
+   still in progress (otherwise -viewDidEndLiveResize has applied it).  */
+
+- (void)macLoopApplyLiveResizeStep
+{
+  if (![self inLiveResize])
     return;
 
   struct frame *f = [self emacsFrame];
+  NSRect frameRect = [self frame];
 
+  if (mac_loop_test_recording_p)
+    mac_loop_test_record ("live resize step %.0fx%.0f applied",
+			  NSWidth (frameRect), NSHeight (frameRect));
   [self synchronizeChildFrameOrigins];
 #ifndef USE_METAL_RENDERING
   backingSizeOutOfSync = YES;
@@ -8469,9 +8495,6 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
   [self syncMetalDrawableSize];
 #endif
   mac_handle_size_change (f, NSWidth (frameRect), NSHeight (frameRect));
-  mac_loop_end_lisp_access (token);
-  if (token == MAC_LOOP_LOCKED_ACCESS)
-    mac_loop_wake_lisp ();
 }
 
 - (void)viewDidEndLiveResize

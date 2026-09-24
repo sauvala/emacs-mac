@@ -179,13 +179,17 @@ found while doing it. The user has not yet reviewed them.
   It then resizes the drawable, passes the size with
   `mac_handle_size_change`, and wakes Lisp. `do_pending_window_change`
   after the select garbages the frame, so the next wait iteration
-  redisplays. Without access, the step is skipped, not deferred, and
+  redisplays. Without access, the step becomes a coalesced state
+  callback (key "live-resize-step") that applies the view's size at the
+  time it runs, if the live resize is still in progress;
   `-viewDidEndLiveResize` still delivers the final size. In the scripted
-  idle drag, 16 of 18 steps were applied; in the busy drag, 0 of 18 were
-  applied and the final size converged. *Known gap:* if a step is skipped
-  because Lisp is momentarily busy and the pointer then stays still,
-  the window keeps the stale presentation until the next movement or the
-  mouse-up.
+  idle drag, 16 of 18 steps were applied directly. *Update (later on
+  2026-09-24, agent-adopted):* skipping steps left the window stale when
+  the pointer stayed still after a busy period, so they are now
+  deferred. Busy Lisp applies them from `read_socket` within about 5 ms,
+  which resizes the drawable during the busy period; nothing is
+  presented until Lisp redisplays, so the screen still shows the last
+  presentation.
 - **W6/W10: coalesced state callbacks.** The callbacks that only bring
   Lisp up to date with AppKit state (move, resize, minimize/restore,
   screen, backing properties, screen parameters, view frame, end of
