@@ -31,22 +31,34 @@ first of those fills is ordinary initialization. The hold, the wait and
 the presenter's fill work around the unsynchronized presentation
 instead of removing it.
 
+Not fixed by them (reported 2026-09-24): during a resize the mode line
+jiggles. It is drawn at its old position for a moment, then jumps to
+the window's new bottom edge. The same lag moves the rest of the
+content, but it is most visible at the bottom edge.
+
 ## Scope
 
 While Lisp is idle during a live resize, draw and present each step in
 the same Core Animation transaction as the window size change, as
 native Metal apps do:
-- in the live-resize step, with Lisp access, apply the size, run
-  redisplay for that frame, and present with
+- in the live-resize step, apply the size, then have the Lisp thread
+  redisplay the frame while the GUI thread waits for a bounded time
+  (about one display frame), running Lisp requests meanwhile, as the D3
+  open-time menu refresh does (`mac-menu-bar-open-refresh`);
+- present that frame from the GUI thread with
   `CAMetalLayer.presentsWithTransaction` (commit, wait until scheduled,
-  then present the drawable), outside the async presenter;
+  then present the drawable) inside the resize step's transaction,
+  outside the async presenter;
 - return to asynchronous presentation when live resize ends;
 - keep the W3 fallback while Lisp is busy: the last presentation
   anchored top-left over the layer's background colour.
 
-Running redisplay from a GUI-thread callback must follow the access
-rules in AGENTS.md ("Persistent event loop"): only with Lisp access, and
-never from a context where access is borrowed from a Lisp request.
+Redisplay must stay on the Lisp thread even though the GUI has Lisp
+access during idle steps: it runs Lisp (fontification, mode-line
+`:eval`, `window-size-change-functions` such as `perfect-margin`), and
+the S4 decisions forbid Lisp on the GUI thread. Agent-adopted
+correction (2026-09-24): an earlier draft of this approach, given to
+the user in chat, proposed running redisplay in the GUI callback.
 Verify primary Apple documentation for `presentsWithTransaction` before
 relying on its ordering.
 
@@ -62,6 +74,9 @@ With a person at the Mac on macOS 27, idle and busy:
   outside the window edge, in a screen recording checked frame by frame
   (`ffmpeg -f avfoundation`; `screencapture -v` loses the file if it is
   interrupted);
+- the mode line follows the bottom edge without jumping back;
+- a step whose redraw misses the wait shows the W3 presentation, never
+  a late frame at a size the window no longer has;
 - busy-Lisp drags keep the W3 presentation and stay within the 100 ms
   responsiveness target;
 - the scripted resize scenarios (`idle-resize`, `live-resize`,
