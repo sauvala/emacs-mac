@@ -1,10 +1,10 @@
 ---
 id: s3-transactional-resize
 title: "S3 follow-up: present live-resize frames with the window change"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: macos-app-integration
-assignee: claude-transactional-resize
+assignee: null
 ---
 
 ## Problem
@@ -131,3 +131,8 @@ Implemented on branch `transactional-resize`; scripted checks pass
 
 Still open: the acceptance gate's hand-driven checks with a person at
 the Mac (mode line following the edge, fast grow/shrink, busy drags).
+
+## Resolution (2026-09-24)
+
+Closed with the user's live confirmation after hand-driven resizes with
+their configuration: [resolution](../comments/s3-transactional-resize/2026-09-24-resolution.md).

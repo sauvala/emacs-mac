@@ -55,6 +55,7 @@ version, with explicit validation and retirement criteria for existing workaroun
 - [S3: Move window lifecycle and redisplay to the new loop](11-s3-windows-redisplay.md): closed after agent-driven and hand-checked interactive macOS 27 checks; the mixed-scale display check was not applicable (single display).
 - [S4: Move menus and callbacks to the new loop](12-s4-menus-callbacks.md): closed after interactive macOS 27 checks; D3's open-time refresh is deferred to [a follow-up](17-s4-open-time-refresh.md), with an idle-time deep fill standing in for it.
 - [S4 follow-up: open-time submenu refresh (D3)](17-s4-open-time-refresh.md): closed after real menu-bar checks idle and busy on macOS 27; the idle-time deep fill stays for menus opened while Lisp is busy.
+- [S3 follow-up: present live-resize frames with the window change](18-s3-transactional-resize.md): closed after the user's hand-driven resizes on macOS 27; idle steps wait up to 30 ms for Lisp's frame and present it in the resize transaction, and the asynchronous-path workarounds stay for other resizes.
 - [S5: Replace IME and accessibility stubs with safe content access](13-s5-content-snapshots.md): closed after a real input-method check (Pinyin) idle and busy on macOS 27; VoiceOver was not run (user excluded it).
 
 ## Not yet specified
