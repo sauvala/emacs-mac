@@ -1656,8 +1656,23 @@ static bool handling_queued_nsevents_p;
   if (mac_persistent_loop_p && !popup_activated ())
     {
       /* Menu-bar tracking is not intercepted by the persistent loop,
-	 so nothing polls menuItemSelection.  */
-      mac_loop_note_menu_selection ([sender tag]);
+	 so nothing polls menuItemSelection.  Prefer the snapshot bound
+	 to ROOT when the deep menu-bar fill that created it stamped a
+	 generation (see mac_fill_menubar); this revalidates the frame,
+	 window and buffer at execution time (D5/D17 in the mac-app-loop
+	 menu design).  Fall back to the unvalidated selected-frame path
+	 only when no snapshot was ever published for this root.  */
+      unsigned long generation
+	= ([root isKindOfClass:EmacsMenu.class]
+	   ? [(EmacsMenu *) root persistentMenuGeneration] : 0);
+      int selection = [sender tag];
+
+      if (generation)
+	mac_loop_queue_lisp_block (^{
+	    mac_persistent_menubar_selection (generation, selection);
+	  });
+      else
+	mac_loop_note_menu_selection (selection);
       return;
     }
   menuItemSelection = [sender tag];
@@ -11636,6 +11651,11 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 - (unsigned long)nativeGeneration { return nativeGeneration; }
 - (BOOL)nativeNeedsPreparation { return nativeNeedsPreparation; }
 - (void)setNativeActivationPrepared { nativeActivationPrepared = YES; }
+- (unsigned long)persistentMenuGeneration { return persistentMenuGeneration; }
+- (void)setPersistentMenuGeneration:(unsigned long)generation
+{
+  persistentMenuGeneration = generation;
+}
 
 - (BOOL)cancelNativeTrackingForQuitEvent:(NSEvent *)event
 {
@@ -12030,18 +12050,54 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 
 - (void)menu:(NSMenu *)menu willHighlightItem:(NSMenuItem *)item
 {
-  if (!popup_activated ())
+  id object = item.representedObject;
+  EmacsWeakLispObject *helpObject =
+    ([object isKindOfClass:EmacsWeakLispObject.class] ? object : nil);
+
+  if (popup_activated ())
+    {
+      /* The Lisp thread is parked on the popup's Lisp-to-GUI request
+	 (mac_loop_request_depth > 0), so mac_within_lisp's synchronous
+	 round trip is safe and immediate; unchanged from before the
+	 persistent loop (D13's "keep the current behaviour" case).  */
+      mac_within_lisp (^{
+	  show_help_echo (helpObject ? helpObject.lispObject : Qnil,
+			  Qnil, Qnil, Qnil);
+	});
+      return;
+    }
+
+  if (!mac_persistent_loop_p)
     return;
 
-  id object = item.representedObject;
-  Lisp_Object help;
+  /* D13: outside a parked popup (menu-bar highlighting), help-echo is
+     advisory and must never block the GUI thread waiting for Lisp.
+     Queue it fire-and-forget and coalesce so that only the latest of
+     a burst of highlight notifications actually runs.  The help object
+     is not protected from GC by itself; it stays reachable only while
+     the snapshot published with this root menu exists, so check that
+     on the Lisp thread before dereferencing it.  */
+  static unsigned long mac_loop_menu_help_echo_generation;
+  unsigned long my_generation
+    = __atomic_add_fetch (&mac_loop_menu_help_echo_generation, 1,
+			  __ATOMIC_RELAXED);
+  NSMenu *root = menu;
 
-  if ([object isKindOfClass:EmacsWeakLispObject.class])
-    help = ((EmacsWeakLispObject *) object).lispObject;
-  else
-    help = Qnil;
+  while (root.supermenu)
+    root = root.supermenu;
 
-  mac_within_lisp (^{show_help_echo (help, Qnil, Qnil, Qnil);});
+  unsigned long snapshot
+    = ([root isKindOfClass:EmacsMenu.class]
+       ? [(EmacsMenu *) root persistentMenuGeneration] : 0);
+
+  mac_loop_queue_lisp_block (^{
+      if (my_generation != __atomic_load_n (&mac_loop_menu_help_echo_generation,
+					    __ATOMIC_RELAXED))
+	return;
+      show_help_echo ((helpObject && mac_menu_bar_snapshot_live_p (snapshot)
+		       ? helpObject.lispObject : Qnil),
+		      Qnil, Qnil, Qnil);
+    });
 }
 
 /* Start menu bar tracking and return when it is completed.
@@ -12483,10 +12539,19 @@ init_menu_bar (void)
 /* Fill menu bar with the items defined by FIRST_WV.  If DEEP_P,
    consider the entire menu trees we supply, rather than just the menu
    bar item names.  Return false if native tracking prevented the update,
-   so the caller can invalidate its display cache and retry.  */
+   so the caller can invalidate its display cache and retry.
+
+   Under the persistent loop, GENERATION is the snapshot generation
+   the caller (set_frame_menubar) already published for the command
+   table these widget values were built from (0 if not applicable, or
+   under the old loop where it is unused).  When this fill installs a
+   new root menu, that root is stamped with GENERATION so that
+   -[EmacsMenu setMenuItemSelectionToTag:] can bind a later selection
+   back to the matching snapshot (D4/D5).  */
 
 bool
-mac_fill_menubar (widget_value *first_wv, bool deep_p)
+mac_fill_menubar (widget_value *first_wv, bool deep_p,
+		  unsigned long generation)
 {
   bool __block applied = false;
   mac_within_gui (^{
@@ -12502,6 +12567,8 @@ mac_fill_menubar (widget_value *first_wv, bool deep_p)
 
       newMenu = [[EmacsMenu alloc] init];
       [newMenu setAutoenablesItems:NO];
+      if (generation)
+	[(EmacsMenu *) newMenu setPersistentMenuGeneration:generation];
 
       for (widget_value *wv = first_wv; wv != NULL; wv = wv->next, index++)
 	{
@@ -19655,6 +19722,10 @@ mac_frame_fullscreen_serial (struct frame *f)
   return serial;
 }
 
+/* Lisp-visible predicate (mac-persistent-event-loop-p in macterm.c)
+   and C callers outside this file (macmenu.c) that need to know which
+   loop is active without a raw extern of the static flag above.  */
+
 bool
 mac_persistent_event_loop_active (void)
 {
@@ -19835,6 +19906,26 @@ mac_loop_test_perform (struct mac_loop_test_action action,
 	  subtitle = window.subtitle;
 	mac_loop_test_record ("subtitle %s",
 			      subtitle ? subtitle.UTF8String : "");
+	return;
+      }
+    case MAC_LOOP_TEST_MENU:
+      {
+	NSInteger topIndex = (NSInteger) action.x;
+	NSInteger itemIndex = (NSInteger) action.y;
+	NSMenu *mainMenu = NSApp.mainMenu;
+	NSMenuItem *topItem = (topIndex >= 0 && topIndex < mainMenu.numberOfItems
+			       ? [mainMenu itemAtIndex:topIndex] : nil);
+	NSMenu *submenu = topItem.submenu;
+
+	if (submenu && itemIndex >= 0 && itemIndex < submenu.numberOfItems)
+	  {
+	    mac_loop_test_record ("menu perform %ld %ld",
+				  (long) topIndex, (long) itemIndex);
+	    [submenu performActionForItemAtIndex:itemIndex];
+	  }
+	else
+	  mac_loop_test_record ("menu missing %ld %ld",
+				(long) topIndex, (long) itemIndex);
 	return;
       }
     default:

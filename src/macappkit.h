@@ -1134,6 +1134,11 @@ typedef NSInteger NSGlyphProperty;
   __unsafe_unretained NSMenu *nativeRetryMenu;
   NSMenu *nativeSavedHelpMenu, *nativeHelpPlaceholder;
   unsigned long nativeGeneration;
+  /* Generation stamped on the root menu when the persistent loop
+     publishes a new menu-bar snapshot (see "Persistent event loop"
+     and mac_persistent_menubar_selection in macmenu.c).  Zero means
+     no persistent-loop snapshot has been published for this root.  */
+  unsigned long persistentMenuGeneration;
 }
 - (BOOL)nativeTracking;
 - (BOOL)nativePreparing;
@@ -1142,6 +1147,8 @@ typedef NSInteger NSGlyphProperty;
 - (void)setNativeActivationPrepared;
 - (void)scheduleNativeRetry:(NSMenu *)menu;
 - (BOOL)cancelNativeTrackingForQuitEvent:(NSEvent *)event;
+- (unsigned long)persistentMenuGeneration;
+- (void)setPersistentMenuGeneration:(unsigned long)generation;
 @end
 
 /* Lisp_Object wrapper that does not protect the contents from GC.  */

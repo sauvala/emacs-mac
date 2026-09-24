@@ -180,6 +180,91 @@ The wait lets the command loop execute queued input first."
     (mac-loop-scenario--then 2.5
       (list :before before :after (mac-loop-scenario--frame-state)))))
 
+;;; S4 menu scenarios (D4/D5/D13/D17): a custom top-level "LoopTest"
+;;; menu with one item is installed at the front of `global-map's
+;;; menu-bar keymap with plain `define-key' (which prepends), so it is
+;;; reliably the first Emacs top-level menu, i.e. NSApp.mainMenu item
+;;; index 1 (index 0 is always the Apple menu).  Its one submenu item
+;;; is therefore index 0.  `mac-loop-test-schedule's `menu' action
+;;; performs it on the GUI thread like a real click, exercising
+;;; -[EmacsMenu setMenuItemSelectionToTag:] and, under the persistent
+;;; loop, the snapshot-bound dispatch in mac_persistent_menubar_selection
+;;; (src/macmenu.c) instead of faking an NSEvent.
+
+(defvar mac-loop-scenario--looptest-count 0)
+(defvar mac-loop-scenario--looptest-top-index 1)
+(defvar mac-loop-scenario--looptest-item-index 0)
+
+(defun mac-loop-scenario--looptest-command ()
+  (interactive)
+  (setq mac-loop-scenario--looptest-count
+        (1+ mac-loop-scenario--looptest-count)))
+
+(defun mac-loop-scenario--install-looptest-menu ()
+  (setq mac-loop-scenario--looptest-count 0)
+  (define-key global-map [menu-bar looptest]
+    (cons "LoopTest" (make-sparse-keymap "LoopTest")))
+  (define-key global-map [menu-bar looptest run]
+    '(menu-item "Run" mac-loop-scenario--looptest-command))
+  ;; Force a menu-bar rebuild (and, under the persistent loop, a fresh
+  ;; snapshot generation stamped on the root menu; see mac_fill_menubar
+  ;; and mac_publish_menu_bar_snapshot) before any click is scheduled.
+  (force-mode-line-update t)
+  (redisplay t))
+
+(defun mac-loop-scenario--looptest-messages-tail ()
+  (let ((buf (get-buffer "*Messages*")))
+    (if (not buf)
+        ""
+      (with-current-buffer buf
+        (buffer-substring (max (point-min) (- (point-max) 300))
+                          (point-max))))))
+
+(defun mac-loop-scenario-menu-idle ()
+  "Select the custom menu-bar item while Lisp is idle; runs exactly once."
+  (mac-loop-scenario--install-looptest-menu)
+  (mac-loop-test-schedule
+   (list (list 0.3 'menu mac-loop-scenario--looptest-top-index
+              mac-loop-scenario--looptest-item-index)))
+  (mac-loop-scenario--then 1.5
+    (list :count mac-loop-scenario--looptest-count
+          :commands (mac-loop-scenario--commands))))
+
+(defun mac-loop-scenario-menu-busy ()
+  "Select the custom menu-bar item while Lisp computes; runs once after."
+  (mac-loop-scenario--install-looptest-menu)
+  (mac-loop-test-schedule
+   (list (list 0.5 'menu mac-loop-scenario--looptest-top-index
+              mac-loop-scenario--looptest-item-index)))
+  (let ((busy (mac-loop-scenario--busy 2)))
+    (mac-loop-scenario--then 1.0
+      (list :busy busy :count mac-loop-scenario--looptest-count
+            :commands (mac-loop-scenario--commands)))))
+
+(defun mac-loop-scenario-menu-stale ()
+  "Select, then switch buffers/rebuild the menu bar before Lisp drains
+the selection: it must be rejected (a message naming the reason) and
+must not run the command."
+  (mac-loop-scenario--install-looptest-menu)
+  (let ((other (get-buffer-create "*loop-test-other*")))
+    (mac-loop-test-schedule
+     (list (list 0.3 'menu mac-loop-scenario--looptest-top-index
+                mac-loop-scenario--looptest-item-index)))
+    ;; Stay busy (without draining GUI-queued Lisp blocks) past the
+    ;; scheduled click, then switch buffers and force a menu-bar
+    ;; rebuild -- still without yielding to the command loop -- so a
+    ;; new generation is published before the queued (generation, tag)
+    ;; record for the old one is ever drained.
+    (let ((busy (mac-loop-scenario--busy 0.6)))
+      (switch-to-buffer other)
+      (force-mode-line-update t)
+      (redisplay t)
+      (mac-loop-scenario--then 1.5
+        (list :busy busy
+              :count mac-loop-scenario--looptest-count
+              :buffer (buffer-name)
+              :messages (mac-loop-scenario--looptest-messages-tail))))))
+
 (defun mac-loop-scenario-close-busy ()
   "Close a second frame while Lisp computes; it goes away afterwards."
   (let* ((first (selected-frame))
