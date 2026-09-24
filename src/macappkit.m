@@ -11678,6 +11678,24 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 
 - (BOOL)cancelNativeTrackingForQuitEvent:(NSEvent *)event
 {
+  /* D15: under the persistent loop, the first quit key during
+     menu-bar tracking cancels it and is consumed; it sets no quit
+     request and runs no Lisp.  */
+  if (mac_persistent_loop_p)
+    {
+      if (self != NSApp.mainMenu || !persistentTracking || popup_activated ()
+	  || event.type != NSEventTypeKeyDown
+	  || !mac_keydown_cgevent_quit_p (event.coreGraphicsEvent))
+	return NO;
+
+      MAC_TRACE_LOOP ("quit key cancels menu-bar tracking\n");
+      for (NSMenuItem *item in self.itemArray)
+	[item.submenu cancelTrackingWithoutAnimation];
+      [self cancelTrackingWithoutAnimation];
+      [NSApp postDummyEvent];
+      return YES;
+    }
+
   if (self != NSApp.mainMenu || !nativeTracking || popup_activated ()
       || mac_operating_system_version.major < 27
       || !mac_native_menus_enabled_p ()
@@ -11954,6 +11972,11 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 - (void)menuDidBeginTracking:(NSNotification *)notification
 {
   mac_trace_menu_lifecycle ("begin", self, 0);
+  if (mac_persistent_loop_p)
+    {
+      persistentTracking = !popup_activated ();
+      return;
+    }
   if (nativeTracking)
     return;
   if ((nativeGeneration || nativeNeedsPreparation) && !popup_activated ())
@@ -11972,6 +11995,7 @@ static NSString *localizedMenuTitleForEdit, *localizedMenuTitleForHelp, *localiz
 - (void)menuDidEndTracking:(NSNotification *)notification
 {
   mac_trace_menu_lifecycle ("end", self, 0);
+  persistentTracking = NO;
   nativeTracking = NO;
   [self restoreNativeHelpMenu];
   if (nativeRetryPending && !nativeRetryCancelling)
@@ -19952,15 +19976,28 @@ mac_loop_test_perform (struct mac_loop_test_action action,
 			       ? [mainMenu itemAtIndex:topIndex] : nil);
 	NSMenu *submenu = topItem.submenu;
 
+	if (action.sub_index && submenu && itemIndex >= 0
+	    && itemIndex < submenu.numberOfItems)
+	  {
+	    /* The persistent loop fills nested submenus deeply.  */
+	    NSMenuItem *item = [submenu itemAtIndex:itemIndex];
+
+	    mac_loop_test_record ("menu open %s", item.title.UTF8String);
+	    submenu = item.submenu;
+	    itemIndex = action.sub_index - 1;
+	  }
 	if (submenu && itemIndex >= 0 && itemIndex < submenu.numberOfItems)
 	  {
-	    mac_loop_test_record ("menu perform %ld %ld",
-				  (long) topIndex, (long) itemIndex);
+	    mac_loop_test_record ("menu perform %ld %ld %d",
+				  (long) topIndex, (long) itemIndex,
+				  action.sub_index);
 	    [submenu performActionForItemAtIndex:itemIndex];
 	  }
 	else
-	  mac_loop_test_record ("menu missing %ld %ld",
-				(long) topIndex, (long) itemIndex);
+	  mac_loop_test_record ("menu missing %ld %ld %d (%ld items)",
+				(long) topIndex, (long) itemIndex,
+				action.sub_index,
+				(long) (submenu ? submenu.numberOfItems : -1));
 	return;
       }
     default:

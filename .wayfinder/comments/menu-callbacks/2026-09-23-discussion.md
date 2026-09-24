@@ -229,3 +229,49 @@ with an Accessibility press as the alternative), asking for a way to avoid
 event-faking hacks. D9 was revised to popup plus the system menu-bar
 shortcut, which the user accepted. The user also accepted D17's `user-error`
 feedback. Help text for highlighted menu-bar items (D13) is kept as proposed.
+
+## Implementation notes (2026-09-24, agent-adopted, awaiting user review)
+
+- **D5 `:enable` recheck.** `mac-menu-bar-execute-selection` rebuilds the
+  item's key path from the snapshot vector, temporarily selects the
+  snapshot's window, looks up the raw binding under `[menu-bar ...]` in
+  the active maps, and runs `parse_menu_item` on it, so `:filter`,
+  `:visible`, `:enable` and `menu-enable` are evaluated as when the menu
+  was built. An item that is gone, invisible or disabled is rejected as
+  "item disabled"/"item unavailable". The window selection is restored
+  before rejecting.
+- **D6 placeholder not needed.** Under the persistent loop,
+  `set_frame_menubar` always fills deeply, which evaluates every
+  `:filter` whenever the snapshot is published. No submenu reaches the
+  GUI unexpanded, so the "Unavailable while Emacs is busy" entry is never
+  shown and was not implemented. Revisit this if deep-fill cost forces a
+  return to lazy submenus.
+- **D16 retraction.** `free_frame_menubar` clears the command vector,
+  window and buffer of the deleted frame's snapshots, but keeps the
+  entries with their frame. A queued selection then reports "frame
+  closed", and help-echo treats the snapshot as dead.
+- **D15.** Under the persistent loop, the root `EmacsMenu` records
+  tracking from its begin and end notifications. The existing
+  `nextEventMatchingMask:` hook cancels the root and its submenus on a
+  quit key and consumes the key. It uses the same recognizer as the
+  busy-quit path and evaluates no Lisp. It has not been verified with
+  real tracking; the local event monitor alternative was not needed.
+- **Deep-fill cost.** Measured with `menu-fill-cost`: a forced
+  menu-bar update took about 21 ms (plain `-Q`) and 42 ms (200 buffers
+  and six major modes) under the persistent loop, against 0.8 ms and
+  7.5 ms for the old loop's shallow update. About half was the Lisp
+  build and half the AppKit fill. The fill ran every time, because the
+  `EQ` comparison always failed: the rebuild conses fresh strings and
+  stores `:enable` values such as Recover Session's file list. The
+  adopted fix has two parts. Under the persistent loop, redisplay during
+  a command only marks the menu bar pending, and a 0.2 s repeating idle
+  timer (`mac-update-pending-menu-bars`) does the deep fill. Redisplay
+  while already idle, such as from a timer, fills immediately. The
+  comparison treats strings as equal by text and `:enable`/`:selected`
+  values by truthiness. An idle update then costs about 9 ms and 23 ms,
+  with no AppKit refill when nothing visible changed. Menus can be up to
+  0.2 s of idle time stale after a command, and D5 revalidation covers
+  that window. *Rejected:* a deep fill on every redisplay, because it
+  adds 20-40 ms to buffer switches and first edits; restoring
+  open-time filling, because that needs D3's bounded GUI-to-Lisp request
+  during tracking.

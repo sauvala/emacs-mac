@@ -146,9 +146,14 @@ preferences above; `EMACS_MAC_LOOP_PREFS` (comma-separated keys or `all`)
 re-enables them for comparison. The native-menu experiments are disabled
 under it. Menu-bar selections carry the generation of the snapshot that
 `set_frame_menubar` published with the installed root menu, and are
-rejected with a message if the frame, selected window or buffer changed;
-publish a new generation rather than mutating a snapshot that queued
-actions may reference. F10 shows the menu-bar keymap as a popup
+rejected with a message if the frame, selected window or buffer changed,
+or if the item's `:enable` no longer holds there; publish a new
+generation rather than mutating a snapshot that queued actions may
+reference.  A deleted frame's snapshots are retracted in
+`free_frame_menubar`.  `test/manual/mac-menu/check.py` covers the
+snapshot table.  The menu bar is filled deeply, but only once Emacs is
+idle (`mac-update-pending-menu-bars` idle timer), since a deep build
+costs 10-40 ms. F10 shows the menu-bar keymap as a popup
 (`mac-persistent-event-loop-p`), and repeated close/Quit requests are
 dropped until Lisp reaches its next input wait.
 

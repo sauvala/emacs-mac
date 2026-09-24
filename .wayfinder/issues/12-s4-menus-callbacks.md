@@ -46,14 +46,24 @@ and menu-stale (rejected with `user-error`). What is implemented:
 - Apple events, Services, Help search and toolbar callbacks defer without
   Lisp access.
 
+Added later on 2026-09-24:
+- `:enable` is rechecked when the action executes, in the snapshot's
+  window and buffer (D5); scenarios `menu-disabled` and `menu-nested`.
+- A deleted frame's snapshots are retracted (D16); scenario
+  `menu-frame-deleted`.
+- C-g cancels menu-bar tracking on the GUI thread (D15). This is not
+  verified with real tracking.
+- D6's busy placeholder is not needed, because the deep fill expands
+  every `:filter`.
+- `test/manual/mac-menu/check.py` covers the snapshot table.
+- The deep fill is postponed to an idle timer while commands run. Rebuilds
+  that only change the evaluated values of `:enable`/`:selected` forms
+  or recons equal strings no longer refill AppKit (see the implementation
+  notes in the menu-callbacks discussion).
+
 Not done:
-- Rechecking `:enable` at execution (D5).
-- Retracting a deleted frame's snapshot (D16).
-- The disabled "Unavailable while Emacs is busy" entry for never-expanded
-  `:filter` submenus.
-- D15 C-g during tracking.
-- Extending `test/manual/mac-menu/check.py`.
-- Real mouse and keyboard menu tracking.
+- Real mouse and keyboard menu tracking, and C-g during it.
+- D3's bounded open-time refresh (the deep fill stands in for it).
 
 Snapshots are kept for the eight newest generations rather than by
 reference count.

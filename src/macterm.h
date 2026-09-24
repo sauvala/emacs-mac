@@ -242,6 +242,10 @@ struct mac_output
   /* Menubar "widget" handle.  */
   bool_bf menubar_widget : 1;
 
+  /* Under the persistent event loop, true if the menu bar needs a
+     deep update that was postponed until Emacs is idle.  */
+  bool_bf menu_bar_deep_pending : 1;
+
   /* True means our parent is another application's window
      and was explicitly specified.  */
   bool_bf explicit_parent : 1;
@@ -809,6 +813,7 @@ struct mac_loop_test_action
   double delay;
   int kind;
   double x, y;
+  int sub_index;		/* menu: nested item index + 1, or 0 */
   unsigned short key_code;
   unsigned long modifiers;	/* NSEventModifierFlags */
   unsigned short character;

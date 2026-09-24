@@ -503,10 +503,11 @@ where DELAY is seconds from now and KIND is one of:
   set-size W H         set the window size natively.
   probe N              only record a timestamp.
   subtitle             record the window's current subtitle text.
-  menu TOP-INDEX ITEM-INDEX
+  menu TOP-INDEX ITEM-INDEX [SUB-INDEX]
                        perform ITEM-INDEX'th item of the TOP-INDEX'th
                        top-level menu's submenu (0-based), as AppKit
-                       would on a real click.
+                       would on a real click; with SUB-INDEX, perform
+                       that item of the ITEM-INDEX'th item's submenu.
 The actions run on the GUI thread even while Lisp is busy.  */)
   (Lisp_Object actions, Lisp_Object frame)
 {
@@ -571,6 +572,9 @@ The actions run on the GUI thread even while Lisp is busy.  */)
 	  a[i].x = extract_float (XCAR (spec));
 	  if (CONSP (XCDR (spec)))
 	    a[i].y = extract_float (XCAR (XCDR (spec)));
+	  if (a[i].kind == MAC_LOOP_TEST_MENU
+	      && FIXNATP (Fcar (Fcdr (XCDR (spec)))))
+	    a[i].sub_index = XFIXNAT (Fcar (Fcdr (XCDR (spec)))) + 1;
 	}
     }
   mac_loop_test_schedule (f, a, n);

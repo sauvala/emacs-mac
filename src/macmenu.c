@@ -45,6 +45,7 @@ along with GNU Emacs Mac port.  If not, see <https://www.gnu.org/licenses/>.  */
 #undef HAVE_MULTILINGUAL_MENU
 
 #include "menu.h"
+#include "keymap.h"
 
 
 /* Nonzero means a menu is currently active.  */
@@ -299,14 +300,19 @@ mac_refresh_menu_bar_snapshot (struct frame *f)
     }
 }
 
-/* Return true if the snapshot of GENERATION still exists.  Its copy of
-   the menu-bar vector keeps the help strings of the menu installed with
-   it reachable (D13).  */
+/* Return true if the snapshot of GENERATION still exists and has not
+   been retracted.  Its copy of the menu-bar vector keeps the help
+   strings of the menu installed with it reachable (D13).  */
 
 bool
 mac_menu_bar_snapshot_live_p (unsigned long generation)
 {
-  return generation && CONSP (native_menu_snapshot_entry (generation));
+  Lisp_Object entry
+    = generation ? native_menu_snapshot_entry (generation) : Qnil;
+
+  return (CONSP (entry) && VECTORP (XCDR (entry))
+	  && ASIZE (XCDR (entry)) == NATIVE_MENU_SNAPSHOT_SIZE
+	  && VECTORP (AREF (XCDR (entry), NATIVE_MENU_SNAPSHOT_VECTOR)));
 }
 
 /* Queue a persistent-loop menu-bar action chosen from the root menu
@@ -337,13 +343,127 @@ mac_persistent_menubar_selection (unsigned long generation, int selection)
   kbd_buffer_store_event (&buf);
 }
 
+/* Return the key path of item N in the menu-bar VECTOR of USED
+   entries, in the order find_and_call_menu_selection queues its
+   events, without the leading `menu-bar'.  Return nil if N does not
+   start an item.  */
+
+static Lisp_Object
+menu_bar_selection_keys (Lisp_Object vector, int used, int n)
+{
+  Lisp_Object prefix = Qnil, entry = Qnil, stack = Qnil;
+  int i = 0;
+
+  while (i < used)
+    {
+      if (NILP (AREF (vector, i)))
+	{
+	  stack = Fcons (prefix, stack);
+	  prefix = entry;
+	  i++;
+	}
+      else if (EQ (AREF (vector, i), Qlambda))
+	{
+	  if (CONSP (stack))
+	    {
+	      prefix = XCAR (stack);
+	      stack = XCDR (stack);
+	    }
+	  i++;
+	}
+      else if (EQ (AREF (vector, i), Qt))
+	{
+	  prefix = AREF (vector, i + MENU_ITEMS_PANE_PREFIX);
+	  i += MENU_ITEMS_PANE_LENGTH;
+	}
+      else
+	{
+	  entry = AREF (vector, i + MENU_ITEMS_ITEM_VALUE);
+	  if (i == n)
+	    {
+	      Lisp_Object keys = list1 (entry);
+	      if (!NILP (prefix))
+		keys = Fcons (prefix, keys);
+	      for (; CONSP (stack); stack = XCDR (stack))
+		if (!NILP (XCAR (stack)))
+		  keys = Fcons (XCAR (stack), keys);
+	      return keys;
+	    }
+	  i += MENU_ITEMS_ITEM_LENGTH;
+	}
+    }
+  return Qnil;
+}
+
+struct menu_bar_raw_binding
+{
+  Lisp_Object key, binding;
+  bool found;
+};
+
+static void
+find_menu_bar_raw_binding (Lisp_Object key, Lisp_Object val,
+			   Lisp_Object args, void *data)
+{
+  struct menu_bar_raw_binding *b = data;
+
+  if (!b->found && EQ (key, b->key))
+    {
+      b->binding = val;
+      b->found = true;
+    }
+}
+
+static void
+restore_selected_window (Lisp_Object window)
+{
+  if (WINDOW_LIVE_P (window))
+    Fselect_window (window, Qt);
+}
+
+/* Return true if the menu-bar item at KEYS (see
+   menu_bar_selection_keys) is still bound, visible and enabled in the
+   current buffer and selected window.  The raw binding is found in
+   the active maps as redisplay's menu-bar code sees it, so :filter,
+   :visible and :enable (or a command's `menu-enable' property) are
+   evaluated by parse_menu_item just as when the menu was built.  */
+
+static bool
+menu_bar_item_enabled_p (Lisp_Object keys)
+{
+  Lisp_Object prefix = Fvconcat (1, &keys);
+  ptrdiff_t n = ASIZE (prefix);
+  Lisp_Object key = AREF (prefix, n - 1);
+
+  /* Replace the item's own key with `menu-bar' at the front.  */
+  memmove (XVECTOR (prefix)->contents + 1, XVECTOR (prefix)->contents,
+	   (n - 1) * word_size);
+  ASET (prefix, 0, Qmenu_bar);
+  Lisp_Object map = Fkey_binding (prefix, Qnil, Qnil, Qnil);
+
+  if (!CONSP (get_keymap (map, 0, 1)))
+    return false;
+
+  struct menu_bar_raw_binding b = { key, Qnil, false };
+  map_keymap (map, find_menu_bar_raw_binding, Qnil, &b, true);
+  if (!b.found || NILP (b.binding))
+    return false;
+  if (!CONSP (b.binding))
+    return true;
+  if (!parse_menu_item (b.binding, 0))
+    return false;
+  return !NILP (AREF (item_properties, ITEM_PROPERTY_ENABLE));
+}
+
 DEFUN ("mac-menu-bar-execute-selection", Fmac_menu_bar_execute_selection,
        Smac_menu_bar_execute_selection, 2, 2, 0,
        doc: /* Run menu-bar item SELECTION of the snapshot GENERATION.
 Used by the persistent event loop.  If the snapshot's frame, window or
 buffer changed since the menu was shown, do nothing and return a string
-naming the reason.  Otherwise select the snapshot's window, queue the
-item's events and return nil.  */)
+naming the reason.  Do the same if the item is no longer enabled when
+its conditions are evaluated in the snapshot's window and buffer.
+Otherwise select the snapshot's window, queue the item's events and
+return nil.  */)
   (Lisp_Object generation, Lisp_Object selection)
 {
   CHECK_FIXNAT (generation);
@@ -371,6 +491,19 @@ item's events and return nil.  */)
   if (!(n > 0 && VECTORP (vector) && FIXNATP (items_used)
 	&& n < XFIXNAT (items_used) && XFIXNAT (items_used) <= ASIZE (vector)))
     return build_string ("item unavailable");
+
+  Lisp_Object keys = menu_bar_selection_keys (vector, XFIXNAT (items_used), n);
+  if (NILP (keys))
+    return build_string ("item unavailable");
+
+  specpdl_ref count = SPECPDL_INDEX ();
+  record_unwind_current_buffer ();
+  record_unwind_protect (restore_selected_window, selected_window);
+  Fselect_window (window, Qt);
+  bool enabled = menu_bar_item_enabled_p (keys);
+  unbind_to (count, Qnil);
+  if (!enabled)
+    return build_string ("item disabled");
 
   Fselect_window (window, Qnil);
   find_and_call_menu_selection (XFRAME (frame), XFIXNAT (items_used), vector,
@@ -402,6 +535,27 @@ mac_menu_set_in_use (bool in_use)
 }
 
 
+DEFUN ("mac-update-pending-menu-bars", Fmac_update_pending_menu_bars,
+       Smac_update_pending_menu_bars, 0, 0, 0,
+       doc: /* Update menu bars whose update was postponed while busy.
+Under the persistent event loop, redisplay only notes that a frame's
+menu bar needs an update while a command runs, and this function,
+called from an idle timer, does it.  Internal use only.  */)
+  (void)
+{
+  Lisp_Object tail, frame;
+
+  FOR_EACH_FRAME (tail, frame)
+    {
+      struct frame *f = XFRAME (frame);
+
+      if (FRAME_LIVE_P (f) && FRAME_MAC_P (f)
+	  && f->output_data.mac->menu_bar_deep_pending)
+	set_frame_menubar (f, true);
+    }
+  return Qnil;
+}
+
 DEFUN ("mac-menu-bar-open-internal", Fmac_menu_bar_open_internal,
        Smac_menu_bar_open_internal, 0, 1, "i",
        doc: /* Start key navigation of the menu bar in FRAME.
@@ -421,6 +575,56 @@ If FRAME is nil or not given, use the selected frame.  */)
 }
 
 
+/* Return true if the first PREVIOUS_USED entries of PREVIOUS, a
+   menu-items vector saved as a C array, would show and run the same
+   menu bar as the first USED entries of CURRENT.  Under the persistent
+   loop every update is a deep rebuild, which conses fresh strings and
+   stores each :enable and :selected form's value (for example a list
+   of files), so compare strings by their text and those values by
+   truthiness.  */
+
+static bool
+menu_items_equivalent_p (Lisp_Object *previous, int previous_used,
+			 Lisp_Object current, int used)
+{
+  if (previous_used != used || used == 0)
+    return false;
+
+  for (int i = 0; i < used; )
+    {
+      Lisp_Object old = previous[i], new = AREF (current, i);
+      int length;
+
+      if (NILP (new) || EQ (new, Qlambda))
+	length = 1;
+      else if (EQ (new, Qt))
+	length = MENU_ITEMS_PANE_LENGTH;
+      else
+	length = MENU_ITEMS_ITEM_LENGTH;
+      if (i + length > used)
+	return false;
+
+      for (int j = 0; j < length; j++)
+	{
+	  old = previous[i + j];
+	  new = AREF (current, i + j);
+	  if (EQ (old, new))
+	    continue;
+	  if (length == MENU_ITEMS_ITEM_LENGTH
+	      && (j == MENU_ITEMS_ITEM_ENABLE || j == MENU_ITEMS_ITEM_SELECTED))
+	    {
+	      if (NILP (old) != NILP (new))
+		return false;
+	    }
+	  else if (!(STRINGP (old) && STRINGP (new)
+		     && !NILP (Fstring_equal (old, new))))
+	    return false;
+	}
+      i += length;
+    }
+  return true;
+}
+
 /* Set the contents of the menubar widgets of frame F.  */
 
 void
@@ -438,11 +642,22 @@ set_frame_menubar (struct frame *f, bool deep_p)
   XSETFRAME (Vmenu_updating_frame, f);
 
   /* The persistent loop does not intercept menu-bar tracking, so no
-     deep update happens when a menu opens; publish the whole tree
-     whenever redisplay updates the menu bar (D6).  The comparison
-     below still skips the GUI update when nothing changed.  */
+     deep update happens when a menu opens; it publishes the whole
+     tree instead (D6).  That costs tens of milliseconds, so while a
+     command runs, only note that an update is due and keep the
+     installed menus: `mac-update-pending-menu-bars' does it from an
+     idle timer.  Menus are briefly stale meanwhile; selections are
+     revalidated when executed (D5).  */
   if (mac_persistent_event_loop_active ())
-    deep_p = true;
+    {
+      if (!deep_p && menubar_widget && NILP (Fcurrent_idle_time ()))
+	{
+	  f->output_data.mac->menu_bar_deep_pending = true;
+	  return;
+	}
+      deep_p = true;
+      f->output_data.mac->menu_bar_deep_pending = false;
+    }
 
   /* This seems to be unnecessary for Carbon.  */
 #if 0
@@ -561,10 +776,15 @@ set_frame_menubar (struct frame *f, bool deep_p)
 	 of the menu bar, skip redisplaying it.  Just exit.  */
 
       /* Compare the new menu items with the ones computed last time.  */
-      for (i = 0; i < previous_menu_items_used; i++)
-	if (menu_items_used == i
-	    || (!EQ (previous_items[i], AREF (menu_items, i))))
-	  break;
+      if (mac_persistent_event_loop_active ())
+	i = (menu_items_equivalent_p (previous_items, previous_menu_items_used,
+				      menu_items, menu_items_used)
+	     ? menu_items_used : 0);
+      else
+	for (i = 0; i < previous_menu_items_used; i++)
+	  if (menu_items_used == i
+	      || (!EQ (previous_items[i], AREF (menu_items, i))))
+	    break;
       if (i == menu_items_used && i == previous_menu_items_used && i != 0)
 	{
 	  /* The menu items have not changed.  Don't bother updating
@@ -672,6 +892,26 @@ void
 free_frame_menubar (struct frame *f)
 {
   f->output_data.mac->menubar_widget = 0;
+
+  /* Retract F's menu-bar snapshots (D16).  Keep each entry and its
+     frame so that a queued or still-open selection is rejected as
+     "frame closed", but release the command table, window and buffer
+     now instead of when the generation is trimmed.  */
+  for (Lisp_Object tail = native_menu_snapshots; CONSP (tail);
+       tail = XCDR (tail))
+    {
+      Lisp_Object snapshot = XCDR (XCAR (tail));
+
+      if (VECTORP (snapshot) && ASIZE (snapshot) == NATIVE_MENU_SNAPSHOT_SIZE
+	  && FRAMEP (AREF (snapshot, NATIVE_MENU_SNAPSHOT_FRAME))
+	  && XFRAME (AREF (snapshot, NATIVE_MENU_SNAPSHOT_FRAME)) == f)
+	{
+	  ASET (snapshot, NATIVE_MENU_SNAPSHOT_VECTOR, Qnil);
+	  ASET (snapshot, NATIVE_MENU_SNAPSHOT_ITEMS_USED, make_fixnum (0));
+	  ASET (snapshot, NATIVE_MENU_SNAPSHOT_WINDOW, Qnil);
+	  ASET (snapshot, NATIVE_MENU_SNAPSHOT_BUFFER, Qnil);
+	}
+    }
 }
 
 
@@ -1207,6 +1447,7 @@ syms_of_macmenu (void)
 
   defsubr (&Smac_menu_bar_open_internal);
   defsubr (&Smac_menu_bar_execute_selection);
+  defsubr (&Smac_update_pending_menu_bars);
   DEFSYM (Qmac_menu_bar_selection, "mac-menu-bar-selection");
   Ffset (intern_c_string ("accelerate-menu"),
 	 intern_c_string (Smac_menu_bar_open_internal.s.symbol_name));

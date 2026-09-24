@@ -1139,6 +1139,9 @@ typedef NSInteger NSGlyphProperty;
      and mac_persistent_menubar_selection in macmenu.c).  Zero means
      no persistent-loop snapshot has been published for this root.  */
   unsigned long persistentMenuGeneration;
+  /* True while this root is tracked under the persistent loop, so a
+     quit key can cancel tracking (D15).  */
+  BOOL persistentTracking;
 }
 - (BOOL)nativeTracking;
 - (BOOL)nativePreparing;

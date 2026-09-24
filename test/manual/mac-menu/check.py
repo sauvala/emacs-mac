@@ -14,7 +14,7 @@ source = (root / "src" / "macmenu.c").read_text()
 
 def function(name):
     start = re.search(
-        r"\n(?:static\s+)?(?:Lisp_Object|unsigned long|void)\n"
+        r"\n(?:static\s+)?(?:Lisp_Object|unsigned long|void|bool)\n"
         + re.escape(name)
         + r"\s*\(",
         source,
@@ -39,16 +39,20 @@ fixture = r'''
 #include <stdlib.h>
 
 typedef uintptr_t Lisp_Object;
-enum object_kind { CONS_OBJECT, VECTOR_OBJECT, FRAME_OBJECT };
+enum object_kind { CONS_OBJECT, VECTOR_OBJECT, FRAME_OBJECT, WINDOW_OBJECT };
 struct object { enum object_kind kind; };
 struct cons { enum object_kind kind; Lisp_Object car, cdr; };
 struct vector { enum object_kind kind; int size; Lisp_Object *items; };
+struct mac_output { void *menubar_widget; };
 struct frame {
   enum object_kind kind;
   bool live, mac;
   Lisp_Object menu_bar_vector;
   int menu_bar_items_used;
+  Lisp_Object selected_window;
+  struct { struct mac_output *mac; } output_data;
 };
+struct window { enum object_kind kind; Lisp_Object contents; };
 
 #define Qnil ((Lisp_Object) 0)
 #define Qt make_fixnum (0)
@@ -69,6 +73,11 @@ struct frame {
 #define XFRAME(value) ((struct frame *) (uintptr_t) (value))
 #define FRAME_LIVE_P(frame) ((frame)->live)
 #define FRAME_MAC_P(frame) ((frame)->mac)
+#define FRAME_SELECTED_WINDOW(frame) ((frame)->selected_window)
+#define WINDOWP(value) (HEAPP (value) && object_kind (value) == WINDOW_OBJECT)
+#define XWINDOW(value) ((struct window *) (uintptr_t) (value))
+#define XSETFRAME(value, frame) ((value) = (Lisp_Object) (uintptr_t) (frame))
+#define EQ(a, b) ((a) == (b))
 
 static enum object_kind
 object_kind (Lisp_Object value)
@@ -141,6 +150,14 @@ internal_condition_case_1 (Lisp_Object (*body) (Lisp_Object), Lisp_Object arg,
   return body (arg);
 }
 
+static unsigned long restamped_from, restamped_to;
+static void
+mac_restamp_menu_bar_generation (unsigned long from, unsigned long to)
+{
+  restamped_from = from;
+  restamped_to = to;
+}
+
 static int calls, called_selection, called_items_used;
 static struct frame *called_frame;
 static Lisp_Object called_vector;
@@ -166,6 +183,11 @@ for name in (
     "mac_prepare_native_menubar",
     "mac_native_menubar_selection",
     "mac_release_native_menubar",
+    "mac_trim_menu_bar_snapshots",
+    "mac_publish_menu_bar_snapshot",
+    "mac_refresh_menu_bar_snapshot",
+    "mac_menu_bar_snapshot_live_p",
+    "free_frame_menubar",
 ):
     fixture += function(name)
 
@@ -180,7 +202,106 @@ make_frame (int items_used, unsigned long marker)
   frame->menu_bar_vector = make_vector (items_used + 2, Qnil);
   frame->menu_bar_items_used = items_used;
   ASET (frame->menu_bar_vector, 3, make_fixnum (marker));
+  frame->output_data.mac = calloc (1, sizeof *frame->output_data.mac);
+  assert (frame->output_data.mac);
   return (Lisp_Object) (uintptr_t) frame;
+}
+
+static Lisp_Object
+make_window (Lisp_Object buffer)
+{
+  struct window *window = calloc (1, sizeof *window);
+  assert (window);
+  window->kind = WINDOW_OBJECT;
+  window->contents = buffer;
+  return (Lisp_Object) (uintptr_t) window;
+}
+
+static int
+snapshot_count (void)
+{
+  int n = 0;
+  for (Lisp_Object tail = native_menu_snapshots; CONSP (tail);
+       tail = XCDR (tail))
+    n++;
+  return n;
+}
+
+/* The persistent loop's table: publication, trimming to the newest
+   NATIVE_MENU_SNAPSHOT_KEEP generations, restamping on a window or
+   buffer change, and retraction when a frame is deleted.  */
+
+static void
+check_persistent_snapshots (void)
+{
+  Lisp_Object first = make_frame (8, 31), second = make_frame (6, 32);
+  Lisp_Object buffer_a = make_fixnum (40), buffer_b = make_fixnum (41);
+  Lisp_Object window = make_window (buffer_a);
+
+  XFRAME (first)->selected_window = window;
+  XFRAME (second)->selected_window = make_window (buffer_b);
+
+  unsigned long oldest = mac_publish_menu_bar_snapshot (XFRAME (first));
+  assert (oldest && mac_menu_bar_snapshot_live_p (oldest));
+  Lisp_Object snapshot = XCDR (native_menu_snapshot_entry (oldest));
+  assert (AREF (snapshot, NATIVE_MENU_SNAPSHOT_WINDOW) == window);
+  assert (AREF (snapshot, NATIVE_MENU_SNAPSHOT_BUFFER) == buffer_a);
+  assert (AREF (snapshot, NATIVE_MENU_SNAPSHOT_VECTOR)
+          != XFRAME (first)->menu_bar_vector);
+
+  /* A frame that is not live, or has no menu-bar vector, publishes
+     nothing.  */
+  XFRAME (second)->live = false;
+  assert (mac_publish_menu_bar_snapshot (XFRAME (second)) == 0);
+  XFRAME (second)->live = true;
+
+  unsigned long newest = oldest;
+  for (int i = 1; i < NATIVE_MENU_SNAPSHOT_KEEP; i++)
+    newest = mac_publish_menu_bar_snapshot (XFRAME (first));
+  assert (snapshot_count () == NATIVE_MENU_SNAPSHOT_KEEP);
+  assert (mac_menu_bar_snapshot_live_p (oldest));
+
+  /* One more drops exactly the oldest generation.  */
+  newest = mac_publish_menu_bar_snapshot (XFRAME (first));
+  assert (snapshot_count () == NATIVE_MENU_SNAPSHOT_KEEP);
+  assert (!mac_menu_bar_snapshot_live_p (oldest));
+  assert (mac_menu_bar_snapshot_live_p (newest));
+  assert (!mac_menu_bar_snapshot_live_p (0));
+
+  /* An unchanged window and buffer publish nothing new.  */
+  mac_refresh_menu_bar_snapshot (XFRAME (first));
+  assert (restamped_to == 0);
+
+  /* A buffer change publishes a new generation and restamps the root
+     from the newest one; the old snapshot keeps its context.  */
+  XWINDOW (window)->contents = buffer_b;
+  mac_refresh_menu_bar_snapshot (XFRAME (first));
+  assert (restamped_from == newest && restamped_to != newest);
+  assert (AREF (XCDR (native_menu_snapshot_entry (newest)),
+                NATIVE_MENU_SNAPSHOT_BUFFER) == buffer_a);
+  assert (AREF (XCDR (native_menu_snapshot_entry (restamped_to)),
+                NATIVE_MENU_SNAPSHOT_BUFFER) == buffer_b);
+  assert (snapshot_count () == NATIVE_MENU_SNAPSHOT_KEEP);
+
+  /* Deleting a frame retracts its snapshots but keeps the entries (so
+     a queued selection is rejected as "frame closed"); another
+     frame's snapshot is untouched.  */
+  unsigned long other = mac_publish_menu_bar_snapshot (XFRAME (second));
+  free_frame_menubar (XFRAME (first));
+  assert (!mac_menu_bar_snapshot_live_p (restamped_to));
+  Lisp_Object retracted = XCDR (native_menu_snapshot_entry (restamped_to));
+  assert (AREF (retracted, NATIVE_MENU_SNAPSHOT_FRAME) == first);
+  assert (NILP (AREF (retracted, NATIVE_MENU_SNAPSHOT_VECTOR)));
+  assert (NILP (AREF (retracted, NATIVE_MENU_SNAPSHOT_WINDOW)));
+  assert (NILP (AREF (retracted, NATIVE_MENU_SNAPSHOT_BUFFER)));
+  assert (mac_menu_bar_snapshot_live_p (other));
+
+  /* The old native path ignores a retracted snapshot.  */
+  int before = calls;
+  mac_native_menubar_selection (restamped_to, 3);
+  assert (calls == before);
+
+  native_menu_snapshots = Qnil;
 }
 
 int
@@ -243,6 +364,8 @@ main (void)
   assert (!NILP (native_menu_snapshot_entry (wrapped_generation)));
   mac_release_native_menubar (wrapped_generation);
   assert (NILP (native_menu_snapshots));
+
+  check_persistent_snapshots ();
   puts ("Native menu snapshot lifetime checks passed");
 }
 '''

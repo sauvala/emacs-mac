@@ -200,12 +200,17 @@ The wait lets the command loop execute queued input first."
   (setq mac-loop-scenario--looptest-count
         (1+ mac-loop-scenario--looptest-count)))
 
+(defvar mac-loop-scenario--looptest-enabled t
+  "The :enable form of the LoopTest menu's Run item.")
+
 (defun mac-loop-scenario--install-looptest-menu ()
-  (setq mac-loop-scenario--looptest-count 0)
+  (setq mac-loop-scenario--looptest-count 0
+        mac-loop-scenario--looptest-enabled t)
   (define-key global-map [menu-bar looptest]
     (cons "LoopTest" (make-sparse-keymap "LoopTest")))
   (define-key global-map [menu-bar looptest run]
-    '(menu-item "Run" mac-loop-scenario--looptest-command))
+    '(menu-item "Run" mac-loop-scenario--looptest-command
+                :enable mac-loop-scenario--looptest-enabled))
   ;; Force a menu-bar rebuild (and, under the persistent loop, a fresh
   ;; snapshot generation stamped on the root menu; see mac_fill_menubar
   ;; and mac_publish_menu_bar_snapshot) before any click is scheduled.
@@ -264,6 +269,87 @@ must not run the command."
               :count mac-loop-scenario--looptest-count
               :buffer (buffer-name)
               :messages (mac-loop-scenario--looptest-messages-tail))))))
+
+(defun mac-loop-scenario-menu-disabled ()
+  "Select, then disable the item before Lisp drains the selection: it
+must be rejected as disabled (D5) and must not run the command."
+  (mac-loop-scenario--install-looptest-menu)
+  (mac-loop-test-schedule
+   (list (list 0.3 'menu mac-loop-scenario--looptest-top-index
+              mac-loop-scenario--looptest-item-index)))
+  (let ((busy (mac-loop-scenario--busy 0.6)))
+    (setq mac-loop-scenario--looptest-enabled nil)
+    (mac-loop-scenario--then 1.5
+      (list :busy busy
+            :count mac-loop-scenario--looptest-count
+            :messages (mac-loop-scenario--looptest-messages-tail)))))
+
+(defun mac-loop-scenario-menu-nested ()
+  "Select an item of a nested submenu; its :enable is rechecked through
+the nested key path (D5) and it runs exactly once."
+  (mac-loop-scenario--install-looptest-menu)
+  (define-key global-map [menu-bar looptest nested]
+    (cons "Nested" (make-sparse-keymap "Nested")))
+  (define-key global-map [menu-bar looptest nested inner]
+    '(menu-item "Inner" mac-loop-scenario--looptest-command
+                :enable mac-loop-scenario--looptest-enabled))
+  (force-mode-line-update t)
+  (redisplay t)
+  ;; `define-key' prepends, so Nested is item 0 and Run is item 1.
+  (mac-loop-test-schedule
+   (list (list 0.3 'menu mac-loop-scenario--looptest-top-index 0 0)))
+  (mac-loop-scenario--then 1.5
+    (list :count mac-loop-scenario--looptest-count
+          :commands (mac-loop-scenario--commands)
+          :messages (mac-loop-scenario--looptest-messages-tail))))
+
+(defun mac-loop-scenario-menu-frame-deleted ()
+  "Select from a second frame's menu bar, then delete that frame before
+Lisp drains the selection: it must be rejected as \"frame closed\"
+(D16) and must not run the command."
+  (mac-loop-scenario--install-looptest-menu)
+  (let ((second (make-frame '((width . 40) (height . 10)))))
+    (select-frame-set-input-focus second)
+    (force-mode-line-update t)
+    (redisplay t)
+    (mac-loop-test-schedule
+     (list (list 0.3 'menu mac-loop-scenario--looptest-top-index
+                mac-loop-scenario--looptest-item-index))
+     second)
+    (let ((busy (mac-loop-scenario--busy 0.6)))
+      (delete-frame second)
+      (mac-loop-scenario--then 1.5
+        (list :busy busy
+              :count mac-loop-scenario--looptest-count
+              :messages (mac-loop-scenario--looptest-messages-tail))))))
+
+(defun mac-loop-scenario--menu-update-time (n)
+  "Return seconds per forced menu-bar update, averaged over N redisplays."
+  (let ((start (float-time)))
+    (dotimes (_ n)
+      (force-mode-line-update t)
+      (redisplay t))
+    (/ (- (float-time) start) n)))
+
+(defun mac-loop-scenario-menu-fill-cost ()
+  "Time forced menu-bar updates with a plain setup, then with many
+buffers and several major modes that add menus.  The persistent loop
+fills the whole menu tree on each update; the old loop fills only the
+top level, so the difference is the deep-fill cost."
+  (let ((plain (mac-loop-scenario--menu-update-time 50))
+        (gcs gcs-done))
+    (dotimes (i 200)
+      (with-current-buffer (get-buffer-create (format "fill-%03d" i))
+        (insert "x")))
+    (dolist (mode '(org-mode c-mode python-mode sh-mode outline-mode
+                    emacs-lisp-mode))
+      (with-current-buffer (get-buffer-create (format "*fill-%s*" mode))
+        (funcall mode)))
+    (switch-to-buffer "*fill-org-mode*")
+    (let ((loaded (mac-loop-scenario--menu-update-time 50)))
+      (mac-loop-scenario--then 0.5
+        (list :plain-ms (* 1000 plain) :loaded-ms (* 1000 loaded)
+              :gcs (- gcs-done gcs))))))
 
 (defun mac-loop-scenario-close-busy ()
   "Close a second frame while Lisp computes; it goes away afterwards."

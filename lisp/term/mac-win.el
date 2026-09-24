@@ -2081,6 +2081,7 @@ A hook function can determine the current appearance by checking the
 
 (declare-function accelerate-menu "macmenu.c" (&optional frame) t)
 (declare-function mac-persistent-event-loop-p "macterm.c" ())
+(declare-function mac-update-pending-menu-bars "macmenu.c" ())
 
 (defun mac-menu-bar-open (&optional frame)
   "Open the menu bar if it is shown.
@@ -3118,6 +3119,12 @@ standard ones in `x-handle-args'."
 	    (lambda ()
 	      (mouse-wheel-mode 0)
 	      (mac-mouse-wheel-mode 1)))
+
+  ;; Under the persistent event loop, menu-bar updates that redisplay
+  ;; postponed while a command ran are done once Emacs is idle.
+  (when (and (fboundp 'mac-persistent-event-loop-p)
+             (mac-persistent-event-loop-p))
+    (run-with-idle-timer 0.2 t 'mac-update-pending-menu-bars))
 
   (add-hook 'menu-bar-update-hook 'mac-setup-help-topics)
   (run-with-idle-timer 0.1 nil 'mac-setup-help-topics)
