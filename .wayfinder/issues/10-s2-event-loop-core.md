@@ -1,7 +1,7 @@
 ---
 id: s2-event-loop-core
 title: "S2: Build the persistent event-loop core"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: macos-app-integration
 assignee: null
@@ -43,3 +43,7 @@ record queue. Scripted evidence is in
 `test/manual/mac-app-loop/evidence/2026-09-24-macos27-both-scripted.md`,
 including try-lock grants during the input wait. Interactive acceptance is
 still unverified, so the ticket stays open.
+
+## Resolution (2026-09-24)
+
+Closed at the user's request: [resolution](../comments/s2-event-loop-core/2026-09-24-resolution.md).

@@ -1,7 +1,7 @@
 ---
 id: s0-instrumentation
 title: "S0: Add loop instrumentation and busy-Lisp fixtures"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: macos-app-integration
 assignee: null
@@ -29,3 +29,7 @@ an evidence record from the unchanged old loop exists as the baseline.
 ## Blocked by
 
 None.
+
+## Resolution (2026-09-24)
+
+Closed at the user's request: [resolution](../comments/s0-instrumentation/2026-09-24-resolution.md).

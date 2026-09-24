@@ -1,7 +1,7 @@
 ---
 id: s1-launch-selector
 title: "S1: Add the launch-selected event-loop option"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: macos-app-integration
 assignee: null
@@ -28,3 +28,7 @@ compiled default in both directions.
 ## Blocked by
 
 - [S0: Add loop instrumentation and busy-Lisp fixtures](08-s0-instrumentation.md)
+
+## Resolution (2026-09-24)
+
+Closed at the user's request: [resolution](../comments/s1-launch-selector/2026-09-24-resolution.md).
