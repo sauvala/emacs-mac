@@ -1,10 +1,10 @@
 ---
 id: s3-windows-redisplay
 title: "S3: Move window lifecycle and redisplay to the new loop"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: macos-app-integration
-assignee: claude-app-loop-session-3
+assignee: null
 ---
 
 ## Scope
