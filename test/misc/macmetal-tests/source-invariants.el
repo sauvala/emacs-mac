@@ -162,7 +162,7 @@ Metal's completion handler threads, so they must not be plain fields."
   "Metal should avoid full-drawable presentation for no-op update cycles."
   (let ((source (macmetal-tests--source))
         (frame-end-body (macmetal-tests--function-body
-                         "emacs_metal_frame_end"))
+                         "emacs_metal_frame_end_1"))
         (emit-body (macmetal-tests--function-body "emit_vertices"))
         (scroll-body (macmetal-tests--function-body "emacs_metal_scroll")))
     (should (string-match-p "backbuffer_dirty" source))
@@ -171,8 +171,22 @@ Metal's completion handler threads, so they must not be plain fields."
     (should (string-match-p "ctx->backbuffer_dirty = true" scroll-body))
     (should (string-match-p "ctx->backbuffer_dirty = false" frame-end-body))
     (should (string-match-p
-	     "if (!ctx->backbuffer_dirty || !cmd)[\0-\377]*return;[^\0]*emacs_metal_schedule_presentation"
+	     "if (!(ctx->backbuffer_dirty || (present && ctx->presentation_held))[\0-\377]*return;[^\0]*emacs_metal_schedule_presentation"
 	     frame-end-body))))
+
+(ert-deftest macmetal-holds-presentation-of-garbaged-frame-clear ()
+  "Clearing a garbaged frame must not be presented before its redraw.
+redraw_frame clears the frame in an update of its own; presenting that
+update showed a blank frame after each live-resize step."
+  (let ((frame-end-body (macmetal-tests--function-body
+                         "emacs_metal_frame_end_1"))
+        (macterm (macmetal-tests--macterm-source)))
+    (should (string-match-p "ctx->presentation_held = !present;" frame-end-body))
+    (should (string-match-p "if (present)\n *emacs_metal_schedule_presentation"
+                            frame-end-body))
+    (should (string-match-p
+             "FRAME_GARBAGED_P (f))\n *emacs_metal_frame_end_held"
+             macterm))))
 
 (ert-deftest macmetal-presentation-task-snapshots-context-under-lock ()
   "The presenter queue must not read context fields the main thread stores."

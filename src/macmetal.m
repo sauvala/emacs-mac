@@ -290,6 +290,9 @@ struct emacs_metal_context
      rather than by update_begin.  */
   bool implicit_frame;
   bool backbuffer_dirty;
+  /* Set when emacs_metal_frame_end_held committed drawing without
+     presenting it; the next emacs_metal_frame_end presents.  */
+  bool presentation_held;
   bool presentation_valid;
   bool presentation_scheduled;
   bool presentation_in_flight;
@@ -1184,8 +1187,8 @@ emacs_metal_schedule_presentation (emacs_metal_context_t *ctx)
     emacs_metal_dispatch_presentation_task (ctx);
 }
 
-void
-emacs_metal_frame_end (emacs_metal_context_t *ctx)
+static void
+emacs_metal_frame_end_1 (emacs_metal_context_t *ctx, bool present)
 {
   if (!ctx->in_frame)
     return;
@@ -1200,7 +1203,8 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
   /* Render all pending batches into the backbuffer.  */
   flush_render_batches (ctx, cmd);
 
-  if (!ctx->backbuffer_dirty || !cmd)
+  if (!(ctx->backbuffer_dirty || (present && ctx->presentation_held))
+      || !cmd)
     {
       dispatch_semaphore_signal (ctx->buffer_semaphore);
       ctx->frame_command_buffer = nil;
@@ -1230,7 +1234,26 @@ emacs_metal_frame_end (emacs_metal_context_t *ctx)
   [cmd commit];
   ctx->backbuffer_dirty = false;
   ctx->frame_command_buffer = nil;
-  emacs_metal_schedule_presentation (ctx);
+  ctx->presentation_held = !present;
+  if (present)
+    emacs_metal_schedule_presentation (ctx);
+}
+
+void
+emacs_metal_frame_end (emacs_metal_context_t *ctx)
+{
+  emacs_metal_frame_end_1 (ctx, true);
+}
+
+/* Like emacs_metal_frame_end, but leave the screen showing the last
+   presentation.  For drawing that must not be seen on its own, such
+   as the clear that redraw_frame does before redisplay redraws a
+   garbaged frame; the next emacs_metal_frame_end presents both.  */
+
+void
+emacs_metal_frame_end_held (emacs_metal_context_t *ctx)
+{
+  emacs_metal_frame_end_1 (ctx, false);
 }
 
 /* Local MIN/MAX for integer arithmetic if not already defined.  */

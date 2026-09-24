@@ -145,7 +145,10 @@ means one is missing. Callbacks that only sync AppKit window state to Lisp
 use `MAC_LOOP_STATE_CALLBACK_NEEDS_LISP`, which replaces a pending deferred
 callback of the same kind. While Lisp is busy, a growing window shows the
 last Metal drawable anchored top-left over the frame background, which is
-the layer's `backgroundColor`. Do not add GUI-thread snapshots that read
+the layer's `backgroundColor`. Idle live-resize steps redraw a garbaged
+frame; `mac_update_end` holds the Metal presentation of `redraw_frame`'s
+clear so that no blank frame reaches the screen between steps. Do not add
+GUI-thread snapshots that read
 the window tree or faces without Lisp access. Text input and
 accessibility queries that read buffer text or glyph matrices use
 `mac_try_content_access` or `MAC_LOOP_CONTENT_QUERY`, which allow only a

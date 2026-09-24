@@ -1513,7 +1513,12 @@ mac_update_end (struct frame *f)
 #ifdef USE_METAL_RENDERING
   MOUSE_HL_INFO (f)->mouse_face_defer = false;
   block_input ();
-  if (FRAME_METAL_CTX (f))
+  /* redraw_frame clears a garbaged frame in an update of its own,
+     and redisplay redraws it in the next one.  Presenting the clear
+     would show a blank frame, e.g. after each live-resize step.  */
+  if (FRAME_METAL_CTX (f) && FRAME_GARBAGED_P (f))
+    emacs_metal_frame_end_held (FRAME_METAL_CTX (f));
+  else if (FRAME_METAL_CTX (f))
     emacs_metal_frame_end (FRAME_METAL_CTX (f));
   unblock_input ();
 #else
