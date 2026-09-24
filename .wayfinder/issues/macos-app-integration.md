@@ -39,6 +39,9 @@ version, with explicit validation and retirement criteria for existing workaroun
   (tickets 08-16), created 2026-09-23 at the user's request. Tracking them
   here does not change the planning scope; each task's own work happens in
   later sessions.
+- Follow-up tasks: 17 (D3 open-time menu refresh) and 18 (present
+  live-resize frames with the window change, replacing the Metal
+  presentation workarounds added after S3).
 
 ## Decisions so far
 
