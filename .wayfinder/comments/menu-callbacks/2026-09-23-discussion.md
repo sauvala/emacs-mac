@@ -275,3 +275,8 @@ feedback. Help text for highlighted menu-bar items (D13) is kept as proposed.
   adds 20-40 ms to buffer switches and first edits; restoring
   open-time filling, because that needs D3's bounded GUI-to-Lisp request
   during tracking.
+- **F10 while busy (from interactive testing).** F10 does not open the
+  popup while Lisp is busy, because it is a Lisp key binding and waits to
+  be read like any other key. This follows from D9. Control-F2 and the
+  mouse reach the native menu bar without Lisp. Evidence:
+  `test/manual/mac-app-loop/evidence/2026-09-24-macos27-new-interactive.md`.
