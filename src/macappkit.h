@@ -803,6 +803,9 @@ typedef NSInteger NSGlyphProperty;
 - (void)macLoopClearClosePending;
 - (void)macLoopShowQuitIndicator;
 - (void)macLoopClearQuitIndicator;
+#ifdef USE_METAL_RENDERING
+- (void)setEmacsViewLayerBackgroundColor:(NSColor *)color;
+#endif
 @end
 
 

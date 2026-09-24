@@ -150,3 +150,67 @@ The user accepted all decisions, including the items flagged for review: the
 "Waiting for Emacs…" subtitle after 100 ms (W7/W8), deferring Lisp resizes
 of a frame being dragged until the drag ends (W9), and returning from Lisp
 fullscreen requests once AppKit accepts the transition (W6).
+
+## Implementation notes (2026-09-24, agent-adopted)
+
+These record how the branch implements W2, W3, W6 and W10, and what was
+found while doing it. The user has not yet reviewed them.
+
+- **W3 finding: the Metal layer's exposed area was undefined.** AppKit
+  maps `NSViewLayerContentsPlacementTopLeft` on the `CAMetalLayer`-backed
+  view to `contentsGravity = bottomLeft` with `geometryFlipped`, so an
+  old drawable stays top-left and is not stretched. It also marks the
+  layer opaque but gives it no `backgroundColor`, so the area that grows
+  beyond the drawable is undefined. A standalone probe confirmed these
+  properties on macOS 27 (gravity `bottomLeft`, flipped, opaque, no
+  background). Adopted: under the persistent loop,
+  `mac_set_frame_window_background` also sets the layer background to the
+  frame background, which Lisp publishes through its usual GUI request.
+- **W3: no snapshot transition layer for live resize under the new
+  loop.** `-setupLiveResizeTransition` covers the view with a snapshot
+  during the drag. Building the snapshot walks the window tree and looks
+  up faces on the GUI thread, which is unsafe while Lisp runs, and the
+  snapshot would also hide W2's live redraw. The new loop skips it for
+  drags and for animated `zoom:`. The fullscreen custom animation keeps
+  the snapshot, as W3 says, but only when the GUI thread gets Lisp
+  access. Otherwise it returns nil, and AppKit's default animation runs.
+- **W2: live steps while Lisp is idle.** During live resize,
+  `-[EmacsMainView viewFrameDidChange:]` takes Lisp access by try-lock.
+  It then resizes the drawable, passes the size with
+  `mac_handle_size_change`, and wakes Lisp. `do_pending_window_change`
+  after the select garbages the frame, so the next wait iteration
+  redisplays. Without access, the step is skipped, not deferred, and
+  `-viewDidEndLiveResize` still delivers the final size. In the scripted
+  idle drag, 16 of 18 steps were applied; in the busy drag, 0 of 18 were
+  applied and the final size converged. *Known gap:* if a step is skipped
+  because Lisp is momentarily busy and the pointer then stays still,
+  the window keeps the stale presentation until the next movement or the
+  mouse-up.
+- **W6/W10: coalesced state callbacks.** The callbacks that only bring
+  Lisp up to date with AppKit state (move, resize, minimize/restore,
+  screen, backing properties, screen parameters, view frame, end of
+  live resize) use `MAC_LOOP_STATE_CALLBACK_NEEDS_LISP`. A deferred one
+  replaces the pending callback of the same kind for the same object and
+  goes to the end of the FIFO. It reads the state when it runs, so the
+  latest state wins, after the events that came before it. The seventh
+  `mac-loop-test-results` access counter counts the replacements.
+  `busy-native` replaced 42, and `resize-burst` replaced none, because
+  busy Lisp drains the FIFO between steps from `read_socket`. Callbacks
+  that carry one-off data, such as the fullscreen parameter event (which
+  already carries a serial number), text input and actions, are not
+  coalesced.
+- **W10: no unlocked Metal resize.** `-[EmacsView
+  viewDidChangeBackingProperties]` resized the Metal context from the GUI
+  thread without Lisp access, which races with Lisp drawing into it. It
+  now needs access. Without access, the old drawable remains, and the
+  deferred `-windowDidChangeBackingProperties:` resizes the context and
+  updates `FRAME_BACKING_SCALE_FACTOR` once Lisp can redraw. AppKit may
+  change the layer's `contentsScale` in the meantime, so the old
+  presentation can briefly appear at the wrong size. It is top-left
+  anchored over the background, not corrupt. This has not been checked on
+  mixed-scale displays.
+- **Not changed:** `-windowWillResize:toSize:` still reads
+  `FRAME_SIZE_HINTS` on the GUI thread. That structure is allocated once
+  per frame and updated field by field, so a racing read can give one
+  stale increment but no invalid memory. Publishing a copy (W2) is left
+  for later.

@@ -198,6 +198,22 @@ static int mac_loop_pending_indicator_count;
 	return;								\
       }									\
   } while (false)
+/* Like MAC_LOOP_CALLBACK_NEEDS_LISP, for a callback that only brings
+   Lisp up to date with the current state of an AppKit object (W1, W6,
+   W10).  Such a callback reads that state when it runs, so a deferred
+   one replaces any pending callback with the same KEY (a string
+   literal) for the same receiver, instead of queueing another one.  */
+#define MAC_LOOP_STATE_CALLBACK_NEEDS_LISP(key, call)			\
+  do {									\
+    if (mac_persistent_loop_p && !mac_loop_gui_has_lisp_access ())	\
+      {									\
+	mac_loop_with_access_now_or_later_coalesced (self, key,	\
+						     ^{call;});		\
+	return;								\
+      }									\
+  } while (false)
+static void mac_loop_with_access_now_or_later_coalesced (id, const char *,
+							 void (^) (void));
 static void mac_loop_within_gui (void (^) (void));
 static bool mac_loop_within_lisp (void (^) (void));
 static bool mac_loop_defer_to_request (void (^) (void));
@@ -1532,7 +1548,7 @@ static bool handling_queued_nsevents_p;
 #if HAVE_MAC_METAL || defined (USE_METAL_RENDERING)
 - (void)applicationDidChangeScreenParameters:(NSNotification *)notification
 {
-  MAC_LOOP_CALLBACK_NEEDS_LISP ([self applicationDidChangeScreenParameters:notification]);
+  MAC_LOOP_STATE_CALLBACK_NEEDS_LISP ("screen-parameters", [self applicationDidChangeScreenParameters:notification]);
 
   Lisp_Object tail, frame;
 
@@ -3314,6 +3330,21 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
   [self macLoopShowIndicatorIfNeeded];
 }
 
+#ifdef USE_METAL_RENDERING
+/* W3: AppKit makes the view's CAMetalLayer opaque, and a layer that
+   grows before Lisp presents a drawable of the new size shows the old
+   drawable anchored top-left (NSViewLayerContentsPlacementTopLeft).
+   Without a background colour the area outside that drawable is
+   undefined.  Fill it with the published frame background.  */
+
+- (void)setEmacsViewLayerBackgroundColor:(NSColor *)color
+{
+  [CATransaction setDisableActions:YES];
+  emacsView.layer.backgroundColor = color.CGColor;
+  [CATransaction commit];
+}
+#endif
+
 - (void)macLoopClearQuitIndicator
 {
   macLoopIndicatorPendingCount--;
@@ -3867,7 +3898,7 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidMove:(NSNotification *)notification
 {
-  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidMove:notification]);
+  MAC_LOOP_STATE_CALLBACK_NEEDS_LISP ("move", [self windowDidMove:notification]);
 
   struct frame *f = emacsFrame;
 
@@ -3876,7 +3907,7 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidResize:(NSNotification *)notification
 {
-  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidResize:notification]);
+  MAC_LOOP_STATE_CALLBACK_NEEDS_LISP ("resize", [self windowDidResize:notification]);
 
   struct frame *f = emacsFrame;
 
@@ -3889,7 +3920,7 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidMiniaturize:(NSNotification *)notification
 {
-  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidMiniaturize:notification]);
+  MAC_LOOP_STATE_CALLBACK_NEEDS_LISP ("visibility", [self windowDidMiniaturize:notification]);
 
   struct frame *f = emacsFrame;
 
@@ -3898,7 +3929,7 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidDeminiaturize:(NSNotification *)notification
 {
-  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidDeminiaturize:notification]);
+  MAC_LOOP_STATE_CALLBACK_NEEDS_LISP ("visibility", [self windowDidDeminiaturize:notification]);
 
   struct frame *f = emacsFrame;
 
@@ -3907,7 +3938,7 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidChangeScreen:(NSNotification *)notification
 {
-  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidChangeScreen:notification]);
+  MAC_LOOP_STATE_CALLBACK_NEEDS_LISP ("screen", [self windowDidChangeScreen:notification]);
 
   /* We used to update the presentation options for the key window
      here.  But it makes application switching impossible in Split
@@ -3923,7 +3954,7 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)windowDidChangeBackingProperties:(NSNotification *)notification
 {
-  MAC_LOOP_CALLBACK_NEEDS_LISP ([self windowDidChangeBackingProperties:notification]);
+  MAC_LOOP_STATE_CALLBACK_NEEDS_LISP ("backing", [self windowDidChangeBackingProperties:notification]);
 
   [self updateBackingScaleFactor];
 }
@@ -4407,6 +4438,14 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
 
 - (void)setupLiveResizeTransition
 {
+  /* W2/W3: the persistent loop lets Lisp redraw live while it is
+     idle, and otherwise keeps the last presentation anchored top-left
+     over the published background colour.  The snapshot layer would
+     hide the live redraw, and building it reads the window tree and
+     faces, which the GUI thread may not do while Lisp is busy.  */
+  if (mac_persistent_loop_p)
+    return;
+
   if (liveResizeCompletionHandler == nil
       /* Resizing in Split View on macOS 10.15 no longer
 	 scale-and-blurs non-main window.  */
@@ -4689,8 +4728,20 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
   else
     {
       EmacsFrameController * __unsafe_unretained weakSelf = self;
+      /* The snapshot layer reads the window tree and faces.  Without
+	 Lisp access, use AppKit's default animation instead (W3).  */
+      int token = mac_loop_begin_lisp_access ();
+
+      if (token == MAC_LOOP_NO_ACCESS)
+	{
+	  MAC_TRACE_LOOP ("full screen transition without snapshot\n");
+	  return nil;
+	}
+
       CALayer *layer =
 	[self liveResizeTransitionLayerWithDefaultBackground:YES];
+
+      mac_loop_end_lisp_access (token);
 
       [CATransaction setDisableActions:YES];
       [[overlayView layer] addSublayer:layer];
@@ -5922,10 +5973,17 @@ mac_convert_frame_point_to_global (struct frame *f, int *x, int *y)
 void
 mac_set_frame_window_background (struct frame *f, unsigned long color)
 {
-  EmacsWindow *window = FRAME_MAC_WINDOW_OBJECT (f);
+  EmacsFrameController *frameController = FRAME_CONTROLLER (f);
+  EmacsWindow *window = [frameController emacsWindow];
 
   mac_within_gui (^{
-      [window setBackgroundColor:[NSColor colorWithEmacsColorPixel:color]];
+      NSColor *backgroundColor = [NSColor colorWithEmacsColorPixel:color];
+
+      [window setBackgroundColor:backgroundColor];
+#ifdef USE_METAL_RENDERING
+      if (mac_persistent_loop_p)
+	[frameController setEmacsViewLayerBackgroundColor:backgroundColor];
+#endif
       /* This formula comes from frame-set-background-mode in
 	 frame.el.  */
       NSAppearanceName name =
@@ -7242,7 +7300,16 @@ static BOOL emacsViewUpdateLayerDisabled;
 - (void)viewDidChangeBackingProperties
 {
 #ifdef USE_METAL_RENDERING
+  /* W10: resizing the Metal context races with Lisp drawing into it.
+     Without Lisp access, keep the old drawable, which the layer
+     scales; -windowDidChangeBackingProperties: resizes it once Lisp
+     can redraw.  */
+  int token = mac_loop_begin_lisp_access ();
+
+  if (token == MAC_LOOP_NO_ACCESS)
+    return;
   [self syncMetalDrawableSize];
+  mac_loop_end_lisp_access (token);
 #else
   MRC_RELEASE (backing);
   backing = nil;
@@ -8373,9 +8440,43 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
       }
 }
 
+/* Persistent loop (W2/W3): pass the size of each live-resize step to
+   Lisp while it is idle, so that it redraws at that size during the
+   drag.  While Lisp is busy, skip the step rather than deferring it:
+   -viewDidEndLiveResize delivers the final size, and the layer shows
+   the last presentation over the frame background meanwhile.  */
+
+- (void)macLoopLiveResizeFrameDidChange
+{
+  if (!([self autoresizingMask] & (NSViewWidthSizable | NSViewHeightSizable)))
+    return;
+
+  int token = mac_loop_begin_lisp_access ();
+  NSRect frameRect = [self frame];
+
+  MAC_TRACE_LOOP ("live resize step %.0fx%.0f %s\n", NSWidth (frameRect),
+		  NSHeight (frameRect),
+		  token == MAC_LOOP_NO_ACCESS ? "skipped" : "applied");
+  if (token == MAC_LOOP_NO_ACCESS)
+    return;
+
+  struct frame *f = [self emacsFrame];
+
+  [self synchronizeChildFrameOrigins];
+#ifndef USE_METAL_RENDERING
+  backingSizeOutOfSync = YES;
+#else
+  [self syncMetalDrawableSize];
+#endif
+  mac_handle_size_change (f, NSWidth (frameRect), NSHeight (frameRect));
+  mac_loop_end_lisp_access (token);
+  if (token == MAC_LOOP_LOCKED_ACCESS)
+    mac_loop_wake_lisp ();
+}
+
 - (void)viewDidEndLiveResize
 {
-  MAC_LOOP_CALLBACK_NEEDS_LISP ([self viewDidEndLiveResize]);
+  MAC_LOOP_STATE_CALLBACK_NEEDS_LISP ("end-live-resize", [self viewDidEndLiveResize]);
 
   struct frame *f = [self emacsFrame];
   NSRect frameRect = [self frame];
@@ -8395,7 +8496,13 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
 
 - (void)viewFrameDidChange:(NSNotification *)notification
 {
-  MAC_LOOP_CALLBACK_NEEDS_LISP ([self viewFrameDidChange:notification]);
+  if (mac_persistent_loop_p && [self inLiveResize])
+    {
+      [self macLoopLiveResizeFrameDidChange];
+      return;
+    }
+
+  MAC_LOOP_STATE_CALLBACK_NEEDS_LISP ("frame", [self viewFrameDidChange:notification]);
 
   if (![self inLiveResize]
       && ([self autoresizingMask] & (NSViewWidthSizable | NSViewHeightSizable)))
@@ -18699,6 +18806,30 @@ mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 
 @end
 
+/* A deferred state callback (MAC_LOOP_STATE_CALLBACK_NEEDS_LISP).  */
+
+@interface EmacsLoopStateCallback : NSObject
+{
+@public
+  /* Compared by identity only; BLOCK retains it.  */
+  __unsafe_unretained id owner;
+  const char *key;
+  void (^block) (void);
+}
+@end
+
+@implementation EmacsLoopStateCallback
+
+- (void)dealloc
+{
+  MRC_RELEASE (block);
+#if !USE_ARC
+  [super dealloc];
+#endif
+}
+
+@end
+
 /* Guards the three queues below.  */
 static pthread_mutex_t mac_loop_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -18735,13 +18866,14 @@ static unsigned mac_loop_wait_generation; /* Counts Lisp's input waits.  */
 
 /* Counters for test/manual/mac-app-loop: Lisp access granted by
    try-lock, granted while a request parks Lisp, denied; deferred
-   NSEvents and callbacks; queued GUI-to-Lisp items.  */
-static unsigned long mac_loop_stats[6];
+   NSEvents and callbacks; queued GUI-to-Lisp items; deferred state
+   callbacks replaced by a later one.  */
+static unsigned long mac_loop_stats[7];
 enum
   {
     MAC_LOOP_STAT_LOCKED, MAC_LOOP_STAT_BORROWED, MAC_LOOP_STAT_DENIED,
     MAC_LOOP_STAT_DEFERRED_EVENTS, MAC_LOOP_STAT_DEFERRED_CALLBACKS,
-    MAC_LOOP_STAT_LISP_ITEMS
+    MAC_LOOP_STAT_LISP_ITEMS, MAC_LOOP_STAT_COALESCED_CALLBACKS
   };
 
 /* Lisp thread: hold_quit of the drain in progress, if any.  */
@@ -19233,6 +19365,8 @@ mac_loop_handle_events_with_access (NSEvent *event)
       if ([deferred isKindOfClass:NSEvent.class])
 	count += [emacsController handleNSEventWithHoldingQuitIn:NULL
 							   event:deferred];
+      else if ([deferred isKindOfClass:EmacsLoopStateCallback.class])
+	((EmacsLoopStateCallback *) deferred)->block ();
       else
 	/* A callback that needed Lisp access.  */
 	((void (^) (void)) deferred) ();
@@ -19313,13 +19447,47 @@ mac_loop_send_event (NSEvent *event)
    runs, in order, the next time the GUI thread has access.  */
 
 static void
-mac_loop_with_access_now_or_later (void (^block) (void))
+mac_loop_with_access_now_or_later_coalesced (id owner, const char *key,
+					     void (^block) (void))
 {
   int token = mac_loop_begin_lisp_access ();
 
   if (token == MAC_LOOP_NO_ACCESS)
     {
-      [mac_loop_deferred_events addObject:MRC_AUTORELEASE ([block copy])];
+      if (key)
+	{
+	  /* Drop the pending callback of the same kind and append this
+	     one, so that Lisp learns the latest state after the events
+	     that preceded it.  */
+	  NSUInteger i = [mac_loop_deferred_events
+			   indexOfObjectPassingTest:^BOOL (id obj,
+							   NSUInteger idx,
+							   BOOL *stop) {
+			      EmacsLoopStateCallback *callback = obj;
+
+			      return ([obj isKindOfClass:
+					     EmacsLoopStateCallback.class]
+				      && callback->owner == owner
+				      && strcmp (callback->key, key) == 0);
+			    }];
+
+	  if (i != NSNotFound)
+	    {
+	      [mac_loop_deferred_events removeObjectAtIndex:i];
+	      mac_loop_stats[MAC_LOOP_STAT_COALESCED_CALLBACKS]++;
+	    }
+
+	  EmacsLoopStateCallback *callback =
+	    [[EmacsLoopStateCallback alloc] init];
+
+	  callback->owner = owner;
+	  callback->key = key;
+	  callback->block = [block copy];
+	  [mac_loop_deferred_events addObject:callback];
+	  MRC_RELEASE (callback);
+	}
+      else
+	[mac_loop_deferred_events addObject:MRC_AUTORELEASE ([block copy])];
       mac_loop_stats[MAC_LOOP_STAT_DEFERRED_CALLBACKS]++;
       __atomic_store_n (&mac_loop_deferred_count,
 			mac_loop_deferred_events.count, __ATOMIC_RELEASE);
@@ -19341,6 +19509,12 @@ mac_loop_with_access_now_or_later (void (^block) (void))
   mac_loop_forward_gui_hold_quit ();
   if (token == MAC_LOOP_LOCKED_ACCESS)
     mac_loop_wake_lisp ();
+}
+
+static void
+mac_loop_with_access_now_or_later (void (^block) (void))
+{
+  mac_loop_with_access_now_or_later_coalesced (nil, NULL, block);
 }
 
 /* GUI thread: retry deferred events when Lisp reaches its input wait.  */

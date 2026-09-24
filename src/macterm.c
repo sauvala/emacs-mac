@@ -590,8 +590,9 @@ MAX-GAP is the longest interval in seconds between GUI-thread heartbeats
 (every 5 ms) since the first schedule or last reset, LONG-GAPS counts
 gaps over 100 ms, RECORDS is a list of (UPTIME . LABEL), and COUNTERS
 lists GUI Lisp access by try-lock, access while Lisp is parked on a
-request, denied access, deferred events, deferred callbacks and queued
-GUI-to-Lisp items.  Non-nil RESET clears them.  Internal test support.  */)
+request, denied access, deferred events, deferred callbacks, queued
+GUI-to-Lisp items and deferred state callbacks replaced by later ones.
+Non-nil RESET clears them.  Internal test support.  */)
   (Lisp_Object reset)
 {
   return mac_loop_test_results (!NILP (reset));

@@ -38,8 +38,13 @@ clicks), which cannot be automated from outside AppKit's tracking loops.
   - `mac-app-loop-setup-test-buffers` — a plain buffer plus a modified,
     unsaved file-visiting buffer under a fresh temp directory, for
     close/quit save-prompt scenarios.
+  - `mac-app-loop-gui-heartbeat-start` — started by `mac-app-loop-start`
+    on builds with `mac-loop-test-schedule`: a 5 ms GUI-thread heartbeat
+    whose gaps measure GUI stalls independently of Lisp. Call it again to
+    reset before a measured step.
   - `mac-app-loop-report` — summarizes the log (line/command/frame-size
-    counts, max heartbeat gap) into `*mac-app-loop-report*`.
+    counts, max heartbeat gap, and the GUI heartbeat's max gap and gaps
+    over 100 ms, also logged as `GUI-GAPS`) into `*mac-app-loop-report*`.
   - Logs to the file named by `MAC_APP_LOOP_LOG` (default
     `/tmp/mac-app-loop.log`); one line per event: `TIMESTAMP<TAB>TAG<TAB>DATA`.
 

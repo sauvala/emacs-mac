@@ -173,6 +173,20 @@ The wait lets the command loop execute queued input first."
         (list :busy busy :before before
               :after (mac-loop-scenario--frame-state))))))
 
+(defun mac-loop-scenario-resize-burst ()
+  "Resize the window 20 times while Lisp computes.
+Expect a final outer size of 790x495.  The seventh :access count is
+the number of deferred state callbacks replaced by later ones (W6/W10);
+it stays 0 when busy Lisp drains them between steps from `read_socket'."
+  (let ((time 0.5) actions)
+    (dotimes (i 20)
+      (push (list time 'set-size (+ 600 (* 10 i)) (+ 400 (* 5 i))) actions)
+      (setq time (+ time 0.05)))
+    (mac-loop-test-schedule (nreverse actions))
+    (let ((busy (mac-loop-scenario--busy 3)))
+      (mac-loop-scenario--then 1.0
+        (list :busy busy :after (mac-loop-scenario--frame-state))))))
+
 (defun mac-loop-scenario-idle-resize ()
   "Drag the bottom-right corner while Lisp is idle."
   (let ((before (mac-loop-scenario--frame-state)))

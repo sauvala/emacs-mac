@@ -141,7 +141,12 @@ the GUI thread may touch Lisp or redisplay state only with Lisp access
 try-lock while Lisp waits for input). New AppKit callbacks that read or build
 Lisp state must start with `MAC_LOOP_CALLBACK_NEEDS_LISP` or
 `MAC_LOOP_QUERY_NEEDS_LISP`; a GUI-thread crash in GC or allocation usually
-means one is missing. It registers none of the undocumented event-loop
+means one is missing. Callbacks that only sync AppKit window state to Lisp
+use `MAC_LOOP_STATE_CALLBACK_NEEDS_LISP`, which replaces a pending deferred
+callback of the same kind. While Lisp is busy, a growing window shows the
+last Metal drawable anchored top-left over the frame background, which is
+the layer's `backgroundColor`. Do not add GUI-thread snapshots that read
+the window tree or faces without Lisp access. It registers none of the undocumented event-loop
 preferences above; `EMACS_MAC_LOOP_PREFS` (comma-separated keys or `all`)
 re-enables them for comparison. The native-menu experiments are disabled
 under it. Menu-bar selections carry the generation of the snapshot that

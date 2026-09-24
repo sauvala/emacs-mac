@@ -346,10 +346,45 @@ save-prompt scenarios have something real to prompt about.  Returns
       (insert (format "Frame-size events:     %d\n" (plist-get summary :frame-size-events)))
       (insert (format "Heartbeat ticks:       %d\n" (plist-get summary :heartbeat-ticks)))
       (insert (format "Max heartbeat gap (s): %.4f\n" (plist-get summary :max-heartbeat-gap)))
+      (let ((gui (mac-app-loop--gui-gaps)))
+        (when gui
+          (insert (format "GUI max gap (ms):      %.0f\n" (nth 0 gui)))
+          (insert (format "GUI gaps over 100 ms:  %d %S\n"
+                          (nth 1 gui) (nth 2 gui)))
+          (mac-app-loop-log "GUI-GAPS" "max-ms=%.0f long=%d %S"
+                            (nth 0 gui) (nth 1 gui) (nth 2 gui))))
       (goto-char (point-min))
       (when (called-interactively-p 'any)
         (display-buffer (current-buffer))))
     summary))
+
+
+;;; GUI-thread heartbeat (builds with `mac-loop-test-schedule')
+
+(declare-function mac-loop-test-schedule "macterm.c" (actions &optional frame))
+(declare-function mac-loop-test-results "macterm.c" (&optional reset))
+
+(defun mac-app-loop-gui-heartbeat-start ()
+  "Start the 5 ms GUI-thread heartbeat and reset its statistics.
+The heartbeat runs on the main dispatch queue, so its gaps measure how
+long the GUI thread was unable to respond, independently of Lisp.
+Builds without `mac-loop-test-schedule' have no such heartbeat."
+  (interactive)
+  (when (and (fboundp 'mac-loop-test-schedule) (eq window-system 'mac))
+    (mac-loop-test-schedule '((0 probe 0)))
+    (mac-loop-test-results t)
+    (mac-app-loop-log "GUI-HEARTBEAT-START" "")))
+
+(defun mac-app-loop--gui-gaps ()
+  "Return (MAX-GAP-MS LONG-GAPS GAP-LABELS) from the GUI heartbeat, or nil."
+  (when (and (fboundp 'mac-loop-test-results) (eq window-system 'mac))
+    (let ((results (mac-loop-test-results)))
+      (list (* 1000 (nth 0 results))
+            (nth 1 results)
+            (delq nil (mapcar (lambda (record)
+                                (and (string-prefix-p "gap " (cdr record))
+                                     (cdr record)))
+                              (nth 2 results)))))))
 
 
 ;;; Entry point
@@ -375,6 +410,7 @@ exercising."
    (ignore-errors (list (display-pixel-width) (display-pixel-height))))
   (mac-app-loop--install-hooks)
   (mac-app-loop-heartbeat-start)
+  (mac-app-loop-gui-heartbeat-start)
   (message "mac-app-loop: logging to %s" (mac-app-loop--log-file)))
 
 (provide 'mac-app-loop-fixture)
