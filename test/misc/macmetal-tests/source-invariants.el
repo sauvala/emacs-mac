@@ -186,7 +186,16 @@ update showed a blank frame after each live-resize step."
                             frame-end-body))
     (should (string-match-p
              "FRAME_GARBAGED_P (f))\n *emacs_metal_frame_end_held"
-             macterm))))
+             macterm))
+    ;; A presentation still pending must copy the backbuffer before
+    ;; the held clear is committed.
+    (should (string-match-p
+             "if (!present)\n *emacs_metal_wait_for_presentation_copy (ctx);\n *\\[cmd commit\\]"
+             frame-end-body))
+    (should (string-match-p
+             "\\[cmd commit\\];\n *pthread_mutex_lock (&ctx->presentation_mutex);\n *ctx->presentation_committed = true;"
+             (macmetal-tests--function-body
+              "emacs_metal_dispatch_presentation_task")))))
 
 (ert-deftest macmetal-presentation-task-snapshots-context-under-lock ()
   "The presenter queue must not read context fields the main thread stores."

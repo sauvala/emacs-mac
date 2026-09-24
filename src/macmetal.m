@@ -297,12 +297,18 @@ struct emacs_metal_context
   bool presentation_scheduled;
   bool presentation_in_flight;
   bool presentation_needs_reschedule;
+  /* Set once the running presentation task has committed its copy of
+     the backbuffer, so that later GPU work cannot change what it
+     shows.  */
+  bool presentation_committed;
 
   id<MTLTexture> scroll_staging;
   int scroll_staging_w, scroll_staging_h;
 
   dispatch_semaphore_t buffer_semaphore;
   pthread_mutex_t presentation_mutex;
+  /* Broadcast when a presentation task commits or finishes.  */
+  pthread_cond_t presentation_cond;
   atomic_uint ref_count;
 
   struct emacs_metal_glyph_cache *glyph_cache;
@@ -455,6 +461,7 @@ emacs_metal_context_finalize (emacs_metal_context_t *ctx)
       free (ctx->glyph_cache);
     }
 
+  pthread_cond_destroy (&ctx->presentation_cond);
   pthread_mutex_destroy (&ctx->presentation_mutex);
   free (ctx);
 }
@@ -698,6 +705,7 @@ emacs_metal_context_create (void *view, int width, int height, int scale)
     return NULL;
   atomic_init (&ctx->ref_count, 1);
   pthread_mutex_init (&ctx->presentation_mutex, NULL);
+  pthread_cond_init (&ctx->presentation_cond, NULL);
   ctx->presentation_valid = true;
 
   ctx->command_queue = [shared_device newCommandQueue];
@@ -824,6 +832,7 @@ emacs_metal_context_destroy (emacs_metal_context_t *ctx)
   ctx->presentation_valid = false;
   ctx->presentation_scheduled = false;
   ctx->presentation_needs_reschedule = false;
+  pthread_cond_broadcast (&ctx->presentation_cond);
   pthread_mutex_unlock (&ctx->presentation_mutex);
 
   emacs_metal_context_release (ctx);
@@ -1027,6 +1036,7 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
           {
             ctx->presentation_scheduled = false;
             ctx->presentation_in_flight = true;
+            ctx->presentation_committed = false;
             METAL_SHARED_INC (presentation_task_runs);
             /* Take the snapshot under the lock.  These are strong
                references that the main thread replaces -- the backbuffer
@@ -1037,7 +1047,10 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
             command_queue = ctx->command_queue;
           }
         else
-          ctx->presentation_scheduled = false;
+          {
+            ctx->presentation_scheduled = false;
+            pthread_cond_broadcast (&ctx->presentation_cond);
+          }
         pthread_mutex_unlock (&ctx->presentation_mutex);
 
         if (!valid)
@@ -1117,6 +1130,7 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
 
           pthread_mutex_lock (&ctx->presentation_mutex);
           ctx->presentation_in_flight = false;
+          pthread_cond_broadcast (&ctx->presentation_cond);
           if (ctx->presentation_valid && ctx->presentation_needs_reschedule)
             {
               ctx->presentation_needs_reschedule = false;
@@ -1133,6 +1147,10 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
         }];
 
         [cmd commit];
+        pthread_mutex_lock (&ctx->presentation_mutex);
+        ctx->presentation_committed = true;
+        pthread_cond_broadcast (&ctx->presentation_cond);
+        pthread_mutex_unlock (&ctx->presentation_mutex);
         return;
 
       finish_without_command:
@@ -1140,6 +1158,7 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
           bool schedule_again = false;
           pthread_mutex_lock (&ctx->presentation_mutex);
           ctx->presentation_in_flight = false;
+          pthread_cond_broadcast (&ctx->presentation_cond);
           if (ctx->presentation_valid && ctx->presentation_needs_reschedule)
             {
               ctx->presentation_needs_reschedule = false;
@@ -1187,6 +1206,36 @@ emacs_metal_schedule_presentation (emacs_metal_context_t *ctx)
     emacs_metal_dispatch_presentation_task (ctx);
 }
 
+/* Wait until no presentation is pending whose copy of the backbuffer
+   is not yet committed.  The presenter copies whatever the backbuffer
+   holds when its command runs, so a clear committed before that copy
+   would be shown.  Bounded so that a stalled drawable cannot hang
+   redisplay.  */
+
+static void
+emacs_metal_wait_for_presentation_copy (emacs_metal_context_t *ctx)
+{
+  struct timespec deadline;
+
+  clock_gettime (CLOCK_REALTIME, &deadline);
+  deadline.tv_nsec += 100 * 1000 * 1000;
+  if (deadline.tv_nsec >= 1000 * 1000 * 1000)
+    {
+      deadline.tv_sec++;
+      deadline.tv_nsec -= 1000 * 1000 * 1000;
+    }
+  pthread_mutex_lock (&ctx->presentation_mutex);
+  while (ctx->presentation_valid
+         && (ctx->presentation_scheduled
+             || ctx->presentation_needs_reschedule
+             || (ctx->presentation_in_flight
+                 && !ctx->presentation_committed)))
+    if (pthread_cond_timedwait (&ctx->presentation_cond,
+                                &ctx->presentation_mutex, &deadline))
+      break;
+  pthread_mutex_unlock (&ctx->presentation_mutex);
+}
+
 static void
 emacs_metal_frame_end_1 (emacs_metal_context_t *ctx, bool present)
 {
@@ -1231,6 +1280,8 @@ emacs_metal_frame_end_1 (emacs_metal_context_t *ctx, bool present)
   }];
   ctx->spill_vertex_buffers = nil;
 
+  if (!present)
+    emacs_metal_wait_for_presentation_copy (ctx);
   [cmd commit];
   ctx->backbuffer_dirty = false;
   ctx->frame_command_buffer = nil;
