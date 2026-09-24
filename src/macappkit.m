@@ -124,11 +124,11 @@ static void mac_within_lisp_deferred_unless_popup (void (^) (void));
 
 static void mac_draw_queue_sync(void);
 
-/* True if the persistent event loop is selected for this process.
-   The GUI thread then runs -[NSApplication run] for the process
-   lifetime and touches Lisp state only with "Lisp access"; see the
-   "Persistent event loop" section.  Decided once in `main'.  */
-static bool mac_persistent_loop_p;
+/* The persistent event loop is the only event loop: the GUI thread
+   runs -[NSApplication run] for the process lifetime and touches Lisp
+   state only with "Lisp access"; see the "Persistent event loop"
+   section.  Transitional: the old loop's branches are being removed.  */
+#define mac_persistent_loop_p true
 static bool mac_trace_loop_p;
 
 #define MAC_TRACE_LOOP(...)						\
@@ -20681,24 +20681,12 @@ mac_loop_init (void)
   EVENT_INIT (mac_loop_gui_hold_quit);
 }
 
-/* Decide the event loop for this process.  EMACS_MAC_PERSISTENT_LOOP
-   overrides the configured default in either direction.  */
+/* Set up loop diagnostics for this process.  */
 
 static void
 mac_loop_select_mode (void)
 {
-  const char *value = getenv ("EMACS_MAC_PERSISTENT_LOOP");
-
-#ifdef MAC_PERSISTENT_LOOP_DEFAULT
-  mac_persistent_loop_p = true;
-#else
-  mac_persistent_loop_p = false;
-#endif
-  if (value && *value)
-    mac_persistent_loop_p = strcmp (value, "0") != 0;
   mac_trace_loop_p = getenv ("EMACS_MAC_TRACE_LOOP") != NULL;
-  MAC_TRACE_LOOP ("%s event loop selected\n",
-		  mac_persistent_loop_p ? "persistent" : "legacy");
 }
 
 /* Return the serial number of F's latest fullscreen parameter event
