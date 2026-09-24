@@ -70,6 +70,13 @@ A pending close or Quit is considered resolved at Lisp's next input wait,
 which can come slightly before the queued event is read; a rare repeated
 click in that window is still possible.
 
+Interactive run by the agent with the user present (2026-09-24,
+`test/manual/mac-app-loop/evidence/2026-09-24-macos27-new-interactive-agent.md`):
+steps 1, 2 (outward drags only), 3, 5 and 6 passed. The only GUI gaps
+over 100 ms were AppKit's minimize and restore animations. Still open:
+rapid reversals (step 2), which need a human hand, and step 4, which
+needs a second display.
+
 ### Interactive checklist for the user (W3, W10, W13, timings)
 
 Launch with `test/manual/mac-app-loop/run.sh new`. The fixture starts

@@ -66,7 +66,10 @@ end run
 
 def run_osascript(process_name):
     proc = subprocess.run(
-        ["osascript", "-e", APPLESCRIPT, process_name],
+        # -s s prints the result in source form, keeping the braces and
+        # quotes; the default human-readable form flattens nested lists
+        # on macOS 27.
+        ["osascript", "-s", "s", "-e", APPLESCRIPT, process_name],
         capture_output=True,
         text=True,
     )
@@ -138,11 +141,19 @@ def parse_applescript_list(output):
         except ValueError:
             return word, j
 
+    records = []
     while i < n:
         i = skip_ws(i)
         if i >= n:
             break
-        record, i = parse_value(i)
+        value, i = parse_value(i)
+        # Source-form output is one list of records; older default
+        # output was the records without the outer braces.
+        if isinstance(value, list) and all(isinstance(v, list) for v in value):
+            records.extend(value)       # also an empty list: no windows
+        else:
+            records.append(value)
+    for record in records:
         if not isinstance(record, list) or len(record) != 4:
             raise ValueError(f"unexpected record shape: {record!r}")
         name, pos, size, minimized = record
