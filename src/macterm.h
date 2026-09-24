@@ -559,6 +559,7 @@ extern void mac_release_native_menubar (unsigned long);
 extern unsigned long mac_publish_menu_bar_snapshot (struct frame *);
 extern void mac_persistent_menubar_selection (unsigned long, int);
 extern bool mac_menu_bar_snapshot_live_p (unsigned long);
+extern void mac_restamp_menu_bar_generation (unsigned long, unsigned long);
 extern Lisp_Object mac_popup_dialog (struct frame *, Lisp_Object, Lisp_Object);
 extern bool name_is_separator (const char *);
 extern bool mac_fill_menubar (widget_value *, bool, unsigned long);

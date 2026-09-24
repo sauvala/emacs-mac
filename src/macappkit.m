@@ -1324,14 +1324,33 @@ static bool handling_queued_nsevents_p;
 
 - (void)terminate:(id)sender
 {
+  if (mac_persistent_loop_p)
+    {
+      /* W8: at most one pending Quit; drop repeats while Lisp has not
+	 resolved the previous one (prompted, cancelled, or exited).  */
+      if (!mac_loop_quit_begin ())
+	return;
+
+      /* The raw event below is disposed of when dispatching returns,
+	 so it must not be suspended for later; dispatch it only with
+	 Lisp access.  */
+      if (!mac_loop_gui_has_lisp_access ())
+	{
+	  mac_loop_with_access_now_or_later (^{
+	      [self dispatchQuitAppleEvent];
+	    });
+	  return;
+	}
+    }
+
+  [self dispatchQuitAppleEvent];
+}
+
+- (void)dispatchQuitAppleEvent
+{
   OSErr err;
   NSAppleEventManager *manager = [NSAppleEventManager sharedAppleEventManager];
   AppleEvent appleEvent, reply;
-
-  /* W8: at most one pending Quit; drop repeats while Lisp has not
-     resolved the previous one (prompted, cancelled, or exited).  */
-  if (mac_persistent_loop_p && !mac_loop_quit_begin ())
-    return;
 
   err = create_apple_event (kCoreEventClass, kAEQuitApplication, &appleEvent);
   if (err == noErr)
@@ -19720,6 +19739,22 @@ mac_frame_fullscreen_serial (struct frame *f)
     });
 
   return serial;
+}
+
+/* Give the installed menu-bar root generation NEW if it still carries
+   OLD, so later selections bind to the snapshot of the current
+   selected window and buffer (see mac_refresh_menu_bar_snapshot).  */
+
+void
+mac_restamp_menu_bar_generation (unsigned long old, unsigned long new)
+{
+  mac_within_gui (^{
+      NSMenu *mainMenu = NSApp.mainMenu;
+
+      if ([mainMenu isKindOfClass:EmacsMenu.class]
+	  && [(EmacsMenu *) mainMenu persistentMenuGeneration] == old)
+	[(EmacsMenu *) mainMenu setPersistentMenuGeneration:new];
+    });
 }
 
 /* Lisp-visible predicate (mac-persistent-event-loop-p in macterm.c)

@@ -144,7 +144,13 @@ Lisp state must start with `MAC_LOOP_CALLBACK_NEEDS_LISP` or
 means one is missing. It registers none of the undocumented event-loop
 preferences above; `EMACS_MAC_LOOP_PREFS` (comma-separated keys or `all`)
 re-enables them for comparison. The native-menu experiments are disabled
-under it.
+under it. Menu-bar selections carry the generation of the snapshot that
+`set_frame_menubar` published with the installed root menu, and are
+rejected with a message if the frame, selected window or buffer changed;
+publish a new generation rather than mutating a snapshot that queued
+actions may reference. F10 shows the menu-bar keymap as a popup
+(`mac-persistent-event-loop-p`), and repeated close/Quit requests are
+dropped until Lisp reaches its next input wait.
 
 `EMACS_MAC_TRACE_LOOP=1` traces deferrals to stderr (`2` adds every select);
 with it set, `kill -INFO <pid>` prints GUI and Lisp thread backtraces, useful

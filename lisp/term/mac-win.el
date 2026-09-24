@@ -1953,6 +1953,23 @@ modifiers, it changes the global tool-bar visibility setting."
 
 (define-key special-event-map [mac-apple-event] 'mac-dispatch-apple-event)
 
+(declare-function mac-menu-bar-execute-selection "macmenu.c"
+                  (generation selection))
+
+(defun mac-handle-menu-bar-selection (event)
+  "Run the menu-bar item chosen under the persistent event loop.
+EVENT is (mac-menu-bar-selection GENERATION SELECTION).  Signal a
+`user-error' if the menu's frame, window or buffer changed since it
+was shown."
+  (interactive "e")
+  (let ((reason (mac-menu-bar-execute-selection (nth 1 event)
+                                                (nth 2 event))))
+    (when reason
+      (user-error "Menu item no longer available (%s)" reason))))
+
+(define-key special-event-map [mac-menu-bar-selection]
+  'mac-handle-menu-bar-selection)
+
 
 ;;;; Drag and drop
 

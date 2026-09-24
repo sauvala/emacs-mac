@@ -371,6 +371,16 @@ busy close, and is cleared once Lisp resolves it."
                 :second-live (frame-live-p second)
                 :subtitles subtitles))))))
 
+(defun mac-loop-scenario-win-quit-idle ()
+  "Quit while Lisp is idle reaches `save-buffers-kill-emacs' once.
+It is overridden so the scenario neither prompts nor exits."
+  (let ((count 0))
+    (advice-add 'save-buffers-kill-emacs :override
+                (lambda (&rest _) (setq count (1+ count))))
+    (mac-loop-test-schedule '((0.3 terminate)))
+    (mac-loop-scenario--then 2.0
+      (list :quit-count count))))
+
 (defun mac-loop-scenario-win-quit-dedupe ()
   "Three Quit (terminate:) calls on a busy Lisp thread quit at most
 once.  `save-buffers-kill-emacs' is overridden so the scenario neither
