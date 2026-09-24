@@ -25,7 +25,7 @@ they were given.
 | Menu bar with the mouse, idle and busy, including nested submenus | Worked | pass (user report) |
 | Control-F2 menu-bar keyboard navigation | Worked | pass (user report) |
 | F10 while idle | Opens the popup | pass (user report) |
-| F10 while busy | No popup while `mac-app-loop-busy` runs. This is expected under D9: F10 is an ordinary key bound to `menu-bar-open` and waits for Lisp to read it. Control-F2 and the mouse open the native menu bar without Lisp. The user has not reported whether the popup appeared after the busy loop ended. | expected; follow-up unverified |
+| F10 while busy | No popup while `mac-app-loop-busy` runs. This is expected under D9: F10 is an ordinary key bound to `menu-bar-open` and waits for Lisp to read it. Control-F2 and the mouse open the native menu bar without Lisp. The popup opened once the busy loop ended, as the user confirmed. | pass (expected behavior) |
 | C-g and Escape with a menu open (D15) | Worked | pass (user report) |
 | Selection, then buffer switch while busy (D5) | Worked | pass (user report) |
 | Services send and Help search | Worked | pass (user report) |
@@ -35,7 +35,6 @@ they were given.
 
 ## Follow-ups
 
-- Confirm that a busy-time F10 opens the popup once Lisp is idle again.
 - Run `windows.py` with Accessibility permission, idle and busy.
 - Repeat with measured timings against the 100 ms response and 250 ms
   stall targets before S6.
