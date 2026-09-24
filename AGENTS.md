@@ -146,7 +146,13 @@ use `MAC_LOOP_STATE_CALLBACK_NEEDS_LISP`, which replaces a pending deferred
 callback of the same kind. While Lisp is busy, a growing window shows the
 last Metal drawable anchored top-left over the frame background, which is
 the layer's `backgroundColor`. Do not add GUI-thread snapshots that read
-the window tree or faces without Lisp access. It registers none of the undocumented event-loop
+the window tree or faces without Lisp access. Text input and
+accessibility queries that read buffer text or glyph matrices use
+`mac_try_content_access` or `MAC_LOOP_CONTENT_QUERY`, which allow only a
+safe point (Lisp in its input wait), not access borrowed from a Lisp
+request. Otherwise they answer from the text snapshot that
+`mac_publish_text_snapshot` stores at the end of redisplay, or report
+the value as unavailable. It registers none of the undocumented event-loop
 preferences above; `EMACS_MAC_LOOP_PREFS` (comma-separated keys or `all`)
 re-enables them for comparison. The native-menu experiments are disabled
 under it. Menu-bar selections carry the generation of the snapshot that

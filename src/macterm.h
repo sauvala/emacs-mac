@@ -711,6 +711,7 @@ extern struct frame *mac_get_frame_at_mouse (bool);
 extern void mac_convert_frame_point_to_global (struct frame *, int *, int *);
 extern void mac_set_frame_window_background (struct frame *, unsigned long);
 extern void mac_publish_size_hints (struct frame *);
+extern void mac_publish_text_snapshot (struct frame *);
 extern void mac_update_frame_begin (struct frame *);
 extern void mac_update_frame_end (struct frame *);
 extern void mac_cursor_to (int, int, int, int);
@@ -842,7 +843,9 @@ enum
        reusing the mouse-event fields).  */
     MAC_LOOP_TEST_MENU,
     /* Record the state of the frame view's layer (W3).  */
-    MAC_LOOP_TEST_LAYER
+    MAC_LOOP_TEST_LAYER,
+    /* Record text input and accessibility query results (S5).  */
+    MAC_LOOP_TEST_TEXT
   };
 
 extern void mac_loop_test_schedule (struct frame *,

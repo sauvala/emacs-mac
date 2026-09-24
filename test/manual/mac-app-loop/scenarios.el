@@ -242,6 +242,46 @@ arrived after the busy loop."
     (mac-loop-scenario--then 2.5
       (list :before before :after (mac-loop-scenario--frame-state)))))
 
+;;; S5 text snapshot scenarios: the `text' action queries the frame
+;;; view from a GUI-thread timer, as an input method or assistive
+;;; application would.
+
+(defun mac-loop-scenario--text-setup ()
+  "Fill the buffer, activate a region and redisplay.
+The region is 2..5, point 5, so the selected range is 1+3."
+  (transient-mark-mode 1)
+  ;; Timers run in whatever buffer is current, not the window's.
+  (set-buffer (window-buffer))
+  (erase-buffer)
+  (insert "one two three\nfour five\n")
+  (goto-char 2)
+  (push-mark (point) t t)
+  (goto-char 5)
+  (redisplay t))
+
+(defun mac-loop-scenario-text-idle ()
+  "Text input and accessibility queries while Lisp is idle.
+Expect the live answers: selection 1+3, 24 characters, a cursor
+rectangle, role AXTextArea, value length 24 and line 0."
+  (mac-loop-scenario--text-setup)
+  (mac-loop-test-schedule '((0.3 text) (0.6 text) (0.9 text)))
+  (mac-loop-scenario--then 1.0
+    (list :buffer-size (buffer-size (window-buffer)))))
+
+(defun mac-loop-scenario-text-busy ()
+  "Text input and accessibility queries while Lisp computes.
+Lisp inserts text without redisplay and then computes for 1.5 s.  The
+new loop answers the selection, character count and cursor rectangle
+from the snapshot of the last redisplay (24 characters), and nothing
+that needs buffer text (value and line unavailable).  After the busy
+loop the answers are live again."
+  (mac-loop-scenario--text-setup)
+  (mac-loop-test-schedule '((0.5 text) (2.5 text)))
+  (save-excursion (goto-char (point-max)) (insert "six\n"))
+  (let ((busy (mac-loop-scenario--busy 1.5)))
+    (mac-loop-scenario--then 1.5
+      (list :busy busy :buffer-size (buffer-size (window-buffer))))))
+
 ;;; S4 menu scenarios (D4/D5/D13/D17): a custom top-level "LoopTest"
 ;;; menu with one item is installed at the front of `global-map's
 ;;; menu-bar keymap with plain `define-key' (which prepends), so it is

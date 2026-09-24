@@ -236,6 +236,34 @@ static void mac_loop_test_record (const char *, ...);
 /* Access tokens of nested mac_try_buffer_and_glyph_matrix_access.  */
 static int mac_loop_access_tokens[16];
 static int mac_loop_access_token_depth;
+static bool mac_loop_gui_owns_lock;
+static bool mac_try_content_access (void);
+static void mac_end_buffer_and_glyph_matrix_access (void);
+static void mac_loop_note_snapshot_answer (void);
+
+/* Use at the start of a query method that reads buffer text or glyph
+   matrices and returns a value of TYPE.  Under the persistent loop,
+   run CALL only at a safe point (mac_try_content_access), and
+   otherwise return FALLBACK.  */
+#define MAC_LOOP_CONTENT_QUERY(type, fallback, call)			\
+  do {									\
+    if (mac_persistent_loop_p && pthread_main_np ()			\
+	&& !mac_loop_gui_owns_lock)					\
+      {									\
+	if (!mac_try_content_access ())					\
+	  return fallback;						\
+	type result_ = call;						\
+	mac_end_buffer_and_glyph_matrix_access ();			\
+	return result_;							\
+      }									\
+  } while (false)
+
+/* Old loop: whether buffer text might be being altered, so that
+   accessibility must not read it.  The persistent loop decides this
+   with mac_try_content_access instead.  */
+#define MAC_AX_BUFFER_MAY_BE_ALTERED_P()			\
+  (!mac_persistent_loop_p					\
+   && poll_suppress_count == 0 && !NILP (Vinhibit_quit))
 
 static int mac_loop_select (int, fd_set *, fd_set *, fd_set *,
 			    struct timespec *, sigset_t *);
@@ -1284,6 +1312,9 @@ static EmacsController *emacsController;
 
 /* Guards -[EmacsFrameController publishedSizeHints].  */
 static pthread_mutex_t mac_size_hints_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Guards -[EmacsFrameController textSnapshot].  */
+static pthread_mutex_t mac_text_snapshot_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void init_menu_bar (void);
 static void init_apple_event_handler (void);
@@ -3376,6 +3407,24 @@ mac_with_suppressed_transparent_titlebar( NSWindow* window, BOOL assumeTranspare
   publishedSizeHints = *hints;
   hasPublishedSizeHints = YES;
   pthread_mutex_unlock (&mac_size_hints_lock);
+}
+
+/* Any thread: set or copy the text snapshot (S5).  */
+
+- (void)publishTextSnapshot:(const struct mac_text_snapshot *)snapshot
+{
+  pthread_mutex_lock (&mac_text_snapshot_lock);
+  textSnapshot = *snapshot;
+  pthread_mutex_unlock (&mac_text_snapshot_lock);
+}
+
+- (BOOL)getTextSnapshot:(struct mac_text_snapshot *)snapshot
+{
+  pthread_mutex_lock (&mac_text_snapshot_lock);
+  *snapshot = textSnapshot;
+  pthread_mutex_unlock (&mac_text_snapshot_lock);
+
+  return snapshot->valid;
 }
 
 - (NSSize)hintedWindowFrameSize:(NSSize)frameSize allowsLarger:(BOOL)flag
@@ -8113,10 +8162,6 @@ event_phase_to_symbol (NSEventPhase phase)
 - (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)aRange
 						actualRange:(NSRangePointer)actualRange
 {
-  MAC_LOOP_QUERY_NEEDS_LISP (NSAttributedString *, nil,
-			     [self attributedSubstringForProposedRange:aRange
-							  actualRange:actualRange]);
-
   NSRange markedRange = [self markedRange];
   NSAttributedString *result = nil;
 
@@ -8139,9 +8184,10 @@ event_phase_to_symbol (NSEventPhase phase)
       if (actualRange)
 	*actualRange = aRange;
     }
-  else if ((poll_suppress_count != 0 || NILP (Vinhibit_quit))
+  else if ((mac_persistent_loop_p
+	    || poll_suppress_count != 0 || NILP (Vinhibit_quit))
 	   /* Might be called during the select emulation.  */
-	   && mac_try_buffer_and_glyph_matrix_access ())
+	   && mac_try_content_access ())
     {
       struct frame *f = [self emacsFrame];
       struct window *w = XWINDOW (f->selected_window);
@@ -8239,20 +8285,58 @@ event_phase_to_symbol (NSEventPhase phase)
   return result;
 }
 
+/* Return the start of the active input overlay relative to BEGV, or
+   NSNotFound.  */
+
+static NSUInteger
+mac_ts_active_input_location (void)
+{
+  if (OVERLAYP (Vmac_ts_active_input_overlay)
+      && !NILP (Foverlay_get (Vmac_ts_active_input_overlay, Qbefore_string))
+      && !NILP (Foverlay_buffer (Vmac_ts_active_input_overlay)))
+    return OVERLAY_START (Vmac_ts_active_input_overlay) - BEGV;
+
+  return NSNotFound;
+}
+
+/* Copy the text snapshot of the frame into SNAPSHOT (S5).  Return
+   whether it is valid; it never is under the old loop.  */
+
+- (BOOL)getTextSnapshot:(struct mac_text_snapshot *)snapshot
+{
+  EmacsFrameController *frameController = FRAME_CONTROLLER ([self emacsFrame]);
+
+  if (frameController && [frameController getTextSnapshot:snapshot])
+    return YES;
+  memset (snapshot, 0, sizeof *snapshot);
+
+  return NO;
+}
+
 - (NSRange)markedRange
 {
-  MAC_LOOP_QUERY_NEEDS_LISP (NSRange, NSMakeRange (NSNotFound, 0),
-			     [self markedRange]);
-
   NSUInteger location = NSNotFound;
 
   if (![self hasMarkedText])
     return NSMakeRange (NSNotFound, 0);
 
-  if (OVERLAYP (Vmac_ts_active_input_overlay)
-      && !NILP (Foverlay_get (Vmac_ts_active_input_overlay, Qbefore_string))
-      && !NILP (Foverlay_buffer (Vmac_ts_active_input_overlay)))
-    location = OVERLAY_START (Vmac_ts_active_input_overlay) - BEGV;
+  if (!(mac_persistent_loop_p && pthread_main_np ()))
+    location = mac_ts_active_input_location ();
+  else if (mac_try_content_access ())
+    {
+      location = mac_ts_active_input_location ();
+      mac_end_buffer_and_glyph_matrix_access ();
+    }
+  else
+    {
+      struct mac_text_snapshot snapshot;
+
+      if ([self getTextSnapshot:&snapshot])
+	{
+	  location = snapshot.markedLocation;
+	  mac_loop_note_snapshot_answer ();
+	}
+    }
 
   /* The cast below is just for determining the return type.  The
      object `markedText' might be of class NSAttributedString.  */
@@ -8261,21 +8345,29 @@ event_phase_to_symbol (NSEventPhase phase)
 
 - (NSRange)selectedRange
 {
-  MAC_LOOP_QUERY_NEEDS_LISP (NSRange, NSMakeRange (NSNotFound, 0),
-			     [self selectedRange]);
-
   struct frame *f = [self emacsFrame];
   NSRange result;
+
+  /* Might be called during the select emulation, or while Lisp is
+     busy under the persistent loop.  */
+  if (!mac_try_content_access ())
+    {
+      struct mac_text_snapshot snapshot;
+
+      if (![self getTextSnapshot:&snapshot])
+	return NSMakeRange (NSNotFound, 0);
+      mac_loop_note_snapshot_answer ();
+
+      return snapshot.selectedRange;
+    }
 
   /* Might be called when deactivating TSM document inside [emacsView
      removeFromSuperview] in -[EmacsFrameController closeWindow] on
      macOS 10.13.  */
-  if (!WINDOWP (f->root_window)
-      /* Also might be called during the select emulation.  */
-      || !mac_try_buffer_and_glyph_matrix_access ())
-    return NSMakeRange (NSNotFound, 0);
-
-  mac_ax_selected_text_range (f, (CFRange *) &result);
+  if (!WINDOWP (f->root_window))
+    result = NSMakeRange (NSNotFound, 0);
+  else
+    mac_ax_selected_text_range (f, (CFRange *) &result);
   mac_end_buffer_and_glyph_matrix_access ();
 
   return result;
@@ -8306,17 +8398,89 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
   return false;
 }
 
+/* Lisp thread, at the end of redisplay of the selected window of F
+   (S5, W11): publish what text input and accessibility queries need
+   while Lisp is busy.  The cursor rectangle is computed as
+   -firstRectForCharacterRange:actualRange: does for marked text, but
+   only from windows on F.  */
+
+void
+mac_publish_text_snapshot (struct frame *f)
+{
+  if (!mac_persistent_loop_p || !FRAME_MAC_P (f) || !FRAME_MAC_WINDOW (f)
+      || !WINDOWP (f->selected_window)
+      || !BUFFERP (XWINDOW (f->selected_window)->contents))
+    return;
+
+  struct mac_text_snapshot snapshot;
+  struct window *w = NULL;
+  struct glyph *glyph = NULL;
+  CFRange range;
+
+  memset (&snapshot, 0, sizeof snapshot);
+  snapshot.valid = true;
+  mac_ax_selected_text_range (f, &range);
+  snapshot.selectedRange = NSMakeRange (range.location, range.length);
+  mac_ax_visible_character_range (f, &range);
+  snapshot.visibleRange = NSMakeRange (range.location, range.length);
+  snapshot.numberOfCharacters = mac_ax_number_of_characters (f);
+  snapshot.markedLocation = mac_ts_active_input_location ();
+
+  if (WINDOWP (echo_area_window)
+      && WINDOW_XFRAME (XWINDOW (echo_area_window)) == f
+      && mac_ts_active_input_string_in_echo_area_p (f))
+    {
+      w = XWINDOW (echo_area_window);
+      glyph = get_phys_cursor_glyph (w);
+    }
+  if (glyph == NULL)
+    {
+      w = XWINDOW (f->selected_window);
+      glyph = get_phys_cursor_glyph (w);
+    }
+  if (glyph)
+    {
+      int x, y, h;
+      struct glyph_row *row = MATRIX_ROW (w->current_matrix,
+					  w->phys_cursor.vpos);
+
+      get_phys_cursor_geometry (w, row, glyph, &x, &y, &h);
+      snapshot.cursorRect = NSMakeRect (x, y, w->phys_cursor_width, h);
+    }
+
+  [FRAME_CONTROLLER (f) publishTextSnapshot:&snapshot];
+}
+
 - (NSRect)firstRectForCharacterRange:(NSRange)aRange
 			 actualRange:(NSRangePointer)actualRange
 {
-  MAC_LOOP_QUERY_NEEDS_LISP (NSRect, NSZeroRect,
-			     [self firstRectForCharacterRange:aRange
-						  actualRange:actualRange]);
-
   NSRect rect = NSZeroRect;
   struct frame *f = NULL;
+  struct mac_text_snapshot snapshot;
 
-  if (mac_try_buffer_and_glyph_matrix_access ())
+  if (!mac_try_content_access ())
+    {
+      /* Lisp is busy: give the cursor position published at the end
+	 of the last redisplay for the marked text, as below.  */
+      NSRange markedRange = self.markedRange;
+
+      if ((aRange.location >= NSNotFound
+	   || (self.hasMarkedText
+	       && NSEqualRanges (NSUnionRange (markedRange, aRange),
+				 markedRange)))
+	  && [self getTextSnapshot:&snapshot])
+	{
+	  rect = snapshot.cursorRect;
+	  if (!NSEqualRects (rect, NSZeroRect))
+	    {
+	      f = self.emacsFrame;
+	      if (actualRange)
+		*actualRange = aRange;
+	    }
+	  mac_loop_note_snapshot_answer ();
+	}
+    }
+  else
     {
       struct window *w;
       NSRange markedRange = self.markedRange;
@@ -8396,8 +8560,8 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
 
 - (NSUInteger)characterIndexForPoint:(NSPoint)thePoint
 {
-  MAC_LOOP_QUERY_NEEDS_LISP (NSUInteger, NSNotFound,
-			     [self characterIndexForPoint:thePoint]);
+  MAC_LOOP_CONTENT_QUERY (NSUInteger, NSNotFound,
+			  [self characterIndexForPoint:thePoint]);
 
   NSUInteger result = NSNotFound;
   NSPoint point;
@@ -8452,9 +8616,9 @@ mac_ts_active_input_string_in_echo_area_p (struct frame *f)
 
   /* Don't try to get buffer contents as the gap might be being
      altered. */
-  if ((poll_suppress_count == 0 && !NILP (Vinhibit_quit))
+  if (MAC_AX_BUFFER_MAY_BE_ALTERED_P ()
       /* Might be called during the select emulation.  */
-      || !mac_try_buffer_and_glyph_matrix_access ())
+      || !mac_try_content_access ())
     return nil;
 
   range = CFRangeMake (0, mac_ax_number_of_characters (f));
@@ -16917,7 +17081,7 @@ ax_get_selected_text (EmacsMainView *emacsView)
   CFRange selectedRange;
   CFStringRef string;
 
-  if (poll_suppress_count == 0 && !NILP (Vinhibit_quit))
+  if (MAC_AX_BUFFER_MAY_BE_ALTERED_P ())
     /* Don't try to get buffer contents as the gap might be being
        altered. */
     return nil;
@@ -16934,7 +17098,7 @@ ax_get_insertion_point_line_number (EmacsMainView *emacsView)
   struct frame *f = [emacsView emacsFrame];
   EMACS_INT line;
 
-  if (poll_suppress_count == 0 && !NILP (Vinhibit_quit))
+  if (MAC_AX_BUFFER_MAY_BE_ALTERED_P ())
     /* Don't try to get buffer contents as the gap might be being
        altered. */
     return nil;
@@ -16976,12 +17140,51 @@ ax_get_selected_text_ranges (EmacsMainView *emacsView)
   return @[rangeValue];
 }
 
+/* Persistent loop, GUI thread without a safe point: the value of
+   ATTRIBUTE from the text snapshot, or nil (S5, W13).  */
+
+- (id)accessibilitySnapshotAttributeValue:(NSAccessibilityAttributeName)attribute
+{
+  struct mac_text_snapshot snapshot;
+  id result = nil;
+
+  if (![self getTextSnapshot:&snapshot])
+    return nil;
+  if ([attribute isEqualToString:NSAccessibilitySelectedTextRangeAttribute])
+    result = [NSValue valueWithRange:snapshot.selectedRange];
+  else if ([attribute
+	     isEqualToString:NSAccessibilitySelectedTextRangesAttribute])
+    result = @[[NSValue valueWithRange:snapshot.selectedRange]];
+  else if ([attribute
+	     isEqualToString:NSAccessibilityNumberOfCharactersAttribute])
+    result = @(snapshot.numberOfCharacters);
+  else if ([attribute
+	     isEqualToString:NSAccessibilityVisibleCharacterRangeAttribute])
+    result = [NSValue valueWithRange:snapshot.visibleRange];
+  if (result)
+    mac_loop_note_snapshot_answer ();
+
+  return result;
+}
+
 - (id)accessibilityAttributeValue:(NSAccessibilityAttributeName)attribute
 {
-  MAC_LOOP_QUERY_NEEDS_LISP (id, nil,
-			     [self accessibilityAttributeValue:attribute]);
-
   NSUInteger index = [ax_attribute_names indexOfObject:attribute];
+
+  /* Under the persistent loop, the role and AppKit's own attributes
+     need no Lisp access, and the Emacs ones need a safe point.  */
+  if (index != NSNotFound && mac_persistent_loop_p && pthread_main_np ()
+      && !mac_loop_gui_owns_lock)
+    {
+      if (!mac_try_content_access ())
+	return [self accessibilitySnapshotAttributeValue:attribute];
+
+      id result = (*ax_attribute_table[index].handler) (self);
+
+      mac_end_buffer_and_glyph_matrix_access ();
+
+      return result;
+    }
 
   if (index != NSNotFound)
     return (*ax_attribute_table[index].handler) (self);
@@ -16993,13 +17196,13 @@ ax_get_selected_text_ranges (EmacsMainView *emacsView)
 
 - (BOOL)accessibilityIsAttributeSettable:(NSAccessibilityAttributeName)attribute
 {
-  MAC_LOOP_QUERY_NEEDS_LISP (BOOL, NO,
-			     [self accessibilityIsAttributeSettable:attribute]);
-
   NSUInteger index = [ax_attribute_names indexOfObject:attribute];
 
   if (index != NSNotFound)
     {
+      MAC_LOOP_CONTENT_QUERY (BOOL, NO,
+			      [self accessibilityIsAttributeSettable:attribute]);
+
       Lisp_Object tem = get_keymap (Vmac_apple_event_map, 0, 0);
 
       if (!NILP (tem))
@@ -17067,7 +17270,7 @@ ax_get_line_for_index (EmacsMainView *emacsView, id parameter)
   struct frame *f = [emacsView emacsFrame];
   EMACS_INT line;
 
-  if (poll_suppress_count == 0 && !NILP (Vinhibit_quit))
+  if (MAC_AX_BUFFER_MAY_BE_ALTERED_P ())
     /* Don't try to get buffer contents as the gap might be being
        altered. */
     return nil;
@@ -17084,7 +17287,7 @@ ax_get_range_for_line (EmacsMainView *emacsView, id parameter)
   EMACS_INT line;
   NSRange range;
 
-  if (poll_suppress_count == 0 && !NILP (Vinhibit_quit))
+  if (MAC_AX_BUFFER_MAY_BE_ALTERED_P ())
     /* Don't try to get buffer contents as the gap might be being
        altered. */
     return nil;
@@ -17103,7 +17306,7 @@ ax_get_string_for_range (EmacsMainView *emacsView, id parameter)
   struct frame *f = [emacsView emacsFrame];
   CFStringRef string;
 
-  if (poll_suppress_count == 0 && !NILP (Vinhibit_quit))
+  if (MAC_AX_BUFFER_MAY_BE_ALTERED_P ())
     /* Don't try to get buffer contents as the gap might be being
        altered. */
     return nil;
@@ -17207,12 +17410,14 @@ ax_get_attributed_string_for_range (EmacsMainView *emacsView, id parameter)
 - (id)accessibilityAttributeValue:(NSAccessibilityParameterizedAttributeName)attribute
 		     forParameter:(id)parameter
 {
-  MAC_LOOP_QUERY_NEEDS_LISP (id, nil,
-			     [self accessibilityAttributeValue:attribute
-						  forParameter:parameter]);
-
   NSUInteger index = [ax_parameterized_attribute_names indexOfObject:attribute];
 
+  if (index != NSNotFound)
+    {
+      MAC_LOOP_CONTENT_QUERY (id, nil,
+			      [self accessibilityAttributeValue:attribute
+						   forParameter:parameter]);
+    }
   if (index != NSNotFound)
     return (*ax_parameterized_attribute_table[index].handler) (self, parameter);
   else
@@ -18929,13 +19134,46 @@ static unsigned mac_loop_wait_generation; /* Counts Lisp's input waits.  */
    try-lock, granted while a request parks Lisp, denied; deferred
    NSEvents and callbacks; queued GUI-to-Lisp items; deferred state
    callbacks replaced by a later one.  */
-static unsigned long mac_loop_stats[7];
+static unsigned long mac_loop_stats[8];
 enum
   {
     MAC_LOOP_STAT_LOCKED, MAC_LOOP_STAT_BORROWED, MAC_LOOP_STAT_DENIED,
     MAC_LOOP_STAT_DEFERRED_EVENTS, MAC_LOOP_STAT_DEFERRED_CALLBACKS,
-    MAC_LOOP_STAT_LISP_ITEMS, MAC_LOOP_STAT_COALESCED_CALLBACKS
+    MAC_LOOP_STAT_LISP_ITEMS, MAC_LOOP_STAT_COALESCED_CALLBACKS,
+    MAC_LOOP_STAT_SNAPSHOT_ANSWERS
   };
+
+/* GUI thread: count a query answered from a text snapshot.  */
+
+static void
+mac_loop_note_snapshot_answer (void)
+{
+  mac_loop_stats[MAC_LOOP_STAT_SNAPSHOT_ANSWERS]++;
+}
+
+/* Begin access for a query that reads buffer text or glyph matrices
+   (S5, W13), and return whether it was granted; end it with
+   mac_end_buffer_and_glyph_matrix_access.  Under the persistent loop
+   on the GUI thread only a safe point qualifies: Lisp waiting for
+   input with the global lock released (taken here by try-lock), or
+   such access already held.  Access borrowed from a Lisp request does
+   not, since the parked Lisp thread may be inside an edit or
+   redisplay: read_socket runs from maybe_quit.  This replaces the
+   poll_suppress_count and inhibit-quit heuristics of the old loop.  */
+
+static bool
+mac_try_content_access (void)
+{
+  if (mac_persistent_loop_p && pthread_main_np ()
+      && !mac_loop_gui_owns_lock && mac_loop_request_depth > 0)
+    {
+      MAC_TRACE_LOOP ("content query during a request: unavailable\n");
+      mac_loop_stats[MAC_LOOP_STAT_DENIED]++;
+      return false;
+    }
+
+  return mac_try_buffer_and_glyph_matrix_access ();
+}
 
 /* Lisp thread: hold_quit of the drain in progress, if any.  */
 static struct input_event *mac_loop_lisp_hold_quit;
@@ -19278,6 +19516,11 @@ mac_loop_begin_lisp_access (void)
     }
   if (!mac_loop_try_global_lock ())
     {
+      if (mac_trace_loop_p && getenv ("EMACS_MAC_TRACE_LOOP")[0] == '2')
+	MAC_TRACE_LOOP ("lisp access denied (lisp %s)\n",
+			(__atomic_load_n (&mac_loop_lisp_waiting_p,
+					  __ATOMIC_ACQUIRE)
+			 ? "waiting" : "running"));
       mac_loop_stats[MAC_LOOP_STAT_DENIED]++;
       return MAC_LOOP_NO_ACCESS;
     }
@@ -20228,6 +20471,38 @@ mac_loop_test_perform (struct mac_loop_test_action action,
 			      drawableSize.width, drawableSize.height,
 			      (unsigned long) overlay.layer.sublayers.count,
 			      view.inLiveResize);
+	return;
+      }
+    case MAC_LOOP_TEST_TEXT:
+      {
+	id delegate = window.delegate;
+	EmacsMainView *view = [delegate valueForKey:@"emacsView"];
+	NSRange selected = [view selectedRange];
+	NSNumber *count =
+	  [view accessibilityAttributeValue:
+		  NSAccessibilityNumberOfCharactersAttribute];
+	NSRect rect =
+	  [view firstRectForCharacterRange:NSMakeRange (NSNotFound, 0)
+			       actualRange:NULL];
+	id role = [view accessibilityAttributeValue:
+			  NSAccessibilityRoleAttribute];
+	NSString *value = [view accessibilityAttributeValue:
+				  NSAccessibilityValueAttribute];
+	NSNumber *line =
+	  [view accessibilityAttributeValue:
+		  NSAccessibilityInsertionPointLineNumberAttribute];
+
+	/* Two records: labels hold at most 63 characters.  */
+	mac_loop_test_record ("text sel=%ld+%ld chars=%ld rect=%.0fx%.0f",
+			      (long) (selected.location == NSNotFound
+				      ? -1 : selected.location),
+			      (long) selected.length,
+			      count ? count.longValue : -1L,
+			      NSWidth (rect), NSHeight (rect));
+	mac_loop_test_record ("text role=%s value=%ld line=%ld",
+			      role ? [role UTF8String] : "nil",
+			      value ? (long) value.length : -1L,
+			      line ? line.longValue : -1L);
 	return;
       }
     case MAC_LOOP_TEST_SUBTITLE:

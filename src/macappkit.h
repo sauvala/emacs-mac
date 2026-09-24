@@ -673,6 +673,25 @@ typedef NSInteger NSGlyphProperty;
 @class EmacsView;
 @class EmacsOverlayView;
 
+/* Persistent loop (S5, W11): text input and accessibility state of a
+   frame's selected window, published by Lisp at the end of redisplay
+   so that the GUI thread can answer queries while Lisp is busy.  */
+
+struct mac_text_snapshot
+{
+  bool valid;
+  /* Relative to BEGV, as mac_ax_selected_text_range returns them.  */
+  NSRange selectedRange;
+  NSRange visibleRange;
+  NSUInteger numberOfCharacters;
+  /* Start of the active input overlay relative to BEGV, or
+     NSNotFound.  */
+  NSUInteger markedLocation;
+  /* Cursor rectangle in the Emacs view of the frame, or NSZeroRect if
+     no cursor is displayed there.  */
+  NSRect cursorRect;
+};
+
 /* Class for delegate of NSWindow and NSToolbar (see its Toolbar
    category declared later).  It also becomes that target of
    frame-dependent actions such as those from font panels.  */
@@ -743,6 +762,9 @@ typedef NSInteger NSGlyphProperty;
      by mac_size_hints_lock.  */
   XSizeHints publishedSizeHints;
   BOOL hasPublishedSizeHints;
+
+  /* Guarded by mac_text_snapshot_lock.  */
+  struct mac_text_snapshot textSnapshot;
 
   /* Persistent loop only (W7/W8, see the "Persistent event loop"
      section in macappkit.m).  True while a windowShouldClose: request

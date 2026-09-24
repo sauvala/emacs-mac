@@ -506,6 +506,10 @@ where DELAY is seconds from now and KIND is one of:
   layer                record the frame view layer's contents gravity,
                        background, opacity, bounds and drawable size,
                        and the number of overlay sublayers.
+  text                 record what the frame view answers to text input
+                       and accessibility queries: selected range,
+                       character count, marked-text rectangle, role,
+                       value length and line for the insertion point.
   menu TOP-INDEX ITEM-INDEX [SUB-INDEX]
                        perform ITEM-INDEX'th item of the TOP-INDEX'th
                        top-level menu's submenu (0-based), as AppKit
@@ -532,7 +536,8 @@ The actions run on the GUI thread even while Lisp is busy.  */)
 	 {"set-size", MAC_LOOP_TEST_SET_SIZE}, {"probe", MAC_LOOP_TEST_PROBE},
 	 {"terminate", MAC_LOOP_TEST_TERMINATE},
 	 {"subtitle", MAC_LOOP_TEST_SUBTITLE},
-	 {"menu", MAC_LOOP_TEST_MENU}, {"layer", MAC_LOOP_TEST_LAYER}};
+	 {"menu", MAC_LOOP_TEST_MENU}, {"layer", MAC_LOOP_TEST_LAYER},
+	 {"text", MAC_LOOP_TEST_TEXT}};
       int k;
 
       CHECK_CONS (spec);
@@ -594,7 +599,8 @@ MAX-GAP is the longest interval in seconds between GUI-thread heartbeats
 gaps over 100 ms, RECORDS is a list of (UPTIME . LABEL), and COUNTERS
 lists GUI Lisp access by try-lock, access while Lisp is parked on a
 request, denied access, deferred events, deferred callbacks, queued
-GUI-to-Lisp items and deferred state callbacks replaced by later ones.
+GUI-to-Lisp items, deferred state callbacks replaced by later ones, and
+text input or accessibility queries answered from a published snapshot.
 Non-nil RESET clears them.  Internal test support.  */)
   (Lisp_Object reset)
 {
@@ -1462,15 +1468,27 @@ mac_draw_window_divider (struct window *w, int x0, int x1, int y0, int y1)
    support.  Such windows don't have a cursor, so don't display it
    here.  */
 
+/* Notify accessibility of a change in window W, and publish the text
+   snapshot of its frame (S5) if W is where text input happens.  */
+
+static void
+mac_note_window_updated (struct window *w)
+{
+  struct frame *f = XFRAME (w->frame);
+
+  if (w == XWINDOW (selected_window))
+    mac_update_accessibility_status (f);
+  if (w == XWINDOW (FRAME_SELECTED_WINDOW (f))
+      || (WINDOWP (echo_area_window) && w == XWINDOW (echo_area_window)))
+    mac_publish_text_snapshot (f);
+}
+
 static void
 mac_update_window_end (struct window *w, bool cursor_on_p,
 		     bool mouse_face_overwritten_p)
 {
   if (!w->pseudo_window_p)
-    {
-      if (w == XWINDOW (selected_window))
-	mac_update_accessibility_status (XFRAME (w->frame));
-    }
+    mac_note_window_updated (w);
 
   w->being_updated_p = false;
 }
@@ -4533,8 +4551,7 @@ mac_draw_window_cursor (struct window *w, struct glyph_row *glyph_row, int x,
 	    }
 	}
 
-      if (w == XWINDOW (selected_window))
-	mac_update_accessibility_status (XFRAME (w->frame));
+      mac_note_window_updated (w);
     }
 }
 

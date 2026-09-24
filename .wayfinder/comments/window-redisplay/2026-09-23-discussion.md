@@ -220,3 +220,21 @@ found while doing it. The user has not yet reviewed them.
   `-windowWillResize:toSize:` no longer reads Lisp-owned frame data. Both
   loops use the copy. The remaining direct read, in the synthetic
   release/press path, is not reached under the persistent loop.
+- **S5: text snapshots and safe-point content access (later on
+  2026-09-24, agent-adopted).** `mac_publish_text_snapshot` runs on the
+  Lisp thread from `mac_update_window_end` and `mac_draw_window_cursor`
+  when the window is its frame's selected window or the echo area (W11).
+  It stores the selected range, visible range, character count, input
+  overlay start and the cursor rectangle in the frame controller under a
+  mutex. The rectangle is computed as the marked-text branch of
+  `-firstRectForCharacterRange:actualRange:` does, but from windows on
+  that frame only, so an echo area on a separate minibuffer frame falls
+  back to the selected window's cursor. Content queries use
+  `mac_try_content_access` (W13): try-lock while Lisp waits for input,
+  or access already held that way. Access borrowed from a Lisp request is
+  refused, because read_socket, and so deferred key events that reach an
+  input method, runs from `maybe_quit` in the middle of arbitrary Lisp.
+  Without access, text input and accessibility answer from the snapshot
+  where it has the value, or report "unavailable". The role and AppKit's
+  attributes no longer need Lisp, so window discovery works while Lisp
+  is busy.
