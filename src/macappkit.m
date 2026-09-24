@@ -6076,6 +6076,11 @@ mac_set_frame_window_background (struct frame *f, unsigned long color)
 
       [window setBackgroundColor:backgroundColor];
 #ifdef USE_METAL_RENDERING
+      if (FRAME_METAL_CTX (f))
+	emacs_metal_set_clear_color (FRAME_METAL_CTX (f),
+				     RED_FROM_ULONG (color) / 255.0,
+				     GREEN_FROM_ULONG (color) / 255.0,
+				     BLUE_FROM_ULONG (color) / 255.0);
       if (mac_persistent_loop_p)
 	[frameController setEmacsViewLayerBackgroundColor:backgroundColor];
 #endif

@@ -307,6 +307,10 @@ struct emacs_metal_context
 
   dispatch_semaphore_t buffer_semaphore;
   pthread_mutex_t presentation_mutex;
+  /* Colour for backbuffer and drawable areas that Emacs has not drawn
+     yet, e.g. the part a growing window adds before redisplay; the
+     frame background.  Guarded by presentation_mutex.  */
+  MTLClearColor clear_color;
   /* Broadcast when a presentation task commits or finishes.  */
   pthread_cond_t presentation_cond;
   atomic_uint ref_count;
@@ -597,13 +601,16 @@ create_backbuffer (emacs_metal_context_t *ctx)
       return false;
     }
 
-  /* Clear the new backbuffer to white to avoid garbage on first frame.  */
+  /* Clear the new backbuffer to the frame background, which is what
+     shows of it until Emacs draws there.  */
   id<MTLCommandBuffer> cmd = [ctx->command_queue commandBuffer];
   MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
   pass.colorAttachments[0].texture = texture;
   pass.colorAttachments[0].loadAction = MTLLoadActionClear;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-  pass.colorAttachments[0].clearColor = MTLClearColorMake (1.0, 1.0, 1.0, 1.0);
+  pthread_mutex_lock (&ctx->presentation_mutex);
+  pass.colorAttachments[0].clearColor = ctx->clear_color;
+  pthread_mutex_unlock (&ctx->presentation_mutex);
 
   id<MTLRenderCommandEncoder> encoder
     = [cmd renderCommandEncoderWithDescriptor:pass];
@@ -706,6 +713,7 @@ emacs_metal_context_create (void *view, int width, int height, int scale)
   atomic_init (&ctx->ref_count, 1);
   pthread_mutex_init (&ctx->presentation_mutex, NULL);
   pthread_cond_init (&ctx->presentation_cond, NULL);
+  ctx->clear_color = MTLClearColorMake (1.0, 1.0, 1.0, 1.0);
   ctx->presentation_valid = true;
 
   ctx->command_queue = [shared_device newCommandQueue];
@@ -1028,6 +1036,7 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
         CAMetalLayer *layer = nil;
         id<MTLTexture> backbuffer = nil;
         id<MTLCommandQueue> command_queue = nil;
+        MTLClearColor clear_color = MTLClearColorMake (1.0, 1.0, 1.0, 1.0);
         bool valid;
 
         pthread_mutex_lock (&ctx->presentation_mutex);
@@ -1045,6 +1054,7 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
             layer = ctx->layer;
             backbuffer = ctx->backbuffer;
             command_queue = ctx->command_queue;
+            clear_color = ctx->clear_color;
           }
         else
           {
@@ -1092,6 +1102,20 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
           id<MTLTexture> dst = drawable.texture;
           NSUInteger copy_w = MIN (backbuffer.width, dst.width);
           NSUInteger copy_h = MIN (backbuffer.height, dst.height);
+
+          /* A drawable larger than the backbuffer (the window grew after
+             this backbuffer was taken) has undefined contents outside
+             the copy; fill it with the background first.  */
+          if (copy_w < dst.width || copy_h < dst.height)
+            {
+              MTLRenderPassDescriptor *pass
+                = [MTLRenderPassDescriptor renderPassDescriptor];
+              pass.colorAttachments[0].texture = dst;
+              pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+              pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+              pass.colorAttachments[0].clearColor = clear_color;
+              [[cmd renderCommandEncoderWithDescriptor:pass] endEncoding];
+            }
 
           if (copy_w > 0 && copy_h > 0)
             {
@@ -1288,6 +1312,15 @@ emacs_metal_frame_end_1 (emacs_metal_context_t *ctx, bool present)
   ctx->presentation_held = !present;
   if (present)
     emacs_metal_schedule_presentation (ctx);
+}
+
+void
+emacs_metal_set_clear_color (emacs_metal_context_t *ctx,
+                             double red, double green, double blue)
+{
+  pthread_mutex_lock (&ctx->presentation_mutex);
+  ctx->clear_color = MTLClearColorMake (red, green, blue, 1.0);
+  pthread_mutex_unlock (&ctx->presentation_mutex);
 }
 
 void

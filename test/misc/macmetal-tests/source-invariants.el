@@ -319,3 +319,21 @@ update showed a blank frame after each live-resize step."
     (should-not (string-match-p "Reset all atlas pages" body))))
 
 ;;; source-invariants.el ends here
+
+(ert-deftest macmetal-fills-undrawn-areas-with-frame-background ()
+  "Areas a growing window adds must not flash a fixed colour.
+The backbuffer used to be cleared to white, which showed when a window
+grew faster than redisplay."
+  (let ((create (macmetal-tests--function-body "create_backbuffer"))
+        (present (macmetal-tests--function-body
+                  "emacs_metal_dispatch_presentation_task")))
+    (should (string-match-p "clearColor = ctx->clear_color;" create))
+    (should-not (string-match-p "MTLClearColorMake (1.0, 1.0, 1.0" create))
+    (should (string-match-p
+             "if (copy_w < dst.width || copy_h < dst.height)" present))
+    (should (string-match-p "emacs_metal_set_clear_color (FRAME_METAL_CTX (f)"
+                            (with-temp-buffer
+                              (insert-file-contents
+                               (expand-file-name "src/macappkit.m"
+                                                 source-directory))
+                              (buffer-string))))))

@@ -58,6 +58,10 @@ extern void emacs_metal_get_render_stats (struct emacs_metal_render_stats *,
                                           bool reset);
 extern bool emacs_metal_set_display_sync_enabled (emacs_metal_context_t *ctx,
                                                   bool enabled);
+/* Colour for areas Emacs has not drawn yet; the frame background.  */
+extern void emacs_metal_set_clear_color (emacs_metal_context_t *ctx,
+                                         double red, double green,
+                                         double blue);
 extern bool emacs_metal_set_maximum_drawable_count (emacs_metal_context_t *ctx,
                                                     unsigned long count);
 
