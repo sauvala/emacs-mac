@@ -1,7 +1,7 @@
 ---
 id: s7-older-os-convergence
 title: "S7: Converge older macOS versions"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: macos-app-integration
 assignee: null
@@ -30,3 +30,7 @@ explicit decision on whether older systems keep the old loop or are dropped.
 ## Blocked by
 
 - [S6: Make the new loop the macOS 27 default](14-s6-macos27-default.md)
+
+## Resolution (2026-09-24)
+
+Closed by the user's live decision: [resolution](../comments/s7-older-os-convergence/2026-09-24-resolution.md).

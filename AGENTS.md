@@ -85,58 +85,30 @@ missing-symbol case, not for arbitrary dump failures.
 
 ## Testing
 
-On macOS 27 and later, preserve the existing event-loop settings and register
-`NSWindowResizeNeedsTrackingLoop` before creating the application. Also register
-`NSControlPrefersGestureRecognizerTracking=NO`: on the tested macOS 27 system,
-the yellow button's gesture recognizer intercepted clicks without dispatching
-`miniaturize:`, while traditional control tracking restored minimization.
-The integrated build passed interactive minimize/restore, mouse menu command
-delivery, and continuous edge resizing together. Other titlebar controls and
-the broader menu matrix still need checking. Avoid
-synthetic release/press events during resize so a drag stays in one session.
-This combination passed an interactive continuous-resize check. Native menu
-activation/command selection also fails in the unchanged installed build
-under `-Q` on the tested macOS 27 system; treat that as a separate unresolved
-issue, not a regression established by the resize patch. Enabling the update
-cycle restored native resizing in experiments but did not resolve menus.
-These AppKit settings are undocumented;
-recheck after major OS updates. Validate each candidate in a fresh GUI process
-with edge/corner drags, actual menu commands, and `C-g`; programmatic
-`set-frame-size` alone is insufficient. When launching the development bundle
-directly, set `EMACSLOADPATH` to this checkout's absolute `lisp` directory if
-the bundle lacks `Contents/Resources/lisp`.
+When launching the development bundle directly, set `EMACSLOADPATH` to this
+checkout's absolute `lisp` directory if the bundle lacks
+`Contents/Resources/lisp`. Validate GUI changes in a fresh GUI process with
+real edge/corner drags, actual menu commands, and `C-g`; programmatic
+`set-frame-size` alone is insufficient.
 
-Configure with `--enable-mac-native-menus` to enable both experimental menu
-paths for normal Dock/Finder launches on macOS 27+. Otherwise the native-menu
-path is opt-in via the presence of
-`EMACS_MAC_NATIVE_MENUS` (unset it to disable); `EMACS_MAC_TRACE_MENUS`
-enables lifecycle diagnostics. Run `python3 test/manual/mac-menu/check.py`
-for snapshot ownership checks and use `test/manual/mac-menu/README.md` for
-the interactive fixture. The standalone check does not exercise AppKit or
-real Lisp GC. Menu actions can arrive after tracking ends, so snapshot
-cleanup must preserve queued actions. Do not use the legacy popup-active
-flag to represent native tracking: it also authorizes synchronous Lisp
-callbacks, which are unsafe in some event-loop contexts.
-The separate `EMACS_MAC_WORKER_MENUS` experiment cancels the actual submenu
-in tracking run-loop mode before deferring preparation to Lisp. Initial
-command/lifecycle checks passed. Clearing stale submenu contents and temporarily
-redirecting Help search to an off-bar menu removed visible blinking in tested
-openings. Capture the main window for retry ownership: Help's popup can become
-the key window. Cancelling only the root previously froze in AppKit's
-tracking loop despite end notifications. Do not rely on those notifications
-to prove that the native event loop has returned.
-Native menu tracking can bypass menu key-equivalent callbacks. The opt-in
-C-g handler intercepts dequeued key events in `EmacsApplication`, uses the
-existing quit-key recognizer, and cancels tracking without evaluating Lisp.
-It passed Edit/Help dismissal and ordinary prefix cancellation outside menus.
+### Persistent event loop
 
-### Persistent event loop (experimental)
+The fork supports only macOS 27 and later (user decision, 2026-09-24):
+runtime validation happens on macOS 27 only, and older systems are not
+supported. The persistent AppKit event loop is the only event loop; the old
+loop, its launch selector (`EMACS_MAC_PERSISTENT_LOOP`,
+`--enable-mac-persistent-loop`), the native-menu experiments
+(`EMACS_MAC_NATIVE_MENUS`, `EMACS_MAC_WORKER_MENUS`,
+`--enable-mac-native-menus`) and the undocumented event-loop preferences
+(`NSEventConcurrentProcessingEnabled`, `NSApplicationUpdateCycleEnabled`,
+`NSWindowResizeNeedsTrackingLoop`, `NSControlPrefersGestureRecognizerTracking`)
+were removed (wayfinder S8). Do not reintroduce synthetic mouse
+release/press events or GUI-thread Lisp to work around AppKit tracking.
 
-`EMACS_MAC_PERSISTENT_LOOP=1` (or `--enable-mac-persistent-loop` for the
-compiled default; `=0` selects the old loop) keeps `-[NSApplication run]`
-running on the GUI thread; see the "Persistent event loop" section of
-`src/macappkit.m` and `.wayfinder/issues/macos-app-integration.md`. Under it
-the GUI thread may touch Lisp or redisplay state only with Lisp access
+`-[NSApplication run]` runs on the GUI thread for the process lifetime; see
+the "Persistent event loop" section of `src/macappkit.m` and
+`.wayfinder/issues/macos-app-integration.md`. The GUI thread may touch Lisp
+or redisplay state only with Lisp access
 (a request parks the Lisp thread, or the GUI holds the global lock taken by
 try-lock while Lisp waits for input). New AppKit callbacks that read or build
 Lisp state must start with `MAC_LOOP_CALLBACK_NEEDS_LISP` or
@@ -162,10 +134,8 @@ accessibility queries that read buffer text or glyph matrices use
 safe point (Lisp in its input wait), not access borrowed from a Lisp
 request. Otherwise they answer from the text snapshot that
 `mac_publish_text_snapshot` stores at the end of redisplay, or report
-the value as unavailable. It registers none of the undocumented event-loop
-preferences above; `EMACS_MAC_LOOP_PREFS` (comma-separated keys or `all`)
-re-enables them for comparison. The native-menu experiments are disabled
-under it. Menu-bar selections carry the generation of the snapshot that
+the value as unavailable. Menu-bar selections carry the generation of the
+snapshot that
 `set_frame_menubar` published with the installed root menu, and are
 rejected with a message if the frame, selected window or buffer changed,
 or if the item's `:enable` no longer holds there; publish a new
@@ -182,21 +152,26 @@ for input, `menuNeedsUpdate:` asks for that menu alone with a
 `mac-menu-bar-open-refresh` special event and waits at most 50 ms,
 running Lisp requests meanwhile (D3). The refreshed menu carries its
 own snapshot generation, and the root is rebuilt when tracking ends.
-A late answer is never applied to a displayed menu. F10 shows the
-menu-bar keymap as a popup (`mac-persistent-event-loop-p`), and
+A late answer is never applied to a displayed menu. AppKit adds its own
+items to Edit, Window and Help, so never `removeAllItems` on a top-level
+menu. Menu tracking can bypass key-equivalent callbacks, so
+`-[EmacsApplication nextEventMatchingMask:...]` lets a quit key cancel
+menu-bar tracking without evaluating Lisp (D15); cancel the submenus as
+well as the root. F10 shows the menu-bar keymap as a popup, and
 repeated close/Quit requests are dropped until Lisp reaches its next
 input wait.
 
 `EMACS_MAC_TRACE_LOOP=1` traces deferrals to stderr (`2` adds every select);
 with it set, `kill -INFO <pid>` prints GUI and Lisp thread backtraces, useful
 where lldb or `sample` hang. `test/manual/mac-app-loop/run-scenarios.sh
-[old|new|both] [scenario...]` runs scripted scenarios in fresh processes and
-`summarize.el` compares them. They post real NSEvents and native window
+[scenario...]` runs scripted scenarios in fresh processes and
+`summarize.el` summarizes them. They post real NSEvents and native window
 operations from GUI-thread timers (`mac-loop-test-schedule`), so they need no
 accessibility or screen-recording permission, but they are not interactive
 acceptance: the app may be unable to become active, and plain typing needs a
-key window, so scenarios use control-key commands. Pass absolute paths to
-`-l` when launching the bundle directly.
+key window, so scenarios use control-key commands. Scripted drags are slower
+than real trackpad drags; use 8 ms steps to expose races. Pass absolute
+paths to `-l` when launching the bundle directly.
 
 ```bash
 make -C test check                          # run all tests

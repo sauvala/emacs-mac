@@ -197,72 +197,30 @@ The `nemesis` branch tracks GNU Emacs master and adds the following on top of th
 - **Wrap position cache**: Per-window cache of visual line start positions for O(1) movement within long wrapped continuation lines, replacing the O(buffer_size) scan from logical line start.
 - **WrapMap module**: Centralized visual line estimation for long wrapped lines, consolidating duplicated formulas across the display engine. For rope buffers, uses O(log n) tree operations for precise estimation.
 
-### macOS 27 menus and window controls
+### Persistent AppKit event loop (macOS 27+)
 
-Nemesis includes a macOS 27+ workaround for the yellow minimize button, alongside
-the continuous-resize workaround. These apply automatically at startup while
-preserving the existing application event-loop settings. They rely on
-undocumented AppKit defaults and should be rechecked after major OS updates.
+Nemesis runs AppKit's event loop (`-[NSApplication run]`) on the GUI thread
+for the whole session, with Lisp on its own thread. Window operations,
+resizing, menus, the Quit and close buttons, input methods and accessibility
+stay responsive while Lisp is busy; actions that need Lisp are queued and
+revalidated when Lisp can run them. Live resizing presents each redrawn frame
+together with the window's size change, as native Metal apps do.
 
-An experimental native-menu path is available separately. It restores mouse
-command delivery and keyboard opening via `M-x mac-menu-bar-open-internal`.
-With worker support enabled, menus defer Lisp preparation until native tracking
-has returned. Stale menu contents and Help search are suppressed during that
-transition to avoid an initial flash, then rebuilt before reopening. Help search
-is restored, and `C-g` dismisses an open native menu without evaluating Lisp
-inside AppKit's tracking loop.
+**Nemesis requires macOS 27 or later.** It is tested only on macOS 27; older
+systems are not supported on this branch. The earlier event loop, its
+`EMACS_MAC_PERSISTENT_LOOP` selector, the native-menu experiments
+(`--enable-mac-native-menus`, `EMACS_MAC_NATIVE_MENUS`,
+`EMACS_MAC_WORKER_MENUS`) and the undocumented AppKit defaults they relied on
+were removed in September 2026.
 
-To enable both menu paths in the app, including normal Finder and Dock launches,
-add `--enable-mac-native-menus` to your configure command, then rebuild and
-install as usual. For example:
+F10 (`mac-menu-bar-open`) shows the menu-bar keymap as a popup menu; use the
+system "Move focus to menu bar" shortcut (Control-F2 by default) to navigate
+the real menu bar from the keyboard. `C-g` dismisses an open menu without
+evaluating Lisp.
 
-```sh
-./autogen.sh
-CFLAGS="-O2 -mcpu=native" ./configure \
-  --with-native-compilation --with-tree-sitter \
-  --enable-mac-app=yes --enable-mac-self-contained \
-  --enable-mac-native-menus
-make -j6
-make install
-```
-
-The option is off by default and requires the Mac GUI port. Omit it or use
-`--disable-mac-native-menus` when rebuilding to return to opt-in behavior.
-It only activates the new menu path on macOS 27+. No launch environment
-variables are needed in an enabled build.
-
-Alternatively, to try it without enabling the build option, run from the
-checkout root after building:
-
-```sh
-open -n -a "$PWD/mac/Emacs.app" \
-  --env EMACSLOADPATH="$PWD/lisp" \
-  --env EMACS_MAC_NATIVE_MENUS=1 \
-  --env EMACS_MAC_WORKER_MENUS=1 \
-  --args -Q
-```
-
-In builds without the configure option, both flags are enabled by their
-presence; unset them to disable them (setting
-them to `0` still enables them). `EMACS_MAC_NATIVE_MENUS` selects the native
-path on macOS 27+, and `EMACS_MAC_WORKER_MENUS` additionally enables preparation
-when Lisp threads are present. They do not disable a configured-on build.
-Add `--env EMACS_MAC_TRACE_MENUS=1` before
-`--args` for lifecycle diagnostics. The internal cancellation/reopen step remains
-and can add opening latency even when no blink is visible.
-
-Interactive checks passed on the tested macOS 27 system for mouse and keyboard
-command delivery, changed menus, buffer/frame switching, worker stop/start,
-Help search, Window-menu frame selection, Services submenu display, Edit Undo,
-Escape and `C-g` dismissal, normal `C-g` prefix cancellation outside menus,
-minimize/restore, and continuous edge/corner resizing. Checks were performed
-across successive candidates; this is not a complete automated compatibility
-suite. Services command execution, real-GC/error recovery, remapped quit keys,
-and cancellation during retry still need broader coverage.
-
-See the [manual menu fixture and validation notes](test/manual/mac-menu/README.md).
-Run `python3 test/manual/mac-menu/check.py` for standalone snapshot ownership
-checks; these do not exercise AppKit or real Lisp garbage collection.
+Design notes and acceptance evidence are in
+`.wayfinder/issues/macos-app-integration.md` and
+`test/manual/mac-app-loop/`.
 
 ## Debugging
 

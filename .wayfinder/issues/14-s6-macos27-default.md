@@ -1,7 +1,7 @@
 ---
 id: s6-macos27-default
 title: "S6: Make the new loop the macOS 27 default"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: macos-app-integration
 assignee: null
@@ -29,3 +29,7 @@ apply.
 - [S3: Move window lifecycle and redisplay to the new loop](11-s3-windows-redisplay.md)
 - [S4: Move menus and callbacks to the new loop](12-s4-menus-callbacks.md)
 - [S5: Replace IME and accessibility stubs with safe content access](13-s5-content-snapshots.md)
+
+## Resolution (2026-09-24)
+
+Closed by the user's live decision: [resolution](../comments/s6-macos27-default/2026-09-24-resolution.md).
