@@ -609,13 +609,21 @@ called from an idle timer, does it.  Internal use only.  */)
   return Qnil;
 }
 
+/* Serial number of the open-time refresh request being answered, or
+0 once it has been.  */
+static unsigned long mac_menu_open_refresh_pending;
+
 /* Drop the open-time refresh request SERIAL unless it was answered,
-so that the GUI does not wait for it again after a nonlocal exit.  */
+   so that the GUI does not wait for it again after a nonlocal exit.
+   The normal path answers it itself: another round trip would wait
+   for the GUI thread while it tracks the displayed menu.  */
 
 static void
 mac_menu_open_refresh_unwind (Lisp_Object serial)
 {
-  mac_fill_menu_bar_submenu (XFIXNAT (serial), NULL, 0);
+  if (mac_menu_open_refresh_pending == XFIXNAT (serial))
+    mac_fill_menu_bar_submenu (XFIXNAT (serial), NULL, 0);
+  mac_menu_open_refresh_pending = 0;
 }
 
 DEFUN ("mac-menu-bar-refresh-submenu", Fmac_menu_bar_refresh_submenu,
@@ -651,6 +659,7 @@ expand only that menu and give it to the GUI.  Internal use only.  */)
   specpdl_ref count = SPECPDL_INDEX ();
   Lisp_Object buffer = XWINDOW (FRAME_SELECTED_WINDOW (f))->contents;
 
+  mac_menu_open_refresh_pending = XFIXNAT (serial);
   record_unwind_protect (mac_menu_open_refresh_unwind, serial);
   /* As the deep update in set_frame_menubar.  */
   XSETFRAME (Vmenu_updating_frame, f);
@@ -689,7 +698,10 @@ expand only that menu and give it to the GUI.  Internal use only.  */)
   unsigned long new_generation = 0;
 
   if (NILP (string))
-    result = mac_fill_menu_bar_submenu (XFIXNAT (serial), NULL, 0);
+    {
+      result = mac_fill_menu_bar_submenu (XFIXNAT (serial), NULL, 0);
+      mac_menu_open_refresh_pending = 0;
+    }
   else
     {
       save_menu_items ();
@@ -709,6 +721,7 @@ expand only that menu and give it to the GUI.  Internal use only.  */)
       block_input ();
       result = mac_fill_menu_bar_submenu (XFIXNAT (serial), wv,
 					  new_generation);
+      mac_menu_open_refresh_pending = 0;
       unblock_input ();
       free_menubar_widget_value_tree (wv);
     }
