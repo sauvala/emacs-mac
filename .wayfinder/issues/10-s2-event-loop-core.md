@@ -30,3 +30,16 @@ recorded, including lock-release instrumentation during the input wait.
 ## Blocked by
 
 - [S1: Add the launch-selected event-loop option](09-s1-launch-selector.md)
+
+## Progress (2026-09-24)
+
+Implemented on local branch `app-loop` (not merged, not pushed), selected
+with `EMACS_MAC_PERSISTENT_LOOP=1` or `--enable-mac-persistent-loop`. The
+input wait goes through `thread_select`, and the GUI takes the global lock
+by try-lock only while Lisp waits for input. A design difference from the
+ticket: GUI-bound events and callbacks without Lisp access go into a
+deferred FIFO replayed on the next access, instead of a separate locked
+record queue. Scripted evidence is in
+`test/manual/mac-app-loop/evidence/2026-09-24-macos27-both-scripted.md`,
+including try-lock grants during the input wait. Interactive acceptance is
+still unverified, so the ticket stays open.

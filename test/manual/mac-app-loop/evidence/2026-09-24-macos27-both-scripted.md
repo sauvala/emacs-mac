@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Source revision | `b6fc30668bc` (branch `app-loop`) |
+| Source revision | `b6fc30668bc` (first table); `5c38600668b` (menu and close/Quit rows, full rerun) (branch `app-loop`) |
 | OS version/build | macOS 27.0 (26A428) |
 | Hardware/CPU | Apple M2 |
 | SDK | macOS 27.0 SDK (Xcode clang) |
@@ -49,6 +49,21 @@ loops; they are OS animation time, not stalls.
 | close-busy (3 closes of a second frame during busy) | 1241 ms | 107 ms = close highlight; frame deleted once | pass (scripted) |
 | stress-requests (580 title changes + redisplay during drag, zoom, minimize) | 360 ms | 372 ms = zoom animation; no deadlock | pass (scripted) |
 | thread-busy (second Lisp thread busy 3 s) | 23 ms | 62 ms | pass (scripted) |
+| menu-idle (perform a custom menu-bar item) | item never runs (old loop needs tracking interception) | runs once | pass (scripted) |
+| menu-busy (same during 2 s busy) | 1187 ms; never runs | 22 ms; runs once after busy | pass (scripted) |
+| menu-stale (select, then switch buffer before Lisp reads it) | never runs | rejected: `user-error: Menu item no longer available (buffer changed)` | pass (scripted) |
+| win-close-dedupe (3 closes of a second frame during busy) | 1256 ms; `handle-delete-frame` 3 times | 102 ms; once | pass (scripted) |
+| win-close-indicator (subtitle 150 ms and 1.3 s after a busy close) | empty | "Waiting for Emacs…" both times; frame deleted after busy | pass (scripted); clearing after Lisp resumes is covered only by the frame's deletion |
+| win-quit-idle (terminate while idle) | Quit handler once | once | pass (scripted) |
+| win-quit-dedupe (3 terminates during busy) | 1163 ms; Quit handler 3 times | 39 ms; once | pass (scripted) |
+
+The full rerun at `5c38600668b` reproduced the first table within a few
+milliseconds. `fullscreen-idle` ends with the `fullscreen` parameter set
+but the normal size under both loops: its collector runs in a timer and the
+exit transition's parameter event is read after the result is written, so
+this row does not show a regression. `performItemAtIndex:` stands in for a
+click; it skips menu tracking, so the old loop, which fills and dispatches
+menus by intercepting tracking, cannot run these menu rows.
 
 Batch suites `src/process-tests`, `src/thread-tests`, `src/timefns-tests`,
 `src/keyboard-tests` and `lisp/subr-tests` give the same results under both
@@ -64,6 +79,8 @@ runs), which ticket 04 required the prototype to show.
 - Actual mouse drags on window edges through the window server, and what
   is drawn during a busy live resize (W3); no screenshots.
 - Real menu-bar tracking with the mouse or keyboard, Services, Help search.
+- The cost of the deep menu-bar fill that redisplay now does under the
+  persistent loop, in a large configuration.
 - Accessibility and window-manager discovery (`windows.py` needs permission).
 - Dock reopen, open-file Apple events, Quit with unsaved buffers.
 - Mixed-scale displays and Spaces.

@@ -28,3 +28,9 @@ macOS 27 with Lisp idle and busy, with evidence recorded.
 ## Blocked by
 
 - [S2: Build the persistent event-loop core](10-s2-event-loop-core.md)
+
+## Progress (2026-09-24)
+
+Stubbed as planned: on branch `app-loop` the NSTextInputClient and
+accessibility queries return neutral values without Lisp access and
+answer normally with it. Real snapshots are not started.

@@ -29,3 +29,31 @@ D21 passes on macOS 27 with evidence recorded; the extended
 ## Blocked by
 
 - [S3: Move window lifecycle and redisplay to the new loop](11-s3-windows-redisplay.md)
+
+## Progress (2026-09-24)
+
+On branch `app-loop`, scripted menu-bar actions pass: menu-idle, menu-busy,
+and menu-stale (rejected with `user-error`). What is implemented:
+- Redisplay publishes a deep snapshot per update (D6).
+- The installed root carries the snapshot's generation. When only the
+  window or buffer changes, a new generation is published and the root
+  restamped.
+- A selection becomes one `mac-menu-bar-selection` special event,
+  revalidated when read (D5, D17).
+- F10 opens a popup (D9).
+- Menu-bar help-echo is fire-and-forget and coalesced (D13), dereferenced
+  only while its snapshot lives.
+- Apple events, Services, Help search and toolbar callbacks defer without
+  Lisp access.
+
+Not done:
+- Rechecking `:enable` at execution (D5).
+- Retracting a deleted frame's snapshot (D16).
+- The disabled "Unavailable while Emacs is busy" entry for never-expanded
+  `:filter` submenus.
+- D15 C-g during tracking.
+- Extending `test/manual/mac-menu/check.py`.
+- Real mouse and keyboard menu tracking.
+
+Snapshots are kept for the eight newest generations rather than by
+reference count.
