@@ -191,6 +191,77 @@ The wait lets the command loop execute queued input first."
         (list :busy busy :second-live (frame-live-p second)
               :frames (length (frame-list)))))))
 
+;; W7/W8 window-close and Quit dedupe/indicator scenarios (S3).
+
+(defun mac-loop-scenario-win-close-dedupe ()
+  "Three close clicks on a busy second frame delete it exactly once.
+`handle-delete-frame' is counted via advice so a regression that lets
+duplicate DELETE_WINDOW_EVENTs through is visible even though the
+frame itself can only be deleted once."
+  (let* ((first (selected-frame))
+         (second (make-frame '((width . 40) (height . 10))))
+         (count 0))
+    (sit-for 0.5)
+    (advice-add 'handle-delete-frame :before
+                (lambda (&rest _) (setq count (1+ count))))
+    (mac-loop-test-schedule '((0.5 close) (0.7 close) (0.9 close)) second)
+    (select-frame first)
+    (let ((busy (mac-loop-scenario--busy 2)))
+      (mac-loop-scenario--then 1.0
+        (list :busy busy
+              :second-live (frame-live-p second)
+              :delete-frame-count count
+              :frames (length (frame-list)))))))
+
+(defun mac-loop-scenario-win-close-indicator ()
+  "The \"Waiting for Emacs…\" subtitle appears within ~150 ms of a
+busy close, and is cleared once Lisp resolves it."
+  (let* ((first (selected-frame))
+         (second (make-frame '((width . 40) (height . 10)))))
+    (sit-for 0.5)
+    (mac-loop-test-schedule '((0.5 close) (0.65 subtitle) (1.8 subtitle))
+                             second)
+    (select-frame first)
+    (let ((busy (mac-loop-scenario--busy 2)))
+      (mac-loop-scenario--then 1.0
+        (let* ((test (mac-loop-test-results nil))
+               (log (nth 2 test))
+               (subtitles
+                (mapcar #'cdr
+                        (seq-filter
+                         (lambda (e) (string-prefix-p "subtitle " (cdr e)))
+                         log))))
+          (list :busy busy
+                :second-live (frame-live-p second)
+                :subtitles subtitles))))))
+
+(defun mac-loop-scenario-idle-quit-debug ()
+  (let ((count 0))
+    (advice-add 'save-buffers-kill-emacs :override
+                (lambda (&rest _) (setq count (1+ count))))
+    (mac-loop-test-schedule '((0.3 terminate)))
+    (mac-loop-scenario--then 2.0
+      (list :quit-count count :commands (mac-loop-scenario--commands)))))
+
+(defun mac-loop-scenario-win-quit-dedupe ()
+  "Three Quit (terminate:) calls on a busy Lisp thread quit at most
+once.  `save-buffers-kill-emacs' is overridden so the scenario neither
+prompts nor actually exits; the override's own return also resumes the
+suspended kAEQuitApplication reply as \"cancelled\", exercising the
+same code path a real cancel would."
+  (let ((count 0))
+    (advice-add 'save-buffers-kill-emacs :override
+                (lambda (&rest _) (setq count (1+ count))))
+    (mac-loop-test-schedule '((0.5 terminate) (0.7 terminate)
+                               (0.9 terminate)))
+    (let ((busy (mac-loop-scenario--busy 2)))
+      (sit-for 0.3)
+      (sit-for 0.3)
+      (sit-for 0.3)
+      (mac-loop-scenario--then 1.0
+        (list :busy busy :quit-count count
+              :commands (mac-loop-scenario--commands))))))
+
 (defun mac-loop-scenario-run (name)
   "Run scenario NAME, write its result and exit.
 Setup and the scenario body run in timers; the result is collected

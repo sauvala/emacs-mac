@@ -824,7 +824,8 @@ enum
     MAC_LOOP_TEST_ACTIVATE,
     MAC_LOOP_TEST_SET_SIZE,
     MAC_LOOP_TEST_PROBE,
-    MAC_LOOP_TEST_TERMINATE
+    MAC_LOOP_TEST_TERMINATE,
+    MAC_LOOP_TEST_SUBTITLE
   };
 
 extern void mac_loop_test_schedule (struct frame *,
