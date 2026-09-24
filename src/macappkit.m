@@ -156,6 +156,8 @@ static void mac_loop_with_lisp_access_or_defer (void (^) (void));
 static void mac_loop_send_event (NSEvent *);
 static void mac_loop_queue_input_event (const struct input_event *);
 static void mac_loop_wake_lisp (void);
+static bool mac_loop_lisp_items_pending_p (void);
+static int mac_loop_deferred_count;
 static int mac_loop_read_socket_events (struct input_event *);
 static void mac_loop_complete_launch (void);
 static void mac_loop_note_menu_selection (NSInteger);
@@ -2042,8 +2044,13 @@ emacs_windows_need_display_p (void)
 {
   if (mac_persistent_loop_p)
     {
-      /* Nothing polls the GUI; just let Lisp read its queue.  */
-      mac_loop_wake_lisp ();
+      /* Nothing polls the GUI; let Lisp read what arrived while
+	 read_socket was throttled.  Waking it when nothing did would
+	 make it call read_socket again within the interval, which
+	 rearms this timer, so an idle Emacs would never sleep.  */
+      if (mac_loop_lisp_items_pending_p ()
+	  || __atomic_load_n (&mac_loop_deferred_count, __ATOMIC_ACQUIRE))
+	mac_loop_wake_lisp ();
       return;
     }
   if (!handling_queued_nsevents_p)
@@ -19845,7 +19852,18 @@ mac_loop_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
   r = thread_select (pselect, nfds, rfds, wfds, efds, timeout, sigmask);
   __atomic_store_n (&mac_loop_lisp_waiting_p, false, __ATOMIC_RELEASE);
   if (mac_trace_loop_p && getenv ("EMACS_MAC_TRACE_LOOP")[0] == '2')
-    MAC_TRACE_LOOP ("select returned %d\n", r);
+    {
+      int first = -1;
+
+      for (int fd = 0; r > 0 && fd < nfds; fd++)
+	if (FD_ISSET (fd, rfds))
+	  {
+	    first = fd;
+	    break;
+	  }
+      MAC_TRACE_LOOP ("select returned %d (fd %d; gui fds %d %d)\n", r,
+		      first, mac_select_fds[0], mac_select_fds[1]);
+    }
 
   if (r > 0 && FD_ISSET (mac_select_fds[0], rfds))
     {
