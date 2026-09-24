@@ -8,7 +8,7 @@
                      (* 1000 (or (plist-get r :gui-max-gap) 0))
                      (or (plist-get r :gui-long-gaps) 0)))
       (dolist (k '(:error :busy :buffer :point :commands :before :after
-                   :second-live :frames))
+                   :second-live :frames :count :busy2 :messages))
         (when (plist-member r k)
           (princ (format " %s=%S" k (plist-get r k)))))
       (terpri))))

@@ -556,9 +556,12 @@ extern void mac_menu_set_in_use (bool);
 extern unsigned long mac_prepare_native_menubar (void);
 extern void mac_native_menubar_selection (unsigned long, int);
 extern void mac_release_native_menubar (unsigned long);
+extern unsigned long mac_publish_menu_bar_snapshot (struct frame *);
+extern void mac_persistent_menubar_selection (unsigned long, int);
+extern bool mac_menu_bar_snapshot_live_p (unsigned long);
 extern Lisp_Object mac_popup_dialog (struct frame *, Lisp_Object, Lisp_Object);
 extern bool name_is_separator (const char *);
-extern bool mac_fill_menubar (widget_value *, bool);
+extern bool mac_fill_menubar (widget_value *, bool, unsigned long);
 extern bool mac_focus_native_menubar (struct frame *);
 extern int create_and_show_popup_menu (struct frame *, widget_value *,
 				       int, int, bool);
@@ -824,12 +827,18 @@ enum
     MAC_LOOP_TEST_ACTIVATE,
     MAC_LOOP_TEST_SET_SIZE,
     MAC_LOOP_TEST_PROBE,
-    MAC_LOOP_TEST_TERMINATE
+    MAC_LOOP_TEST_TERMINATE,
+    /* Perform the ITEM-INDEX'th item of the TOP-INDEX'th top-level
+       menu's submenu, as AppKit would on a real click, without faking
+       events.  X holds TOP-INDEX, Y holds ITEM-INDEX (both 0-based,
+       reusing the mouse-event fields).  */
+    MAC_LOOP_TEST_MENU
   };
 
 extern void mac_loop_test_schedule (struct frame *,
 				    const struct mac_loop_test_action *, int);
 extern Lisp_Object mac_loop_test_results (bool);
+extern bool mac_persistent_event_loop_active (void);
 
 #ifndef USE_METAL_RENDERING
 #if DRAWING_USE_GCD

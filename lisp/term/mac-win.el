@@ -2053,14 +2053,25 @@ A hook function can determine the current appearance by checking the
 (defvar mac-popup-menu-add-contextual-menu)
 
 (declare-function accelerate-menu "macmenu.c" (&optional frame) t)
+(declare-function mac-persistent-event-loop-p "macterm.c" ())
 
 (defun mac-menu-bar-open (&optional frame)
   "Open the menu bar if it is shown.
-`popup-menu' is used if it is off."
+`popup-menu' is used if it is off.
+
+Under the persistent AppKit event loop (see `mac-persistent-event-loop-p'),
+`popup-menu' is always used: `accelerate-menu' drives the real menu bar
+by faking a Carbon click, which the persistent-loop menu design (D9 in
+.wayfinder/comments/menu-callbacks/2026-09-23-discussion.md) avoids in
+favor of showing the menu-bar keymap as an ordinary popup.  Real
+keyboard navigation of the menu bar under that loop is left to the
+system \"Move focus to menu bar\" shortcut (Control-F2 by default)."
   (interactive "i")
   (cond
    ((and (not (zerop (or (frame-parameter nil 'menu-bar-lines) 0)))
-	 (fboundp 'accelerate-menu))
+	 (fboundp 'accelerate-menu)
+	 (not (and (fboundp 'mac-persistent-event-loop-p)
+		   (mac-persistent-event-loop-p))))
     (accelerate-menu frame))
    (t
     (popup-menu (mouse-menu-bar-map) last-nonmenu-event))))

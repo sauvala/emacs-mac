@@ -502,6 +502,10 @@ where DELAY is seconds from now and KIND is one of:
   terminate            invoke the native window or application operation.
   set-size W H         set the window size natively.
   probe N              only record a timestamp.
+  menu TOP-INDEX ITEM-INDEX
+                       perform ITEM-INDEX'th item of the TOP-INDEX'th
+                       top-level menu's submenu (0-based), as AppKit
+                       would on a real click.
 The actions run on the GUI thread even while Lisp is busy.  */)
   (Lisp_Object actions, Lisp_Object frame)
 {
@@ -521,7 +525,8 @@ The actions run on the GUI thread even while Lisp is busy.  */)
 	 {"zoom", MAC_LOOP_TEST_ZOOM}, {"fullscreen", MAC_LOOP_TEST_FULLSCREEN},
 	 {"close", MAC_LOOP_TEST_CLOSE}, {"activate", MAC_LOOP_TEST_ACTIVATE},
 	 {"set-size", MAC_LOOP_TEST_SET_SIZE}, {"probe", MAC_LOOP_TEST_PROBE},
-	 {"terminate", MAC_LOOP_TEST_TERMINATE}};
+	 {"terminate", MAC_LOOP_TEST_TERMINATE},
+	 {"menu", MAC_LOOP_TEST_MENU}};
       int k;
 
       CHECK_CONS (spec);
@@ -589,6 +594,16 @@ DEFUN ("mac-loop-uptime", Fmac_loop_uptime, Smac_loop_uptime, 0, 0, 0,
   (void)
 {
   return make_float (mac_system_uptime ());
+}
+
+DEFUN ("mac-persistent-event-loop-p", Fmac_persistent_event_loop_p,
+       Smac_persistent_event_loop_p, 0, 0, 0,
+       doc: /* Return non-nil if the persistent AppKit event loop is active.
+This lets Lisp tell which of the two mac-port event loops is running;
+see the "Persistent event loop" section of src/macappkit.m.  */)
+  (void)
+{
+  return mac_persistent_event_loop_active () ? Qt : Qnil;
 }
 
 /* X display function emulation */
@@ -6680,6 +6695,7 @@ syms_of_macterm (void)
   defsubr (&Smac_loop_test_schedule);
   defsubr (&Smac_loop_test_results);
   defsubr (&Smac_loop_uptime);
+  defsubr (&Smac_persistent_event_loop_p);
 
   DEFSYM (Qcontrol, "control");
   DEFSYM (Qmeta, "meta");
