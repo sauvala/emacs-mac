@@ -1,10 +1,10 @@
 ---
 id: s5-content-snapshots
 title: "S5: Replace IME and accessibility stubs with safe content access"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: macos-app-integration
-assignee: claude-app-loop-session-3
+assignee: null
 ---
 
 ## Scope
@@ -59,3 +59,8 @@ Not done (needs the user at the Mac):
 - A real input method while Lisp is busy: candidate window placement,
   and marked text in the echo area during isearch.
 - VoiceOver or `windows.py` reading an editor window, idle and busy.
+
+## Resolution (2026-09-24)
+
+Closed with the user's confirmation after a real input-method check;
+see [the resolution](../comments/s5-content-snapshots/2026-09-24-resolution.md).
