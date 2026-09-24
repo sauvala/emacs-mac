@@ -1,10 +1,10 @@
 ---
 id: s4-open-time-refresh
 title: "S4 follow-up: open-time submenu refresh (D3)"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: macos-app-integration
-assignee: claude-app-loop-session-3
+assignee: null
 ---
 
 ## Scope
@@ -114,3 +114,8 @@ are fresh when opened while idle, that nothing flickers, that Help's
 search field and Edit's AppKit items remain, and that menus open
 promptly while Lisp is busy. Computer control was not available to this
 session for that check.
+
+## Resolution (2026-09-24)
+
+Closed with the user's live confirmation after real menu-bar checks,
+idle and busy: [resolution](../comments/s4-open-time-refresh/2026-09-24-resolution.md).

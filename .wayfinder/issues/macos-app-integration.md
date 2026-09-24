@@ -51,6 +51,7 @@ version, with explicit validation and retirement criteria for existing workaroun
 - [Decide migration stages and workaround retirement gates](07-migration-plan.md): stages S0-S8 behind a launch selector with the old loop default; macOS 27 first; runtime validation on macOS 27 only (user revision: no VM testing), so earlier systems keep the old loop, unverified; mac-only code with no new shared hooks expected; env-var and per-OS default rollback; workarounds leave the new loop per stage and are deleted only in S8.
 - [S3: Move window lifecycle and redisplay to the new loop](11-s3-windows-redisplay.md): closed after agent-driven and hand-checked interactive macOS 27 checks; the mixed-scale display check was not applicable (single display).
 - [S4: Move menus and callbacks to the new loop](12-s4-menus-callbacks.md): closed after interactive macOS 27 checks; D3's open-time refresh is deferred to [a follow-up](17-s4-open-time-refresh.md), with an idle-time deep fill standing in for it.
+- [S4 follow-up: open-time submenu refresh (D3)](17-s4-open-time-refresh.md): closed after real menu-bar checks idle and busy on macOS 27; the idle-time deep fill stays for menus opened while Lisp is busy.
 - [S5: Replace IME and accessibility stubs with safe content access](13-s5-content-snapshots.md): closed after a real input-method check (Pinyin) idle and busy on macOS 27; VoiceOver was not run (user excluded it).
 
 ## Not yet specified
