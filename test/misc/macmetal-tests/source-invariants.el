@@ -187,15 +187,71 @@ update showed a blank frame after each live-resize step."
     (should (string-match-p
              "FRAME_GARBAGED_P (f))\n *emacs_metal_frame_end_held"
              macterm))
-    ;; A presentation still pending must copy the backbuffer before
-    ;; the held clear is committed.
+    ;; A presentation still pending must not show the held clear.
     (should (string-match-p
-             "if (!present)\n *emacs_metal_wait_for_presentation_copy (ctx);\n *\\[cmd commit\\]"
-             frame-end-body))
+             "if (!present)\n *emacs_metal_hold_presentation_source (ctx);\n *\\[cmd commit\\]"
+             frame-end-body))))
+
+(ert-deftest macmetal-held-frame-does-not-wait-for-a-drawable ()
+  "A held frame must not wait for a pending presentation's copy.
+The presenter gets its drawable first, which waits for the display
+refresh; waiting for its copy stalled every redisplay of a garbaged
+frame by about 16 ms.  Instead the held frame snapshots the
+backbuffer's presentable contents, queued before its own drawing, and
+the presenter copies from the snapshot until the next frame is
+scheduled for presentation."
+  (let ((frame-end (macmetal-tests--function-body "emacs_metal_frame_end_1"))
+        (hold (macmetal-tests--function-body
+               "emacs_metal_hold_presentation_source"))
+        (schedule (macmetal-tests--function-body
+                   "emacs_metal_schedule_presentation"))
+        (present (macmetal-tests--function-body
+                  "emacs_metal_dispatch_presentation_task")))
+    (should-not (string-match-p "wait_for_presentation_copy" frame-end))
+    ;; Snapshot only while a presentation has not committed its copy,
+    ;; and not again over a held frame's drawing.
     (should (string-match-p
-             "\\[cmd commit\\];\n *pthread_mutex_lock (&ctx->presentation_mutex);\n *ctx->presentation_committed = true;"
-             (macmetal-tests--function-body
-              "emacs_metal_dispatch_presentation_task")))))
+             (concat "!ctx->present_from_snapshot[\0-\377]*"
+                     "ctx->presentation_scheduled[\0-\377]*"
+                     "ctx->presentation_needs_reschedule[\0-\377]*"
+                     "!ctx->presentation_committed")
+             hold))
+    ;; The snapshot is queued and the presenter redirected under the
+    ;; lock the presenter chooses its source under.
+    (should (string-match-p
+             (concat "pthread_mutex_lock (&ctx->presentation_mutex);"
+                     "[^\0]*toTexture:snapshot[^\0]*\\[cmd commit\\];\n"
+                     " *ctx->present_from_snapshot = true;[^\0]*"
+                     "pthread_mutex_unlock (&ctx->presentation_mutex);")
+             hold))
+    (should (string-match-p "snapshot.width != backbuffer.width" hold))
+    (should (string-match-p
+             (concat "pthread_mutex_lock (&ctx->presentation_mutex);"
+                     "[^;]*\n *ctx->present_from_snapshot = false;\n"
+                     " *if (ctx->presentation_valid && ctx->sync_presentation)")
+             schedule))
+    ;; The presenter picks its source, encodes and commits the copy
+    ;; without releasing the lock.
+    (should (string-match-p
+             (concat "pthread_mutex_lock (&ctx->presentation_mutex);\n"
+                     " *valid = ctx->presentation_valid;\n"
+                     " *source = (ctx->present_from_snapshot\n"
+                     " *\\? ctx->present_snapshot : ctx->backbuffer);"
+                     "[^\0]*copyFromTexture:source"
+                     "[^\0]*\\[cmd commit\\];\n"
+                     " *ctx->presentation_committed = true;")
+             present))
+    ;; Between choosing the source and committing, the lock is released
+    ;; only on the path that commits nothing (the completion handler
+    ;; runs later and takes it itself).
+    (should (string-match
+             "source = (ctx->present_from_snapshot[^\0]*?\\[cmd commit\\];"
+             present))
+    (let ((region (replace-regexp-in-string
+                   "addCompletedHandler:[^\0]*?\n *}\\];" ""
+                   (match-string 0 present))))
+      (should (= 2 (length (split-string region
+                                         "pthread_mutex_unlock")))))))
 
 (ert-deftest macmetal-presentation-task-snapshots-context-under-lock ()
   "The presenter queue must not read context fields the main thread stores."
@@ -203,9 +259,14 @@ update showed a blank frame after each live-resize step."
                "emacs_metal_dispatch_presentation_task")))
     (should (string-match-p
              (concat "pthread_mutex_lock (&ctx->presentation_mutex)"
-                     "[\0-\377]*backbuffer = ctx->backbuffer;"
+                     "[\0-\377]*layer = ctx->layer;"
                      "[\0-\377]*pthread_mutex_unlock")
-             body))))
+             body))
+    (should (string-match-p
+             (concat "pthread_mutex_lock (&ctx->presentation_mutex);"
+                     "[^\0]*ctx->backbuffer);")
+             body))
+    (should-not (string-match-p "= ctx->backbuffer;" body))))
 
 (ert-deftest macmetal-does-not-block-the-main-thread-on-resize ()
   "Backbuffer creation and resize must not stall redisplay on the GPU."

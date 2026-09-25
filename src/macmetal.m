@@ -301,6 +301,13 @@ struct emacs_metal_context
      the backbuffer, so that later GPU work cannot change what it
      shows.  */
   bool presentation_committed;
+  /* Copy of the backbuffer's last presentable contents, taken when a
+     held frame is committed before a pending presentation has copied
+     the backbuffer; see emacs_metal_hold_presentation_source.  While
+     present_from_snapshot is set, the presenter copies from it instead
+     of the backbuffer.  Both guarded by presentation_mutex.  */
+  id<MTLTexture> present_snapshot;
+  bool present_from_snapshot;
 
   id<MTLTexture> scroll_staging;
   int scroll_staging_w, scroll_staging_h;
@@ -458,6 +465,7 @@ emacs_metal_context_finalize (emacs_metal_context_t *ctx)
     }
 
   ctx->backbuffer = nil;
+  ctx->present_snapshot = nil;
   ctx->scroll_staging = nil;
   ctx->command_queue = nil;
   ctx->presenter_queue = nil;
@@ -1045,7 +1053,7 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
         id<CAMetalDrawable> drawable = nil;
         id<MTLCommandBuffer> cmd = nil;
         CAMetalLayer *layer = nil;
-        id<MTLTexture> backbuffer = nil;
+        id<MTLTexture> source = nil;
         id<MTLCommandQueue> command_queue = nil;
         MTLClearColor clear_color = MTLClearColorMake (1.0, 1.0, 1.0, 1.0);
         bool valid;
@@ -1059,11 +1067,11 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
             ctx->presentation_committed = false;
             METAL_SHARED_INC (presentation_task_runs);
             /* Take the snapshot under the lock.  These are strong
-               references that the main thread replaces -- the backbuffer
-               on every resize -- so reading them unlocked races with the
-               store and can observe a torn or already released value.  */
+               references that the main thread replaces, so reading them
+               unlocked races with the store and can observe a torn or
+               already released value.  The texture to copy from is read
+               later, when the copy is encoded.  */
             layer = ctx->layer;
-            backbuffer = ctx->backbuffer;
             command_queue = ctx->command_queue;
             clear_color = ctx->clear_color;
           }
@@ -1098,21 +1106,33 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
                             next_drawable_ns);
           }
 
-        pthread_mutex_lock (&ctx->presentation_mutex);
-        valid = ctx->presentation_valid;
-        pthread_mutex_unlock (&ctx->presentation_mutex);
-
-        if (!valid || !drawable || !backbuffer || !command_queue)
-          goto finish_without_command;
-
-        cmd = [command_queue commandBuffer];
+        if (drawable && command_queue)
+          cmd = [command_queue commandBuffer];
         if (!cmd)
           goto finish_without_command;
 
+        /* Choose the source texture, encode the copy and commit it all
+           under the lock.  emacs_metal_hold_presentation_source decides
+           under the same lock whether a held frame may overwrite the
+           backbuffer before this copy, so the copy either is committed
+           before that frame or reads the snapshot it redirects us to.
+           The backbuffer is read here rather than when the task starts
+           since a resize may have replaced it while nextDrawable
+           waited.  */
+        pthread_mutex_lock (&ctx->presentation_mutex);
+        valid = ctx->presentation_valid;
+        source = (ctx->present_from_snapshot
+                  ? ctx->present_snapshot : ctx->backbuffer);
+        if (!valid || !source)
+          {
+            pthread_mutex_unlock (&ctx->presentation_mutex);
+            goto finish_without_command;
+          }
+
         {
           id<MTLTexture> dst = drawable.texture;
-          NSUInteger copy_w = MIN (backbuffer.width, dst.width);
-          NSUInteger copy_h = MIN (backbuffer.height, dst.height);
+          NSUInteger copy_w = MIN (source.width, dst.width);
+          NSUInteger copy_h = MIN (source.height, dst.height);
 
           /* A drawable larger than the backbuffer (the window grew after
              this backbuffer was taken) has undefined contents outside
@@ -1131,7 +1151,7 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
           if (copy_w > 0 && copy_h > 0)
             {
               id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-              [blit copyFromTexture:backbuffer
+              [blit copyFromTexture:source
                         sourceSlice:0
                         sourceLevel:0
                        sourceOrigin:MTLOriginMake (0, 0, 0)
@@ -1182,7 +1202,6 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
         }];
 
         [cmd commit];
-        pthread_mutex_lock (&ctx->presentation_mutex);
         ctx->presentation_committed = true;
         pthread_cond_broadcast (&ctx->presentation_cond);
         pthread_mutex_unlock (&ctx->presentation_mutex);
@@ -1218,6 +1237,10 @@ emacs_metal_schedule_presentation (emacs_metal_context_t *ctx)
   bool dispatch_task = false;
 
   pthread_mutex_lock (&ctx->presentation_mutex);
+  /* The backbuffer holds a frame to present again, so a presentation
+     still pending may copy it rather than the snapshot of what a held
+     frame overwrote.  */
+  ctx->present_from_snapshot = false;
   if (ctx->presentation_valid && ctx->sync_presentation)
     {
       ctx->sync_frame_ready = true;
@@ -1289,6 +1312,88 @@ emacs_metal_wait_for_presentation_copy (emacs_metal_context_t *ctx)
   pthread_mutex_unlock (&ctx->presentation_mutex);
 }
 
+/* Called before a held frame is committed.  A presentation that has
+   not yet committed its copy of the backbuffer would copy whatever the
+   backbuffer holds when that copy runs, including the held drawing.
+   Waiting for the copy would mean waiting for the presenter to get its
+   next drawable, i.e. up to a display refresh.  Instead, copy the
+   backbuffer's current contents, which were committed for
+   presentation, into present_snapshot, and have the presenter copy from
+   there until the next frame is scheduled for presentation.  Command
+   buffers on one queue run in commit order, so the snapshot precedes
+   the held drawing.  Nothing is copied when no presentation is
+   pending, or when an earlier held frame already took the snapshot:
+   the backbuffer then holds that frame's drawing.  */
+
+static void
+emacs_metal_hold_presentation_source (emacs_metal_context_t *ctx)
+{
+  bool wait = false;
+
+  pthread_mutex_lock (&ctx->presentation_mutex);
+  if (ctx->presentation_valid && !ctx->present_from_snapshot
+      && (ctx->presentation_scheduled
+          || ctx->presentation_needs_reschedule
+          || (ctx->presentation_in_flight
+              && !ctx->presentation_committed)))
+    {
+      id<MTLTexture> backbuffer = ctx->backbuffer;
+      id<MTLTexture> snapshot = ctx->present_snapshot;
+      id<MTLCommandBuffer> cmd = nil;
+
+      /* The backbuffer is replaced on resize; keep the snapshot the
+         same size.  A presentation that already copies from the old
+         snapshot keeps it alive.  */
+      if (backbuffer
+          && (!snapshot || snapshot.width != backbuffer.width
+              || snapshot.height != backbuffer.height))
+        {
+          MTLTextureDescriptor *desc
+            = [MTLTextureDescriptor
+                texture2DDescriptorWithPixelFormat:backbuffer.pixelFormat
+                                             width:backbuffer.width
+                                            height:backbuffer.height
+                                         mipmapped:NO];
+          desc.usage = MTLTextureUsageShaderRead;
+          desc.storageMode = MTLStorageModePrivate;
+          snapshot = [shared_device newTextureWithDescriptor:desc];
+          ctx->present_snapshot = snapshot;
+        }
+      if (backbuffer && snapshot)
+        cmd = [ctx->command_queue commandBuffer];
+      if (cmd)
+        {
+          id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+          [blit copyFromTexture:backbuffer
+                    sourceSlice:0
+                    sourceLevel:0
+                   sourceOrigin:MTLOriginMake (0, 0, 0)
+                     sourceSize:MTLSizeMake (backbuffer.width,
+                                             backbuffer.height, 1)
+                      toTexture:snapshot
+               destinationSlice:0
+               destinationLevel:0
+              destinationOrigin:MTLOriginMake (0, 0, 0)];
+          [blit endEncoding];
+          /* Committed under the lock, so that no presentation can read
+             the redirected source before the snapshot is queued.  */
+          [cmd commit];
+          ctx->present_from_snapshot = true;
+          METAL_SHARED_INC (command_buffers);
+          METAL_SHARED_INC (blits);
+          METAL_SHARED_ADD (blit_bytes, ((uintmax_t) backbuffer.width
+                                         * backbuffer.height * 4));
+        }
+      else
+        wait = true;
+    }
+  pthread_mutex_unlock (&ctx->presentation_mutex);
+
+  /* Without a snapshot, fall back to waiting for the copy.  */
+  if (wait)
+    emacs_metal_wait_for_presentation_copy (ctx);
+}
+
 static void
 emacs_metal_frame_end_1 (emacs_metal_context_t *ctx, bool present)
 {
@@ -1334,7 +1439,7 @@ emacs_metal_frame_end_1 (emacs_metal_context_t *ctx, bool present)
   ctx->spill_vertex_buffers = nil;
 
   if (!present)
-    emacs_metal_wait_for_presentation_copy (ctx);
+    emacs_metal_hold_presentation_source (ctx);
   [cmd commit];
   ctx->backbuffer_dirty = false;
   ctx->frame_command_buffer = nil;
