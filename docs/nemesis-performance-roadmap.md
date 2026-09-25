@@ -43,8 +43,8 @@ this list) or `skip`.
 | 1 | GC threshold defaults and idle collection | high | S | skip (user runs gcmh) |
 | 2 | Remove the vsync wait when a garbaged frame is redrawn | medium-high | S-M | done (`0bf652222bb`, `3be53d16eb8`) |
 | 3 | Merge deferred trackpad scroll events | medium | S | done (`b4724e11c83`) |
-| 4 | Native-compile preloaded Lisp again; prune stale ABI directories | low-medium | S | user (manual clean and recompile) |
-| 5 | Drop global `-fobjc-arc` and the removed `--enable-mac-persistent-loop` from the configure line | correctness | XS | done (main tree reconfigured 2026-09-25, not yet rebuilt) |
+| 4 | Native-compile preloaded Lisp again; prune stale ABI directories | low-medium | S | done in the tree (2026-09-25 rebuild); `/Applications` left to the user |
+| 5 | Drop global `-fobjc-arc` and the removed `--enable-mac-persistent-loop` from the configure line | correctness | XS | done (main tree rebuilt 2026-09-25 with `mac/pgo-build.sh`) |
 | 6 | Enlarge the regexp cache and hash its lookups | low-medium | XS-S | done (`e365131854d`) |
 | 7 | Default `redisplay-skip-fontification-on-input` to t | medium | XS | done (`7d18d47b0fc`) |
 | 8 | Benchmark harness on `nemesis` and event-to-screen latency measurement | enabler | S-M | done |
