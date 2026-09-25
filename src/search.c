@@ -40,7 +40,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "regex-emacs.h"
 
-#define REGEXP_CACHE_SIZE 20
+/* Fork-local: raised from 20.  Profiling typing in cc-mode showed the
+   cache thrashing because the working set of regexps in normal use
+   exceeds 20 entries; see the "hash" field below for how lookup stays
+   cheap at this size.  */
+#define REGEXP_CACHE_SIZE 128
 
 /* If the regexp is non-nil, then the buffer contains the compiled form
    of that regexp, suitable for searching.  */
@@ -54,6 +58,10 @@ struct regexp_cache
   Lisp_Object syntax_table;
   struct re_pattern_buffer buf;
   char fastmap[0400];
+  /* Fork-local: hash_char_array of the pattern's bytes, checked before the
+     full string comparison in compile_pattern so scanning a larger
+     cache doesn't cost more than it saves.  */
+  EMACS_UINT hash;
   /* True means regexp was compiled to do full POSIX backtracking.  */
   bool posix;
   /* True means we're inside a buffer match.  */
@@ -196,13 +204,14 @@ freeze_buffer_relocation (void)
 
 static void
 compile_pattern_1 (struct regexp_cache *cp, Lisp_Object pattern,
-		   Lisp_Object translate, bool posix)
+		   Lisp_Object translate, bool posix, EMACS_UINT hash)
 {
   const char *whitespace_regexp;
   char *val;
 
   eassert (!cp->busy);
   cp->regexp = Qnil;
+  cp->hash = hash;
   cp->buf.translate = translate;
   cp->posix = posix;
   cp->buf.multibyte = STRING_MULTIBYTE (pattern);
@@ -294,6 +303,16 @@ compile_pattern (Lisp_Object pattern, struct re_registers *regp,
 		 Lisp_Object translate, bool posix, bool multibyte)
 {
   struct regexp_cache *cp, **cpp, **lru_nonbusy;
+  /* Fork-local: hash the pattern lazily -- only the first time some
+     entry actually needs a full string comparison -- so the common
+     case (the most-recently-used entry is EQ to PATTERN, as happens
+     when the same literal regexp string is reused, e.g. by
+     font-lock) pays no extra cost from enlarging the cache.  Entries
+     the hash does need to check are compared with a cheap integer
+     compare before the full string comparison, so scanning a larger
+     cache doesn't cost more than it saves.  */
+  EMACS_UINT pattern_hash = 0;
+  bool have_pattern_hash = false;
 
   for (cpp = &searchbuf_head, lru_nonbusy = NULL; ; cpp = &cp->next)
     {
@@ -307,18 +326,31 @@ compile_pattern (Lisp_Object pattern, struct re_registers *regp,
 	 nil should never appear before a non-nil entry.  */
       if (NILP (cp->regexp))
 	goto compile_it;
-      if (SCHARS (cp->regexp) == SCHARS (pattern)
-          && !cp->busy
-	  && STRING_MULTIBYTE (cp->regexp) == STRING_MULTIBYTE (pattern)
-	  && !NILP (Fstring_equal (cp->regexp, pattern))
-	  && BASE_EQ (cp->buf.translate, translate)
-	  && cp->posix == posix
-	  && (BASE_EQ (cp->syntax_table, Qt)
-	      || BASE_EQ (cp->syntax_table,
-			  BVAR (current_buffer, syntax_table)))
-	  && !NILP (Fequal (cp->f_whitespace_regexp, Vsearch_spaces_regexp))
-	  && cp->buf.charset_unibyte == charset_unibyte)
-	break;
+      if (!cp->busy)
+	{
+	  bool same_pattern = BASE_EQ (cp->regexp, pattern);
+	  if (!same_pattern
+	      && SCHARS (cp->regexp) == SCHARS (pattern)
+	      && STRING_MULTIBYTE (cp->regexp) == STRING_MULTIBYTE (pattern))
+	    {
+	      if (!have_pattern_hash)
+		{
+		  pattern_hash = hash_char_array (SSDATA (pattern), SBYTES (pattern));
+		  have_pattern_hash = true;
+		}
+	      same_pattern = (cp->hash == pattern_hash
+			       && !NILP (Fstring_equal (cp->regexp, pattern)));
+	    }
+	  if (same_pattern
+	      && BASE_EQ (cp->buf.translate, translate)
+	      && cp->posix == posix
+	      && (BASE_EQ (cp->syntax_table, Qt)
+		  || BASE_EQ (cp->syntax_table,
+			      BVAR (current_buffer, syntax_table)))
+	      && !NILP (Fequal (cp->f_whitespace_regexp, Vsearch_spaces_regexp))
+	      && cp->buf.charset_unibyte == charset_unibyte)
+	    break;
+	}
 
       /* If we're at the end of the cache, compile into the last
 	 (least recently used) non-busy cell in the cache.  */
@@ -330,7 +362,12 @@ compile_pattern (Lisp_Object pattern, struct re_registers *regp,
           cp = *cpp;
 	compile_it:
           eassert (!cp->busy);
-	  compile_pattern_1 (cp, pattern, translate, posix);
+	  if (!have_pattern_hash)
+	    {
+	      pattern_hash = hash_char_array (SSDATA (pattern), SBYTES (pattern));
+	      have_pattern_hash = true;
+	    }
+	  compile_pattern_1 (cp, pattern, translate, posix, pattern_hash);
 	  break;
 	}
     }
