@@ -352,6 +352,9 @@ if any of these happens:
 
 The design above is the starting point for that work.
 
+The user later asked for this to be split into stages; the plan is the
+wayfinder map `.wayfinder/issues/treesit-budgeted-parse.md` (2026-09-25).
+
 ### Results so far (2026-09-25)
 
 - **Item 2:** `redraw-frame` plus `(redisplay t)` went from a median of

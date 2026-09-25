@@ -1,0 +1,74 @@
+---
+id: treesit-budgeted-parse
+title: Plan taking tree-sitter parsing off the keystroke path
+status: open
+labels: ["wayfinder:map"]
+parent: null
+assignee: null
+---
+
+## Destination
+
+An implementation-ready, staged plan for roadmap item 13
+(`docs/nemesis-performance-roadmap.md`) that keeps a tree-sitter reparse
+from blocking a keystroke or a redisplay. The stages are:
+
+1. Instrument and time parses, with no behaviour change.
+2. Budget the parse, and continue a halted parse in idle slices on the
+   Lisp thread.
+3. Only if a measured gate says so, resume a halted parse on a worker
+   thread.
+
+Each stage has its tests, its live check and a go/no-go gate.
+
+## Notes
+
+- Fork-local work on `nemesis`; nothing goes to GNU Emacs (AGENTS.md).
+- The measurements and first design are in the roadmap's item 13 section
+  (commit `ffb9c42bdee`):
+  - An ordinary reparse takes under 1 ms.
+  - Typing `"` in a 240-800 KB file costs 3-7 ms.
+  - A first parse costs 17-44 ms.
+  - Query and faces take about 1 ms per screen.
+- Standing user preference (memory, 2026-09-23): when a session has a
+  recommended answer, it adopts it and records it as self-adopted rather
+  than asking. Close HITL decision tickets only after the user confirms.
+- Minimise the sync surface: GNU master changed `src/treesit.c` and
+  `lisp/treesit.el` in 74 commits in six months. Prefer new code in
+  separate functions or files with narrow hooks into `treesit.c`.
+- Skills: grilling and domain-modeling for decisions; research (Context7
+  for the tree-sitter API, per the user's rules) for library facts; tdd for
+  stage tests.
+- Benchmarks bind `jit-lock-defer-on-input` to nil; otherwise scripted GUI
+  loops time unfontified redisplay. Only one GUI test at a time. Run GUI
+  scenarios under `MallocScribble=1`.
+- Implementation stages are `wayfinder:task` children, as for the
+  macOS app-integration map. Each stage's work happens on its own branch
+  off `nemesis`.
+
+## Decisions so far
+
+## Not yet specified
+
+- **Worker-thread stage.** Its details wait for the gate on the stage-two
+  results:
+  - the text snapshot format;
+  - parser ownership handoff and how waiters join the worker;
+  - how edits typed during a worker parse are queued and applied;
+  - the completion wakeup through the persistent loop;
+  - interaction with GC and parser deletion.
+- **First parse on file open (17-44 ms).** Whether it is budgeted like a
+  reparse. That means showing unfontified text briefly; the alternative
+  is to keep it synchronous below some size. This probably depends on the
+  display-policy decision and on how fast idle slices finish.
+- **User-facing knobs.** Names, defaults and whether they are
+  `defcustom`s (budget, slice size), once stage two has numbers.
+
+## Out of scope
+
+- Moving cc-mode or other Lisp font-lock off the Lisp thread: a C worker
+  cannot run Lisp; see the helper-process prior art on
+  `codex/responsive-coding-bb3c`.
+- Parsers with included ranges or embedded language parsers; they keep
+  parsing synchronously.
+- Moving tree-sitter queries or face application off the Lisp thread.
