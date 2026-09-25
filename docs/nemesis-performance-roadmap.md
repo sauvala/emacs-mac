@@ -352,6 +352,12 @@ if any of these happens:
 
 The design above is the starting point for that work.
 
+The harness `test/manual/redisplay-bench/ts-perf.el` later measured
+worse quote cases.  Typing `"` at the start of a line reparses in
+4-5 ms at 50-100 KB, 9 ms in `codegen.py`, and 63 ms in an 800 KB
+docstring-heavy Python file.  See
+`.wayfinder/research/ts-latency-baseline.md`.
+
 The user later asked for this to be split into stages; the plan is the
 wayfinder map `.wayfinder/issues/treesit-budgeted-parse.md` (2026-09-25).
 

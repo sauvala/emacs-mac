@@ -1,7 +1,7 @@
 ---
 id: ts-latency-scenarios
 title: "Tree-sitter latency scenarios for the benchmark harness"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: treesit-budgeted-parse
 assignee: null
