@@ -123,7 +123,9 @@ callback of the same kind. While Lisp is busy, a growing window shows the
 last Metal drawable anchored top-left over the frame background, which is
 the layer's `backgroundColor`. Idle live-resize steps redraw a garbaged
 frame; `mac_update_end` holds the Metal presentation of `redraw_frame`'s
-clear so that no blank frame reaches the screen between steps. While Lisp
+clear, and implicit frames stay held until the redraw, so that no blank
+frame reaches the screen between steps. A held frame never waits for a
+drawable: it snapshots the backbuffer for a pending presentation. While Lisp
 is idle, each live-resize step waits (`EMACS_MAC_RESIZE_WAIT_MS`, default
 30; 0 disables) for Lisp to redraw at the new size and presents that
 frame in the step's Core Animation transaction

@@ -190,7 +190,13 @@ update showed a blank frame after each live-resize step."
     ;; A presentation still pending must not show the held clear.
     (should (string-match-p
              "if (!present)\n *emacs_metal_hold_presentation_source (ctx);\n *\\[cmd commit\\]"
-             frame-end-body))))
+             frame-end-body))
+    ;; Nor may drawing outside an update, such as the internal border
+    ;; that redisplay clears before it redraws the frame.
+    (should (string-match-p
+             "emacs_metal_frame_end_1 (ctx, !ctx->presentation_held);"
+             (macmetal-tests--function-body
+              "emacs_metal_end_implicit_frame")))))
 
 (ert-deftest macmetal-held-frame-does-not-wait-for-a-drawable ()
   "A held frame must not wait for a pending presentation's copy.

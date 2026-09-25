@@ -341,6 +341,8 @@ struct emacs_metal_context
 static void flush_render_batches (emacs_metal_context_t *ctx,
                                   id<MTLCommandBuffer> cmd);
 static void emacs_metal_schedule_presentation (emacs_metal_context_t *ctx);
+static void emacs_metal_frame_end_1 (emacs_metal_context_t *ctx,
+                                     bool present);
 static void emacs_metal_present_sync_if_current (emacs_metal_context_t *);
 
 void (*emacs_metal_sync_frame_ready_hook) (void);
@@ -947,11 +949,17 @@ emacs_metal_ensure_frame (emacs_metal_context_t *ctx)
   ctx->implicit_frame = true;
 }
 
+/* Close a frame opened by emacs_metal_ensure_frame.  While a held
+   frame waits for its redraw, keep this drawing held as well:
+   redisplay draws the internal border (mac_clear_under_internal_border)
+   outside an update between redraw_frame's clear and the update that
+   redraws the frame, and presenting it would show the cleared frame.  */
+
 void
 emacs_metal_end_implicit_frame (emacs_metal_context_t *ctx)
 {
   if (ctx && ctx->in_frame && ctx->implicit_frame)
-    emacs_metal_frame_end (ctx);
+    emacs_metal_frame_end_1 (ctx, !ctx->presentation_held);
 }
 
 /* Render all pending batches into the backbuffer and reset batch state.
