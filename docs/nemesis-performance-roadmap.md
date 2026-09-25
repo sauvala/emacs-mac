@@ -53,7 +53,7 @@ this list) or `skip`.
 | 11 | Profile-guided optimization (PGO) and ThinLTO build | 15-27% CPU (measured) | M | done (`mac/pgo-build.sh`; opt-in) |
 | 12 | Concurrent GC (GNU `feature/igc`, MPS) | high | XL | skip (upstream work; revisit when it merges) |
 | 13 | Take fontification off the redisplay path | high | L | todo (long term) |
-| 14 | Fix the macOS 27 hit test that sends every mouse and scroll event through AppKit | medium | S-M | done (awaiting the user's trackpad check) |
+| 14 | Fix the macOS 27 hit test that sends every mouse and scroll event through AppKit | medium | S-M | done, accepted |
 | 15 | Cheaper menu-bar fills: skip `substitute-command-keys` for plain help strings | low-medium | XS | done |
 
 ### 1. GC defaults and idle collection (skipped)
@@ -327,8 +327,8 @@ NSEvents by `mac_loop_send_event` is gone.
   and the Lisp after it let `read_socket` take the first deferred
   events, splitting the merge.  The scenario now calibrates before
   posting the gesture and passes 5 of 5 runs.
-- Real trackpad scrolling, momentum included, still needs the user's
-  check.
+- Accepted 2026-09-25: the user checked real trackpad scrolling,
+  momentum included, both idle and while Lisp was busy.
 
 ### 15. Menu-bar fill cost (found while doing item 8)
 
