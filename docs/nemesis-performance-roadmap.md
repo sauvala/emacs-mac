@@ -52,7 +52,7 @@ this list) or `skip`.
 | 10 | Cherry-pick the measured wins from `codex/responsive-coding-bb3c` | medium | M | done |
 | 11 | Profile-guided optimization (PGO) and ThinLTO build | 15-27% CPU (measured) | M | done (`mac/pgo-build.sh`; opt-in) |
 | 12 | Concurrent GC (GNU `feature/igc`, MPS) | high | XL | skip (upstream work; revisit when it merges) |
-| 13 | Take fontification off the redisplay path | high | L | todo (long term) |
+| 13 | Take fontification off the redisplay path | low (measured) | L | designed, deferred (2-7 ms, only on large-file edits; see section) |
 | 14 | Fix the macOS 27 hit test that sends every mouse and scroll event through AppKit | medium | S-M | done, accepted |
 | 15 | Cheaper menu-bar fills: skip `substitute-command-keys` for plain help strings | low-medium | XS | done |
 
@@ -262,6 +262,95 @@ thread and only apply results on the main thread.  A contained version for
 Emacs: run tree-sitter parsing (C only, no Lisp) on a worker thread over a
 snapshot of the buffer text, and apply faces on the Lisp thread for the visible
 range.
+
+#### Measurements (2026-09-25)
+
+These ran on the installed PGO build (`ba7e776ed83`) with a 16 MB
+`gc-cons-threshold`, grammars from `~/.emacs.d/tree-sitter`, and
+tree-sitter 0.27.  The user's configuration uses `treesit-auto` for every
+language with an installed grammar, so this item concerns tree-sitter modes.
+C files still open in cc-mode because no C grammar is installed.
+
+| Case | python-ts, 240 KB | typescript-ts, 800 KB | python-ts, 45-50 KB |
+|---|---|---|---|
+| Full parse (opening the file) | 16.6 ms | 44 ms | - |
+| Reparse after a one-character edit | 0.16 ms | 1.0 ms | - |
+| Reparse after typing `"` (the tree changes to the end of the buffer) | 6.7 ms | 3.3 ms | 1.4-2.2 ms |
+| Query and faces for 60 lines | 1.3 ms | 1.6 ms | 0.4-1.0 ms |
+| GUI keystroke, including redisplay | 1.0 ms | 1.9 ms | - |
+| GUI page scroll | 2.6 ms | 2.5 ms | - |
+
+The first three rows are parsing, the only work a C worker thread could
+take over.  Querying and applying faces must stay on the Lisp thread, and
+cost about 1 ms per screen.  An ordinary edit's parse is already under
+1 ms.  A worker saves time only on edits that invalidate much of the tree,
+such as quotes, brackets and comment starters, in files over about
+200 KB, and on the first parse when a file is opened.
+
+cc-mode is the largest fontification cost: about 3.7 ms per keystroke in
+`src/xdisp.c` (typing takes 4.6 ms, 0.9 ms without font-lock).  It is Lisp,
+so no C worker can help it.  `codex/responsive-coding-bb3c` ran font-lock
+in helper Emacs processes instead, which took 95 commits and nearly
+3,000 changed lines.  Item 10 took only the budgeting and deferral
+commits from that branch.
+
+Measuring note: `jit-lock-defer-on-input` (item 10) defers fontification
+whenever input is pending, and a scripted GUI loop always has input
+pending.  Bind it to nil in a benchmark, or the benchmark times
+unfontified redisplay.
+
+#### Design (decided 2026-09-25 by Claude, per the user's standing instruction to adopt recommendations; not reviewed by the user)
+
+1. **Scope.** Only a buffer's primary tree-sitter parser, and only when it
+   has no included ranges and no embedded parsers.  Everything else parses
+   synchronously, as it does today.  Queries, `treesit-font-lock-rules`
+   and face application stay on the Lisp thread.
+2. **Budgeted parse.** `treesit_ensure_parsed` calls
+   `ts_parser_parse_with_options` with a progress callback that halts the
+   parse after a budget, `treesit-sync-parse-budget` (default 3 ms).
+   Ordinary edits finish within the budget, so behaviour is unchanged for
+   them.
+3. **Handoff.** When the parse halts, copy the parsed region's bytes (both
+   sides of the gap, the accessible region only) into a snapshot, and
+   resume the parse on a serial GCD queue.  Tree-sitter resumes a halted
+   parse when it is called again with the same arguments (see
+   `ts_parser_reset` in `api.h`).  The snapshot has the same content as the
+   buffer at the halt, so the byte offsets stay valid.  Until the parse
+   completes, only the worker uses the `TSParser`.
+4. **While the parse is pending.** `treesit--pre-redisplay` and
+   `treesit-font-lock-fontify-region` do not wait.  They leave the regions
+   they are asked to fontify marked for `jit-lock`'s deferral, so the old
+   faces stay visible and are not cleared.  Every other caller that needs
+   the tree, such as indentation, navigation, `treesit-node-at` or
+   `syntax-propertize`, waits for the worker.  That wait is never longer
+   than today's synchronous parse.
+5. **Completion.** The worker posts a wakeup to the Lisp thread, as the
+   persistent loop does for other GUI-thread results.  The Lisp thread
+   installs the tree, bumps the timestamp and runs the after-change
+   notifiers with the changed ranges, which marks those regions for
+   refontification.  Edits made during the parse are queued as
+   `TSInputEdit`s; they are applied to the new tree with `ts_tree_edit`,
+   and a normal budgeted reparse follows.  A change of narrowing, a
+   language change or a parser deletion during the parse makes the Lisp
+   thread wait for the worker first.
+6. **Tests.** A batch ERT test forces a budget of 0 and checks that the
+   finished tree equals a synchronous parse after interleaved edits.  A
+   GUI scenario types `"` into the 800 KB TypeScript file and checks
+   keystroke latency and that the string face appears afterwards.  Run the
+   scenario under `MallocScribble=1`.
+
+**Decision: not implemented now.**  The saving is 2-7 ms on a small class
+of edits in large files, plus the first parse on opening a file.  Ordinary
+keystrokes already take 1-2 ms in total.  The change would add
+cross-thread ownership to `src/treesit.c`, which GNU master changed in 74
+commits over the last six months together with `lisp/treesit.el`.  Every
+weekly sync would have to re-verify the threading invariants.  Revisit
+if any of these happens:
+- a tree-sitter mode keystroke measures over 8 ms, one frame at 120 Hz;
+- the user reports lag in large files;
+- upstream adds a similar asynchronous parse.
+
+The design above is the starting point for that work.
 
 ### Results so far (2026-09-25)
 
