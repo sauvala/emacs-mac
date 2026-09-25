@@ -1,7 +1,7 @@
 ---
 id: macos-app-integration
 title: Plan documented macOS application integration
-status: open
+status: closed
 labels: ["wayfinder:map"]
 parent: null
 assignee: null
@@ -62,6 +62,8 @@ version, with explicit validation and retirement criteria for existing workaroun
 - [S6: Make the new loop the macOS 27 default](14-s6-macos27-default.md): closed by the user's decision; the week of daily use was waived and S8 made the new loop the only loop.
 - [S7: Converge older macOS versions](15-s7-older-os-convergence.md): closed by the user's decision to drop macOS versions before 27.
 - [S5: Replace IME and accessibility stubs with safe content access](13-s5-content-snapshots.md): closed after a real input-method check (Pinyin) idle and busy on macOS 27; VoiceOver was not run (user excluded it).
+- [S8: Remove the old loop and its workarounds](16-s8-old-loop-removal.md): closed after the user's check of the installed build; a tab-bar mouse race under a transparent titlebar, found then, was fixed first.
+- Map closed 2026-09-25: [resolution](../comments/macos-app-integration/2026-09-25-resolution.md).
 
 ## Not yet specified
 

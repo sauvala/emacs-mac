@@ -1,10 +1,10 @@
 ---
 id: s8-old-loop-removal
 title: "S8: Remove the old loop and its workarounds"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: macos-app-integration
-assignee: claude-old-loop-removal
+assignee: null
 ---
 
 ## Scope
@@ -50,3 +50,8 @@ the default and remove the old one (S6):
 Checks: all 29 scripted scenarios, 25 Metal source tests, the menu
 snapshot check and the fixture ERT tests pass. Awaiting the user's check
 of the installed build before merging and closing.
+
+## Resolution (2026-09-25)
+
+Closed with the user's confirmation of the installed build:
+[resolution](../comments/s8-old-loop-removal/2026-09-25-resolution.md).
