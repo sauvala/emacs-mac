@@ -48,7 +48,7 @@ this list) or `skip`.
 | 6 | Enlarge the regexp cache and hash its lookups | low-medium | XS-S | done (`e365131854d`) |
 | 7 | Default `redisplay-skip-fontification-on-input` to t | medium | XS | done (`7d18d47b0fc`) |
 | 8 | Benchmark harness on `nemesis` and event-to-screen latency measurement | enabler | S-M | done |
-| 9 | Copy only changed regions when presenting | medium (GPU bandwidth, power) | M | todo |
+| 9 | Copy only changed regions when presenting | low (measured) | M | skip (0.7 ms GPU per present; needs undocumented drawable reuse) |
 | 10 | Cherry-pick the measured wins from `codex/responsive-coding-bb3c` | medium | M | todo |
 | 11 | Profile-guided optimization (PGO) and ThinLTO build | 5-15% CPU | M | todo |
 | 12 | Concurrent GC (GNU `feature/igc`, MPS) | high | XL | skip (upstream work; revisit when it merges) |
@@ -165,6 +165,20 @@ Each presentation copies the whole backbuffer to the drawable, roughly
 30-60 MB on Retina, even for a one-character change.  Track changed
 rectangles per frame.  Drawables rotate among three, so copy the union of the
 last three frames' changes.
+
+Skipped (2026-09-25) after measuring: in a maximized window on the built-in
+Retina display (M2), the presentation command buffer's GPU time
+(`GPUEndTime - GPUStartTime`) was 0.57-0.74 ms (p95), 3.2 ms at most, over
+the `c-typing` scenario.  That runs asynchronously to Lisp and rarely
+moves a frame across a refresh.  Copying less would also rely on a
+drawable keeping its previous contents, which Core Animation does not
+promise.  Revisit only if power measurements point here.
+
+Follow-up from item 2, done the same day: the snapshot texture that a
+held frame copies into is now purgeable while no presentation copies
+from it or is redirected to it, so the system can reclaim its memory
+(one backbuffer's worth); it is made non-purgeable before the next
+snapshot.  `redraw-frame` stays at 1.9-2.0 ms.
 
 ### 10. Responsive-coding branch
 

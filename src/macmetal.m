@@ -308,6 +308,12 @@ struct emacs_metal_context
      of the backbuffer.  Both guarded by presentation_mutex.  */
   id<MTLTexture> present_snapshot;
   bool present_from_snapshot;
+  /* Number of presentations whose copy from present_snapshot has not
+     completed, and whether the snapshot is purgeable: while no
+     presentation needs it, the system may reclaim its memory.  Guarded
+     by presentation_mutex.  */
+  int snapshot_readers;
+  bool snapshot_volatile;
   /* Timestamp (CACurrentMediaTime) of the earliest input event that
      the frames scheduled for presentation since the last one reflect,
      or 0.  Guarded by presentation_mutex.  */
@@ -1110,6 +1116,20 @@ flush_render_batches (emacs_metal_context_t *ctx, id<MTLCommandBuffer> cmd)
   ctx->batch_clip_rect_count = 0;
 }
 
+/* With presentation_mutex held: make the snapshot purgeable if no
+   presentation copies from it or is redirected to it.  */
+
+static void
+emacs_metal_release_snapshot_if_unused (emacs_metal_context_t *ctx)
+{
+  if (ctx->present_snapshot && !ctx->present_from_snapshot
+      && ctx->snapshot_readers == 0 && !ctx->snapshot_volatile)
+    {
+      [ctx->present_snapshot setPurgeableState:MTLPurgeableStateVolatile];
+      ctx->snapshot_volatile = true;
+    }
+}
+
 static void
 emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
 {
@@ -1120,6 +1140,9 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
         id<MTLCommandBuffer> cmd = nil;
         CAMetalLayer *layer = nil;
         id<MTLTexture> source = nil;
+        /* The snapshot this presentation copies from, if any, as an
+           address: the command buffer keeps the texture alive.  */
+        uintptr_t read_snapshot = 0;
         id<MTLCommandQueue> command_queue = nil;
         MTLClearColor clear_color = MTLClearColorMake (1.0, 1.0, 1.0, 1.0);
         bool valid;
@@ -1196,6 +1219,11 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
           }
         double shown_input_time = ctx->pending_input_time;
         ctx->pending_input_time = 0;
+        if (ctx->present_from_snapshot)
+          {
+            read_snapshot = (uintptr_t) (__bridge void *) source;
+            ctx->snapshot_readers++;
+          }
 
         {
           id<MTLTexture> dst = drawable.texture;
@@ -1261,6 +1289,14 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
           pthread_mutex_lock (&ctx->presentation_mutex);
           ctx->presentation_in_flight = false;
           pthread_cond_broadcast (&ctx->presentation_cond);
+          /* A resize may have replaced the snapshot this copy read.  */
+          if (read_snapshot
+              && (read_snapshot
+                  == (uintptr_t) (__bridge void *) ctx->present_snapshot))
+            {
+              ctx->snapshot_readers--;
+              emacs_metal_release_snapshot_if_unused (ctx);
+            }
           if (ctx->presentation_valid && ctx->presentation_needs_reschedule)
             {
               ctx->presentation_needs_reschedule = false;
@@ -1318,11 +1354,6 @@ emacs_metal_schedule_presentation (emacs_metal_context_t *ctx)
      still pending may copy it rather than the snapshot of what a held
      frame overwrote.  */
   ctx->present_from_snapshot = false;
-  /* Synchronous presentation is not measured.  */
-  if (shown_input_time > 0 && !ctx->sync_presentation
-      && (ctx->pending_input_time == 0
-          || shown_input_time < ctx->pending_input_time))
-    ctx->pending_input_time = shown_input_time;
   if (ctx->presentation_valid && ctx->sync_presentation)
     {
       ctx->sync_frame_ready = true;
@@ -1343,6 +1374,12 @@ emacs_metal_schedule_presentation (emacs_metal_context_t *ctx)
     }
   if (ctx->presentation_valid)
     {
+      emacs_metal_release_snapshot_if_unused (ctx);
+      /* Synchronous presentation is not measured.  */
+      if (shown_input_time > 0
+          && (ctx->pending_input_time == 0
+              || shown_input_time < ctx->pending_input_time))
+        ctx->pending_input_time = shown_input_time;
       METAL_STAT_INC (presentation_requests);
       if (ctx->presentation_scheduled)
         METAL_STAT_INC (presentation_coalesced_requests);
@@ -1440,6 +1477,15 @@ emacs_metal_hold_presentation_source (emacs_metal_context_t *ctx)
           desc.storageMode = MTLStorageModePrivate;
           snapshot = [shared_device newTextureWithDescriptor:desc];
           ctx->present_snapshot = snapshot;
+          /* Copies from the old snapshot keep that one alive.  */
+          ctx->snapshot_readers = 0;
+          ctx->snapshot_volatile = false;
+        }
+      else if (snapshot && ctx->snapshot_volatile)
+        {
+          /* Its contents may be gone; they are overwritten below.  */
+          [snapshot setPurgeableState:MTLPurgeableStateNonVolatile];
+          ctx->snapshot_volatile = false;
         }
       if (backbuffer && snapshot)
         cmd = [ctx->command_queue commandBuffer];
