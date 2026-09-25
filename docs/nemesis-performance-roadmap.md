@@ -54,7 +54,7 @@ this list) or `skip`.
 | 12 | Concurrent GC (GNU `feature/igc`, MPS) | high | XL | skip (upstream work; revisit when it merges) |
 | 13 | Take fontification off the redisplay path | high | L | todo (long term) |
 | 14 | Fix the macOS 27 hit test that sends every mouse and scroll event through AppKit | medium | S-M | done (awaiting the user's trackpad check) |
-| 15 | Cheaper menu-bar fills: skip `substitute-command-keys` for plain help strings | low-medium | XS | todo |
+| 15 | Cheaper menu-bar fills: skip `substitute-command-keys` for plain help strings | low-medium | XS | done |
 
 ### 1. GC defaults and idle collection (skipped)
 
@@ -277,6 +277,15 @@ buffer per call: 364 calls and about 1.6 MB of allocation per fill with
 every redisplay after a window or buffer change while Lisp is idle (in
 timers, for example).  Most help strings contain no backslash, grave
 accent or apostrophe, the only characters that the function changes.
+
+Result (2026-09-25): `substitute-command-keys` returns such a string
+unchanged without a buffer, as its docstring already promised.  In the
+`menu-fill-cost` scenario (100 forced fills, three runs each, same build
+configuration) a plain fill went from 8.5 to 3.7 ms, one with 200
+buffers and six major modes from 14.4 to 7.0 ms, and GCs from 57 to 38.
+A redraw in a timer went from 13 to 7 ms.  The help, help-fns,
+help-mode, doc and bytecomp tests pass.  This changes an upstream Lisp
+file; it is fork-local.
 
 ## Not worth doing yet
 

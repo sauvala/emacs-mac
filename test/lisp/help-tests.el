@@ -80,6 +80,14 @@
    (test "foo" "foo")
    (test "\\invalid-escape" "\\invalid-escape")))
 
+(ert-deftest help-tests-substitute-command-keys/no-change-original ()
+  ;; Menu-bar fills pass hundreds of help strings through this
+  ;; function; one without substitutions is returned as is.
+  (let ((plain (propertize "Read a file" 'face 'bold)))
+    (should (eq (substitute-command-keys plain) plain)))
+  (let ((text-quoting-style 'curve))
+    (should-not (equal (substitute-command-keys "`x'") "`x'"))))
+
 (ert-deftest help-tests-substitute-command-keys/commands ()
   (with-substitute-command-keys-test
    (test "foo \\[goto-char]" "foo M-g c")

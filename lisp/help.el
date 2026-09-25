@@ -1460,7 +1460,12 @@ output.
 
 Return the original STRING if no substitutions are made.
 Otherwise, return a new string."
-  (when (not (null string))
+  (cond
+   ((null string) nil)
+   ;; Only backslash sequences and quotes are substituted.  Menu-bar
+   ;; updates call this for every item's help string.
+   ((not (string-match-p "[\\`']" string)) string)
+   (t
     ;; KEYMAP is either nil (which means search all the active
     ;; keymaps) or a specified local map (which means search just that
     ;; and the global map).  If non-nil, it might come from
@@ -1616,7 +1621,7 @@ Otherwise, return a new string."
               (delete-char 1))
              ;; 3. Nothing to do -- next character.
              (t (forward-char 1)))))
-        (buffer-string)))))
+        (buffer-string))))))
 
 (defun substitute-quotes (string)
   "Substitute quote characters in STRING for display.
