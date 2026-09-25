@@ -304,6 +304,37 @@ These counters are only active in Metal rendering builds.  */)
   return Flist (countof (result), result);
 }
 
+DEFUN ("mac-metal-input-latency", Fmac_metal_input_latency,
+       Smac_metal_input_latency, 0, 1, 0,
+       doc: /* Return the measured key-event-to-screen latencies.
+If optional RESET is non-nil, clear the record after reading it.
+
+The value is a plist (:samples SAMPLES :unpresented N).  SAMPLES is a
+vector of latencies in milliseconds, in the order the frames reached
+the screen, each from the arrival of the earliest key-down event that a
+presented frame reflects to the time the drawable was shown.  N counts
+such frames whose drawable was never shown.  A key that changes nothing
+on screen is counted against the next presented frame.  At most 4096
+samples are kept.  Only Metal rendering builds record latencies.  */)
+  (Lisp_Object reset)
+{
+  Lisp_Object samples = make_nil_vector (0);
+  uintmax_t unpresented = 0;
+
+#ifdef USE_METAL_RENDERING
+  double buf[4096];
+  int n = emacs_metal_input_latency (buf, countof (buf), &unpresented,
+				     !NILP (reset));
+
+  samples = make_nil_vector (n);
+  for (int i = 0; i < n; i++)
+    ASET (samples, i, make_float (buf[i] * 1000));
+#endif
+
+  return list4 (QCsamples, samples, QCunpresented,
+		make_uint (unpresented));
+}
+
 DEFUN ("mac-metal-render-stats", Fmac_metal_render_stats,
        Smac_metal_render_stats, 0, 1, 0,
        doc: /* Return Metal renderer counters.
@@ -6766,6 +6797,9 @@ syms_of_macterm (void)
   defsubr (&Smac_gc_clip_stats);
   defsubr (&Smac_metal_clip_overdraw_stats);
   defsubr (&Smac_metal_render_stats);
+  defsubr (&Smac_metal_input_latency);
+  DEFSYM (QCsamples, ":samples");
+  DEFSYM (QCunpresented, ":unpresented");
   defsubr (&Smac_metal_set_display_sync_enabled);
   defsubr (&Smac_metal_set_maximum_drawable_count);
   defsubr (&Smac_loop_test_schedule);

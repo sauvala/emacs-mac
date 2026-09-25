@@ -56,6 +56,11 @@ extern void emacs_metal_context_resize (emacs_metal_context_t *ctx,
 extern void emacs_metal_context_destroy (emacs_metal_context_t *ctx);
 extern void emacs_metal_get_render_stats (struct emacs_metal_render_stats *,
                                           bool reset);
+/* Note that an input event with timestamp TIME (seconds, the clock of
+   CACurrentMediaTime) arrived.  */
+extern void emacs_metal_note_input_time (double time);
+extern int emacs_metal_input_latency (double *buf, int max,
+                                      uintmax_t *unpresented, bool reset);
 extern bool emacs_metal_set_display_sync_enabled (emacs_metal_context_t *ctx,
                                                   bool enabled);
 /* Colour for areas Emacs has not drawn yet; the frame background.  */

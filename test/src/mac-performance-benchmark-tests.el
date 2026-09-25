@@ -77,7 +77,18 @@
   "The benchmark harness should include typing and process-output workloads."
   (should (assoc "command-loop-input" mac-performance--scenarios))
   (should (assoc "typing-source" mac-performance--scenarios))
-  (should (assoc "process-output" mac-performance--scenarios)))
+  (should (assoc "process-output" mac-performance--scenarios))
+  (should (assoc "c-page-scroll" mac-performance--scenarios))
+  (should (assoc "c-typing" mac-performance--scenarios))
+  (should (assoc "c-full-redraw" mac-performance--scenarios)))
+
+(ert-deftest mac-performance-benchmark-selects-scenarios ()
+  "MAC_BENCH_SCENARIOS should restrict the scenarios that run."
+  (let ((process-environment
+         (cons "MAC_BENCH_SCENARIOS=c-typing key-latency"
+               process-environment)))
+    (should (equal (mac-performance--selected-scenarios)
+                   '("c-typing" "key-latency")))))
 
 (provide 'mac-performance-benchmark-tests)
 

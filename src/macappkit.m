@@ -18632,6 +18632,10 @@ mac_loop_send_event (NSEvent *event)
 		   && event.type != NSEventTypeAppKitDefined
 		   && event.type != NSEventTypeSystemDefined);
 
+#ifdef USE_METAL_RENDERING
+  if (event.type == NSEventTypeKeyDown)
+    emacs_metal_note_input_time (event.timestamp);
+#endif
   if (!mac_loop_event_emacs_bound_p (event))
     {
       [(EmacsApplication *) NSApp sendEventToAppKit:event];

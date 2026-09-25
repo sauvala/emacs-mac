@@ -32,10 +32,30 @@
 ;; The harness stresses mac-port-specific redisplay paths and samples optional
 ;; counters exposed by the mac port, including Metal rendering, Metal clip
 ;; overdraw, and AppKit select latency counters when those functions exist.
+;;
+;; The c-* scenarios work on src/xdisp.c in `c-mode', as the baseline in
+;; docs/nemesis-performance-roadmap.md does: page scrolling into text not
+;; yet fontified, typing, and full redraws, each step timed with its
+;; redisplay (latency bucket `step') and with GC counts and time.
+;;
+;; `mac-performance-run-benchmarks-and-exit' then measures key-to-screen
+;; latency when the build has `mac-loop-test-schedule' and
+;; `mac-metal-input-latency': it posts real key events that insert text
+;; into xdisp.c and reports, in milliseconds, how long after each key's
+;; arrival the Metal drawable showing its effect reached the screen.
+;;
+;; Set the environment variable MAC_BENCH_SCENARIOS to a space-separated
+;; list of scenario names (and `key-latency') to run only those.
+;;
+;; The GUI harness is noisy: use 120 iterations, alternate the builds
+;; being compared round-robin, and compare minimums.
 
 ;;; Code:
 
 (require 'cl-lib)
+
+(declare-function mac-loop-test-schedule "macterm.c" (actions &optional frame))
+(declare-function mac-metal-input-latency "macterm.c" (&optional reset))
 
 (defgroup mac-performance-benchmark nil
   "macOS GUI performance benchmarks."
@@ -53,6 +73,15 @@
   "Seconds to wait before starting unattended GUI benchmark runs.
 The delay lets startup finish frame creation before the harness forces
 redisplay."
+  :type 'number)
+
+(defcustom mac-performance-benchmark-c-file
+  (expand-file-name "src/xdisp.c" source-directory)
+  "C source file used by the c-* scenarios."
+  :type 'file)
+
+(defcustom mac-performance-benchmark-key-interval 0.06
+  "Seconds between the keys posted by the key-latency measurement."
   :type 'number)
 
 (defvar mac-performance--modeline-tick 0)
@@ -149,9 +178,9 @@ SAMPLES is an alist whose entries are shaped like (NAME SAMPLE...)."
                           :total-seconds total
                           :average-seconds (/ total count)
                           :p50-seconds (mac-performance--latency-percentile
-                                         sorted 0.50)
+                                        sorted 0.50)
                           :p95-seconds (mac-performance--latency-percentile
-                                         sorted 0.95)
+                                        sorted 0.95)
                           :max-seconds (car (last sorted))))
               summary)))
     (nreverse summary)))
@@ -184,16 +213,38 @@ SAMPLES is an alist whose entries are shaped like (NAME SAMPLE...)."
      (redisplay 'force))))
 
 (defun mac-performance--scroll-window (iterations)
-  "Scroll the selected window for ITERATIONS steps."
+  "Line-scroll the selected window for ITERATIONS steps."
   (dotimes (i iterations)
     (mac-performance--time-latency
-     'scroll-command
+     'line-scroll-command
      (lambda ()
        (condition-case nil
-           (scroll-up-command)
+           (scroll-up 1)
          (end-of-buffer
           (goto-char (point-min))))))
     (when (zerop (mod i 8))
+      (mac-performance--redisplay))))
+
+(defun mac-performance--page-scroll-window (iterations)
+  "Page-scroll the selected window for ITERATIONS steps."
+  (dotimes (_ iterations)
+    (mac-performance--time-latency
+     'page-scroll-command
+     (lambda ()
+       (condition-case nil
+           (scroll-up-command nil)
+         (end-of-buffer
+          (goto-char (point-min))))))
+    (mac-performance--redisplay)))
+
+(defun mac-performance--full-redraw-frame (iterations)
+  "Force full-frame redraw for ITERATIONS steps."
+  (let ((frame (selected-frame)))
+    (dotimes (_ iterations)
+      (mac-performance--time-latency
+       'full-redraw-command
+       (lambda ()
+         (redraw-frame frame)))
       (mac-performance--redisplay))))
 
 (defun mac-performance--run-scenario (name setup exercise iterations)
@@ -202,6 +253,7 @@ ITERATIONS is passed to EXERCISE.  Return a plist with timing and counters."
   (let ((buffer (get-buffer-create (format " *mac-performance-%s*" name)))
         (old-buffer (current-buffer))
         (old-gcs gcs-done)
+        (old-gc-elapsed gc-elapsed)
         start seconds counters latency)
     (unwind-protect
         (progn
@@ -213,7 +265,8 @@ ITERATIONS is passed to EXERCISE.  Return a plist with timing and counters."
           (mac-performance--redisplay)
           (garbage-collect)
           (mac-performance--counter-snapshot t)
-          (setq old-gcs gcs-done)
+          (setq old-gcs gcs-done
+                old-gc-elapsed gc-elapsed)
           (let ((mac-performance--collect-latency t)
                 mac-performance--latency-samples)
             (setq start (float-time))
@@ -227,6 +280,7 @@ ITERATIONS is passed to EXERCISE.  Return a plist with timing and counters."
           (list :name name
                 :seconds seconds
                 :gc-count (- gcs-done old-gcs)
+                :gc-seconds (- gc-elapsed old-gc-elapsed)
                 :latency latency
                 :counters counters))
       (when (buffer-live-p buffer)
@@ -241,7 +295,7 @@ ITERATIONS is passed to EXERCISE.  Return a plist with timing and counters."
                     i (mod i 97)))))
 
 (defun mac-performance--scenario-scroll-source (iterations)
-  "Run the large source scrolling scenario for ITERATIONS."
+  "Run the large source line-scroll scenario for ITERATIONS."
   (mac-performance--run-scenario
    "scroll-source"
    (lambda ()
@@ -250,6 +304,30 @@ ITERATIONS is passed to EXERCISE.  Return a plist with timing and counters."
       mac-performance-benchmark-source-lines)
      (font-lock-ensure))
    #'mac-performance--scroll-window
+   iterations))
+
+(defun mac-performance--scenario-page-scroll-source (iterations)
+  "Run the large source page-scroll scenario for ITERATIONS."
+  (mac-performance--run-scenario
+   "page-scroll-source"
+   (lambda ()
+     (emacs-lisp-mode)
+     (mac-performance--insert-source-lines
+      mac-performance-benchmark-source-lines)
+     (font-lock-ensure))
+   #'mac-performance--page-scroll-window
+   iterations))
+
+(defun mac-performance--scenario-full-redraw-source (iterations)
+  "Run the large source full-redraw scenario for ITERATIONS."
+  (mac-performance--run-scenario
+   "full-redraw-source"
+   (lambda ()
+     (emacs-lisp-mode)
+     (mac-performance--insert-source-lines
+      mac-performance-benchmark-source-lines)
+     (font-lock-ensure))
+   #'mac-performance--full-redraw-frame
    iterations))
 
 (defun mac-performance--scenario-typing-source (iterations)
@@ -433,34 +511,156 @@ static unsigned char mac_bench_bits[] = {
        (mac-performance--redisplay)))
    iterations))
 
+(defun mac-performance--insert-c-file ()
+  "Insert `mac-performance-benchmark-c-file' in `c-mode' with font-lock."
+  ;; `font-lock-mode' refuses buffers whose names begin with a space.
+  (rename-buffer "*mac-performance-c*" t)
+  (insert-file-contents mac-performance-benchmark-c-file)
+  (c-mode)
+  (font-lock-mode 1))
+
+(defun mac-performance--time-steps (n function)
+  "Call FUNCTION N times, timing each call with its redisplay as `step'."
+  (dotimes (_ n)
+    (mac-performance--time-latency
+     'step
+     (lambda ()
+       (funcall function)
+       (mac-performance--redisplay)))))
+
+(defun mac-performance--scenario-c-page-scroll (iterations)
+  "Page-scroll through the C file, fontifying as it goes, ITERATIONS times."
+  (mac-performance--run-scenario
+   "c-page-scroll"
+   #'mac-performance--insert-c-file
+   (lambda (n)
+     (mac-performance--time-steps
+      n (lambda ()
+          (condition-case nil
+              (scroll-up-command)
+            (end-of-buffer (goto-char (point-min)))))))
+   iterations))
+
+(defun mac-performance--scenario-c-typing (iterations)
+  "Type ITERATIONS characters at the end of a line of the C file."
+  (mac-performance--run-scenario
+   "c-typing"
+   (lambda ()
+     (mac-performance--insert-c-file)
+     (forward-line 20000)
+     (end-of-line)
+     (recenter)
+     (mac-performance--redisplay))
+   (lambda (n)
+     (goto-char (line-end-position))
+     (mac-performance--time-steps
+      n (lambda () (self-insert-command 1 ?x))))
+   iterations))
+
+(defun mac-performance--scenario-c-full-redraw (iterations)
+  "Redraw the frame showing the C file ITERATIONS times."
+  (mac-performance--run-scenario
+   "c-full-redraw"
+   #'mac-performance--insert-c-file
+   (lambda (n)
+     (mac-performance--time-steps n #'redraw-frame))
+   iterations))
+
 (defconst mac-performance--scenarios
   '(("scroll-source" . mac-performance--scenario-scroll-source)
+    ("page-scroll-source" . mac-performance--scenario-page-scroll-source)
+    ("full-redraw-source" . mac-performance--scenario-full-redraw-source)
     ("typing-source" . mac-performance--scenario-typing-source)
     ("command-loop-input" . mac-performance--scenario-command-loop-input)
     ("process-output" . mac-performance--scenario-process-output)
     ("mixed-script" . mac-performance--scenario-mixed-script)
     ("emoji" . mac-performance--scenario-emoji)
     ("inline-images" . mac-performance--scenario-inline-images)
-    ("modeline-fringe" . mac-performance--scenario-modeline-fringe))
+    ("modeline-fringe" . mac-performance--scenario-modeline-fringe)
+    ("c-page-scroll" . mac-performance--scenario-c-page-scroll)
+    ("c-typing" . mac-performance--scenario-c-typing)
+    ("c-full-redraw" . mac-performance--scenario-c-full-redraw))
   "Mac performance benchmark scenarios in run order.")
 
 (defun mac-performance--run-benchmark-scenarios (iterations &optional progress-file)
   "Run benchmark scenarios for ITERATIONS.
 When PROGRESS-FILE is non-nil, append progress records before and after each
 scenario."
-  (let (results)
+  (let ((only (mac-performance--selected-scenarios))
+        results)
     (dolist (scenario mac-performance--scenarios (nreverse results))
-      (let ((name (car scenario))
-            (function (cdr scenario)))
-        (mac-performance--record-progress
-         progress-file
-         (list :event 'start :scenario name :time (float-time)))
-        (let ((result (funcall function iterations)))
+      (when (or (null only) (member (car scenario) only))
+        (let ((name (car scenario))
+              (function (cdr scenario)))
           (mac-performance--record-progress
            progress-file
-           (list :event 'finish :scenario name :time (float-time)
-                 :result result))
-          (push result results))))))
+           (list :event 'start :scenario name :time (float-time)))
+          (let ((result (funcall function iterations)))
+            (mac-performance--record-progress
+             progress-file
+             (list :event 'finish :scenario name :time (float-time)
+                   :result result))
+            (push result results)))))))
+
+(defun mac-performance--selected-scenarios ()
+  "Return the scenario names in MAC_BENCH_SCENARIOS, or nil for all."
+  (let ((value (getenv "MAC_BENCH_SCENARIOS")))
+    (and value (split-string value))))
+
+(defun mac-performance--key-latency-available-p ()
+  "Return non-nil if key-to-screen latency can be measured."
+  (and (fboundp 'mac-loop-test-schedule)
+       (fboundp 'mac-metal-input-latency)
+       (let ((only (mac-performance--selected-scenarios)))
+         (or (null only) (member "key-latency" only)))))
+
+(defun mac-performance--key-latency (iterations callback)
+  "Measure key-to-screen latency for ITERATIONS keys, then call CALLBACK.
+Post Control-O key events at `mac-performance-benchmark-key-interval'
+intervals; each inserts a character into the C file in `c-mode', as
+typing does.  The measurement needs the command loop, so this returns
+at once and calls CALLBACK with the result plist later."
+  (let ((buffer (get-buffer-create " *mac-performance-key-latency*"))
+        (map (make-sparse-keymap))
+        (time 0.5)
+        actions)
+    (switch-to-buffer buffer)
+    (erase-buffer)
+    (mac-performance--insert-c-file)
+    (forward-line 20000)
+    (end-of-line)
+    (recenter)
+    (define-key map (kbd "C-o")
+                (lambda () (interactive) (self-insert-command 1 ?x)))
+    (setq overriding-local-map map)
+    (redisplay t)
+    (mac-metal-input-latency t)
+    (push '(0 activate) actions)
+    (dotimes (_ iterations)
+      (push (list time 'key 31 ?o '(control)) actions)
+      (setq time (+ time mac-performance-benchmark-key-interval)))
+    (mac-loop-test-schedule (nreverse actions))
+    (run-with-timer
+     (+ time 1.0) nil
+     (lambda ()
+       (let* ((record (mac-metal-input-latency t))
+              (samples (sort (append (plist-get record :samples) nil) #'<))
+              (count (length samples)))
+         (setq overriding-local-map nil)
+         (kill-buffer buffer)
+         (funcall callback
+                  (list :name "key-latency"
+                        :keys iterations
+                        :count count
+                        :unpresented (plist-get record :unpresented)
+                        :min-ms (car samples)
+                        :p50-ms (and samples
+                                     (mac-performance--latency-percentile
+                                      samples 0.50))
+                        :p95-ms (and samples
+                                     (mac-performance--latency-percentile
+                                      samples 0.95))
+                        :max-ms (car (last samples)))))))))
 
 ;;;###autoload
 (defun mac-performance-run-benchmarks (&optional iterations)
@@ -495,7 +695,7 @@ called interactively with a prefix argument, use that numeric prefix."
 
 ;;;###autoload
 (defun mac-performance-run-benchmarks-and-exit (output-file &optional iterations
-                                                           progress-file delay)
+                                                            progress-file delay)
   "Schedule macOS GUI performance benchmarks, write OUTPUT-FILE, and exit.
 Optional ITERATIONS overrides `mac-performance-benchmark-iterations'.
 Optional PROGRESS-FILE receives one Lisp plist per scenario start and finish.
@@ -511,11 +711,19 @@ synchronously can force redisplay before the initial frame has settled."
      (lambda ()
        (condition-case err
            (let ((results (mac-performance--run-benchmark-scenarios
-                           count progress-file)))
-             (mac-performance--write-results-file
-              output-file
-              (list :status 'ok :iterations count :results results))
-             (kill-emacs 0))
+                           count progress-file))
+                 (finish
+                  (lambda (results)
+                    (mac-performance--write-results-file
+                     output-file
+                     (list :status 'ok :iterations count :results results))
+                    (kill-emacs 0))))
+             (if (mac-performance--key-latency-available-p)
+                 (mac-performance--key-latency
+                  count (lambda (latency)
+                          (funcall finish
+                                   (append results (list latency)))))
+               (funcall finish results)))
          (error
           (ignore-errors
             (mac-performance--record-progress

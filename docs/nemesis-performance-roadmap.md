@@ -47,13 +47,14 @@ this list) or `skip`.
 | 5 | Drop global `-fobjc-arc` and the removed `--enable-mac-persistent-loop` from the configure line | correctness | XS | done (main tree reconfigured 2026-09-25, not yet rebuilt) |
 | 6 | Enlarge the regexp cache and hash its lookups | low-medium | XS-S | done (`e365131854d`) |
 | 7 | Default `redisplay-skip-fontification-on-input` to t | medium | XS | done (`7d18d47b0fc`) |
-| 8 | Benchmark harness on `nemesis` and event-to-screen latency measurement | enabler | S-M | todo |
+| 8 | Benchmark harness on `nemesis` and event-to-screen latency measurement | enabler | S-M | done |
 | 9 | Copy only changed regions when presenting | medium (GPU bandwidth, power) | M | todo |
 | 10 | Cherry-pick the measured wins from `codex/responsive-coding-bb3c` | medium | M | todo |
 | 11 | Profile-guided optimization (PGO) and ThinLTO build | 5-15% CPU | M | todo |
 | 12 | Concurrent GC (GNU `feature/igc`, MPS) | high | XL | skip (upstream work; revisit when it merges) |
 | 13 | Take fontification off the redisplay path | high | L | todo (long term) |
 | 14 | Fix the macOS 27 hit test that sends every mouse and scroll event through AppKit | medium | S-M | done (awaiting the user's trackpad check) |
+| 15 | Cheaper menu-bar fills: skip `substitute-command-keys` for plain help strings | low-medium | XS | todo |
 
 ### 1. GC defaults and idle collection (skipped)
 
@@ -136,6 +137,27 @@ tuning `maximumDrawableCount`, direct presentation or item 9.
 The harness is noisy.  At 30 iterations, run-to-run spread reaches 40-90% of
 the median.  Use 120 iterations, alternate the two builds round-robin, and
 compare minimums; differences under about 2% are not signal.
+
+Result (2026-09-25):
+
+- `nemesis` already had an older copy of the harness; it now has the
+  `nemesis-gpu` version plus `c-page-scroll`, `c-typing` and
+  `c-full-redraw` on `src/xdisp.c` in `c-mode` (each step timed with its
+  redisplay as the latency bucket `step`, with GC counts and GC time).
+  `MAC_BENCH_SCENARIOS` selects scenarios.
+- `mac-metal-input-latency` returns key-to-screen latencies: the GUI
+  thread notes each key-down's `NSEvent.timestamp`, the next frame
+  scheduled for presentation claims it, and the drawable's presented
+  handler records `presentedTime` minus that timestamp.  The harness
+  posts 120 Control-O keys, 60 ms apart, that insert into xdisp.c.
+  First reading at 60 keys: min 25 ms, median 35 ms, p95 58 ms, max
+  98 ms, none unpresented.
+- The harness runs in a timer, where `current-idle-time` is non-nil, so
+  `set_frame_menubar` fills the whole menu bar on every redisplay after
+  a window or buffer change instead of deferring it.  That made
+  `c-full-redraw` 12 ms with a GC per step; `perf.el`, run from
+  `--eval` before the command loop, measures 1.9 ms.  Idle timers that
+  change windows pay the same cost in real use.  See item 15.
 
 ### 9. Changed-region presentation
 
@@ -245,6 +267,16 @@ NSEvents by `mac_loop_send_event` is gone.
   close (about 0.1 s) GUI gaps are as before.
 - Real trackpad scrolling, momentum included, still needs the user's
   check.
+
+### 15. Menu-bar fill cost (found while doing item 8)
+
+A deep menu-bar fill parses every menu item, and `parse_menu_item` passes
+each item's help string to `substitute-command-keys`, which creates a
+buffer per call: 364 calls and about 1.6 MB of allocation per fill with
+`emacs -Q`.  Fills happen from the idle timer, on menu open (D3), and on
+every redisplay after a window or buffer change while Lisp is idle (in
+timers, for example).  Most help strings contain no backslash, grave
+accent or apostrophe, the only characters that the function changes.
 
 ## Not worth doing yet
 

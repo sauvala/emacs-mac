@@ -308,6 +308,10 @@ struct emacs_metal_context
      of the backbuffer.  Both guarded by presentation_mutex.  */
   id<MTLTexture> present_snapshot;
   bool present_from_snapshot;
+  /* Timestamp (CACurrentMediaTime) of the earliest input event that
+     the frames scheduled for presentation since the last one reflect,
+     or 0.  Guarded by presentation_mutex.  */
+  double pending_input_time;
 
   id<MTLTexture> scroll_staging;
   int scroll_staging_w, scroll_staging_h;
@@ -346,6 +350,60 @@ static void emacs_metal_frame_end_1 (emacs_metal_context_t *ctx,
 static void emacs_metal_present_sync_if_current (emacs_metal_context_t *);
 
 void (*emacs_metal_sync_frame_ready_hook) (void);
+
+/* Input-to-presentation latency.  input_time holds the timestamp of
+   the earliest key event not yet claimed by a frame scheduled for
+   presentation.  The presenter records how long after it the drawable
+   showing that frame reached the screen.  */
+static _Atomic double input_time;
+static pthread_mutex_t input_latency_mutex = PTHREAD_MUTEX_INITIALIZER;
+static double input_latency_samples[4096];
+static int input_latency_count;
+static uintmax_t input_latency_unpresented;
+
+void
+emacs_metal_note_input_time (double time)
+{
+  double expected = 0;
+
+  atomic_compare_exchange_strong (&input_time, &expected, time);
+}
+
+static void
+emacs_metal_record_input_latency (double seconds)
+{
+  pthread_mutex_lock (&input_latency_mutex);
+  if (seconds < 0)
+    input_latency_unpresented++;
+  else if (input_latency_count
+           < sizeof input_latency_samples / sizeof *input_latency_samples)
+    input_latency_samples[input_latency_count++] = seconds;
+  pthread_mutex_unlock (&input_latency_mutex);
+}
+
+/* Store up to MAX latency samples, in seconds, in BUF and the number of
+   frames that were never presented in *UNPRESENTED.  Return the number
+   of samples.  With RESET, clear the record.  */
+
+int
+emacs_metal_input_latency (double *buf, int max, uintmax_t *unpresented,
+                           bool reset)
+{
+  int n;
+
+  pthread_mutex_lock (&input_latency_mutex);
+  n = max < input_latency_count ? max : input_latency_count;
+  memcpy (buf, input_latency_samples, n * sizeof *buf);
+  *unpresented = input_latency_unpresented;
+  if (reset)
+    {
+      input_latency_count = 0;
+      input_latency_unpresented = 0;
+      atomic_store (&input_time, 0);
+    }
+  pthread_mutex_unlock (&input_latency_mutex);
+  return n;
+}
 static void glyph_cache_entry_clear (struct emacs_metal_glyph_cache *gc,
                                      glyph_cache_entry_t *entry);
 
@@ -1136,6 +1194,8 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
             pthread_mutex_unlock (&ctx->presentation_mutex);
             goto finish_without_command;
           }
+        double shown_input_time = ctx->pending_input_time;
+        ctx->pending_input_time = 0;
 
         {
           id<MTLTexture> dst = drawable.texture;
@@ -1176,6 +1236,13 @@ emacs_metal_dispatch_presentation_task (emacs_metal_context_t *ctx)
             }
         }
 
+        if (shown_input_time > 0)
+          [drawable addPresentedHandler:^(id<MTLDrawable> presented) {
+              CFTimeInterval shown = presented.presentedTime;
+
+              emacs_metal_record_input_latency
+                (shown > 0 ? shown - shown_input_time : -1);
+            }];
         [cmd presentDrawable:drawable];
 
         double command_start = CACurrentMediaTime ();
@@ -1244,11 +1311,18 @@ emacs_metal_schedule_presentation (emacs_metal_context_t *ctx)
 {
   bool dispatch_task = false;
 
+  double shown_input_time = atomic_exchange (&input_time, 0);
+
   pthread_mutex_lock (&ctx->presentation_mutex);
   /* The backbuffer holds a frame to present again, so a presentation
      still pending may copy it rather than the snapshot of what a held
      frame overwrote.  */
   ctx->present_from_snapshot = false;
+  /* Synchronous presentation is not measured.  */
+  if (shown_input_time > 0 && !ctx->sync_presentation
+      && (ctx->pending_input_time == 0
+          || shown_input_time < ctx->pending_input_time))
+    ctx->pending_input_time = shown_input_time;
   if (ctx->presentation_valid && ctx->sync_presentation)
     {
       ctx->sync_frame_ready = true;
