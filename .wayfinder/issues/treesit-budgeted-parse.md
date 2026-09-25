@@ -49,6 +49,7 @@ Each stage has its tests, its live check and a go/no-go gate.
 ## Decisions so far
 
 - [Tree-sitter halt and resume contract](19-ts-halt-resume-contract.md): a halted parse resumes from any input with identical bytes (so another thread works), but every edit needs `ts_parser_reset`; the callback fires about every 15 us, so a 1-3 ms budget holds except for giant tokens and end-of-file balancing; the API exists from 0.25, with a fallback for older versions ([resolution](../comments/ts-halt-resume-contract/2026-09-25-resolution.md))
+- [Inventory every reader of a parser tree](20-treesit-tree-access-inventory.md): only `treesit--pre-redisplay` and jit-lock fontification can skip waiting; deferral must cover the whole jit-lock chunk (indent-bars and `syntax-propertize` read the tree inside it); `syntax-ppss` after an edit forces the parse; install finished trees only at a safe point ([resolution](../comments/treesit-tree-access-inventory/2026-09-25-resolution.md))
 
 ## Not yet specified
 

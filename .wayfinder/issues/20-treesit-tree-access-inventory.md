@@ -1,7 +1,7 @@
 ---
 id: treesit-tree-access-inventory
 title: "Inventory every reader of a parser tree"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: treesit-budgeted-parse
 assignee: null
