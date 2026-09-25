@@ -587,6 +587,143 @@ past the last menu record \"menu-open missing\"."
             :after (mac-loop-scenario--frame-state)
             :commands (mac-loop-scenario--commands)))))
 
+;;; Precise scroll gestures.  The GUI thread defers scroll events
+;;; while Lisp is busy and merges consecutive `changed' events of one
+;;; gesture phase into one event carrying the summed deltas.
+
+(defvar mac-loop-scenario--wheel-events nil
+  "Wheel events received, most recent first.
+Each element is (PHASE MOMENTUM-PHASE SCROLLING-DELTA-Y TIMESTAMP).")
+
+(defun mac-loop-scenario--record-wheel (event)
+  (interactive "e")
+  (let ((plist (nth 3 event)))
+    (push (list (plist-get plist :phase) (plist-get plist :momentum-phase)
+                (or (plist-get plist :scrolling-delta-y) 0.0)
+                (/ (posn-timestamp (event-start event)) 1000.0))
+          mac-loop-scenario--wheel-events)))
+
+(defun mac-loop-scenario--wheel-setup ()
+  "Record every wheel event instead of scrolling."
+  (setq mac-loop-scenario--wheel-events nil)
+  (let ((map (make-sparse-keymap)))
+    (dolist (prefix '("" "double-" "triple-"))
+      (dolist (base '(wheel-up wheel-down wheel-left wheel-right))
+        (define-key map (vector (intern (concat prefix (symbol-name base))))
+                    #'mac-loop-scenario--record-wheel)))
+    (setq overriding-local-map map)))
+
+(defun mac-loop-scenario--scroll-gesture (start step)
+  "Return actions posting a precise scroll gesture from time START.
+Events are STEP seconds apart: a scroll phase `began' (-1 pixel),
+20 `changed' (-3 each) and `ended' (0), then a momentum phase `began'
+(-2), 15 `changed' (-2 each) and `ended' (0), 93 pixels in all."
+  (let* ((time start) actions
+         (post (lambda (dy phase momentum)
+                 (push (list time 'scroll 0 dy phase momentum) actions)
+                 (setq time (+ time step)))))
+    (funcall post -1 'began 'none)
+    (dotimes (_ 20) (funcall post -3 'changed 'none))
+    (funcall post 0 'ended 'none)
+    (funcall post -2 'none 'began)
+    (dotimes (_ 15) (funcall post -2 'none 'changed))
+    (funcall post 0 'none 'ended)
+    (nreverse actions)))
+
+(defun mac-loop-scenario--wheel-summary ()
+  "Summarize the received wheel events as a plist.
+:phases lists the (PHASE MOMENTUM-PHASE) pairs with runs of equal
+pairs collapsed, :changed and :momentum-changed count the `changed'
+events of either phase, and :total sums the pixel deltas."
+  (let ((events (reverse mac-loop-scenario--wheel-events))
+        phases (changed 0) (momentum 0) (total 0.0) (prev-time 0) (ordered t))
+    (dolist (e events)
+      (let ((pair (list (nth 0 e) (nth 1 e))))
+        (unless (equal pair (car phases))
+          (push pair phases))
+        (when (eq (nth 0 e) 'changed) (setq changed (1+ changed)))
+        (when (eq (nth 1 e) 'changed) (setq momentum (1+ momentum)))
+        (setq total (+ total (nth 2 e)))
+        (when (< (nth 3 e) prev-time) (setq ordered nil))
+        (setq prev-time (nth 3 e))))
+    (list :phases (nreverse phases) :changed changed
+          :momentum-changed momentum :total total
+          :timestamps-ordered ordered :events events)))
+
+(defconst mac-loop-scenario--scroll-phases
+  '((began none) (changed none) (ended none)
+    (none began) (none changed) (none ended))
+  "The gesture structure every scroll scenario must preserve.")
+
+(defun mac-loop-scenario--c-busy (seconds)
+  "Compute for about SECONDS in C code that never checks for quits.
+Unlike `mac-loop-scenario--busy', no `maybe_quit' lets `read_socket'
+take the deferred events in between, as in a long redisplay."
+  (let* ((n 8000)
+         (a (make-string n ?a)) (b (make-string n ?b))
+         (start (float-time)))
+    (string-distance a b t)
+    (let* ((unit (max 1e-4 (- (float-time) start)))
+           ;; The work grows with the square of the length.
+           (m (min 60000 (round (* n (sqrt (/ seconds unit)))))))
+      (setq a (make-string m ?a) b (make-string m ?b) start (float-time))
+      (string-distance a b t)
+      (- (float-time) start))))
+
+(defun mac-loop-scenario-busy-scroll ()
+  "A precise scroll gesture while Lisp computes in C.
+All events are deferred.  Expect the `changed' events of each phase to
+arrive merged (fewer than posted), the pixel total (-93) preserved,
+and the began/ended events unmerged and in order.  The merged event
+carries the timestamp of the newest event it stands for, so it is at
+least 50 ms later than its phase's `began'."
+  (mac-loop-scenario--wheel-setup)
+  (mac-loop-test-schedule (mac-loop-scenario--scroll-gesture 0.1 0.004))
+  (let ((busy (mac-loop-scenario--c-busy 0.8)))
+    (mac-loop-scenario--then 1.5
+      (let* ((s (mac-loop-scenario--wheel-summary))
+             (events (plist-get s :events))
+             (began (nth 3 (assoc 'began events)))
+             (first-changed (nth 3 (assoc 'changed events)))
+             (checks
+              (list
+               ;; The last event is posted at 0.252 s.
+               (cons 'busy-covers-burst (> busy 0.3))
+               (cons 'phases (equal (plist-get s :phases)
+                                    mac-loop-scenario--scroll-phases))
+               (cons 'changed-merged (< (plist-get s :changed) 20))
+               (cons 'momentum-merged
+                     (< (plist-get s :momentum-changed) 15))
+               (cons 'total (= (plist-get s :total) -93.0))
+               (cons 'ordered (plist-get s :timestamps-ordered))
+               (cons 'newest-timestamp
+                     (and began first-changed
+                          (>= (- first-changed began) 0.05))))))
+        (append (list :pass (not (rassq nil checks)) :checks checks
+                      :busy busy)
+                s)))))
+
+(defun mac-loop-scenario-idle-scroll ()
+  "The same scroll gesture while Lisp waits for input.
+Expect every event to arrive unmerged, in order, with the pixel total
+(-93) preserved.  Events are 30 ms apart so that Lisp is back in its
+input wait for each; closer events can arrive while it still handles
+the previous one, and are then merged."
+  (mac-loop-scenario--wheel-setup)
+  (mac-loop-test-schedule (mac-loop-scenario--scroll-gesture 0.1 0.03))
+  (mac-loop-scenario--then 2.0
+    (let* ((s (mac-loop-scenario--wheel-summary))
+           (checks
+            (list
+             (cons 'phases (equal (plist-get s :phases)
+                                  mac-loop-scenario--scroll-phases))
+             (cons 'changed (= (plist-get s :changed) 20))
+             (cons 'momentum-changed
+                   (= (plist-get s :momentum-changed) 15))
+             (cons 'total (= (plist-get s :total) -93.0))
+             (cons 'ordered (plist-get s :timestamps-ordered)))))
+      (append (list :pass (not (rassq nil checks)) :checks checks) s))))
+
 (defun mac-loop-scenario-fullscreen-busy ()
   "Enter and leave fullscreen while Lisp computes."
   (mac-loop-test-schedule '((0.5 fullscreen) (2.5 probe 1) (3.0 fullscreen)

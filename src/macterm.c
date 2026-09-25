@@ -518,6 +518,11 @@ where DELAY is seconds from now and KIND is one of:
                        menu that it is about to open, as AppKit does,
                        then record its first items.
   menu-close TOP-INDEX tell that delegate that the menu closed.
+  scroll DX DY PHASE MOMENTUM-PHASE
+                       post a precise (trackpad) scroll event with pixel
+                       deltas DX and DY at window point 200,200; PHASE
+                       and MOMENTUM-PHASE are none, began, changed or
+                       ended.
   menu TOP-INDEX ITEM-INDEX [SUB-INDEX]
                        perform ITEM-INDEX'th item of the TOP-INDEX'th
                        top-level menu's submenu (0-based), as AppKit
@@ -548,7 +553,8 @@ The actions run on the GUI thread even while Lisp is busy.  */)
 	 {"text", MAC_LOOP_TEST_TEXT},
 	 {"menu-tracking", MAC_LOOP_TEST_MENU_TRACKING},
 	 {"menu-open", MAC_LOOP_TEST_MENU_OPEN},
-	 {"menu-close", MAC_LOOP_TEST_MENU_CLOSE}};
+	 {"menu-close", MAC_LOOP_TEST_MENU_CLOSE},
+	 {"scroll", MAC_LOOP_TEST_SCROLL}};
       int k;
 
       CHECK_CONS (spec);
@@ -586,6 +592,25 @@ The actions run on the GUI thread even while Lisp is busy.  */)
 		a[i].modifiers |= 1UL << 20;
 	    }
 	}
+      else if (a[i].kind == MAC_LOOP_TEST_SCROLL)
+	{
+	  const char *phases[] = {"none", "began", "changed", "ended"};
+	  Lisp_Object phase = Fnth (make_fixnum (2), spec);
+	  Lisp_Object momentum = Fnth (make_fixnum (3), spec);
+
+	  a[i].x = a[i].y = 200;
+	  a[i].scroll_dx = extract_float (Fnth (make_fixnum (0), spec));
+	  a[i].scroll_dy = extract_float (Fnth (make_fixnum (1), spec));
+	  CHECK_SYMBOL (phase);
+	  CHECK_SYMBOL (momentum);
+	  for (k = 0; k < countof (phases); k++)
+	    {
+	      if (!strcmp (SSDATA (SYMBOL_NAME (phase)), phases[k]))
+		a[i].phase = k;
+	      if (!strcmp (SSDATA (SYMBOL_NAME (momentum)), phases[k]))
+		a[i].momentum_phase = k;
+	    }
+	}
       else if (CONSP (spec))
 	{
 	  a[i].x = extract_float (XCAR (spec));
@@ -610,8 +635,9 @@ MAX-GAP is the longest interval in seconds between GUI-thread heartbeats
 gaps over 100 ms, RECORDS is a list of (UPTIME . LABEL), and COUNTERS
 lists GUI Lisp access by try-lock, access while Lisp is parked on a
 request, denied access, deferred events, deferred callbacks, queued
-GUI-to-Lisp items, deferred state callbacks replaced by later ones, and
-text input or accessibility queries answered from a published snapshot.
+GUI-to-Lisp items, deferred state callbacks replaced by later ones,
+text input or accessibility queries answered from a published snapshot,
+and deferred scroll events merged into the previous one.
 Non-nil RESET clears them.  Internal test support.  */)
   (Lisp_Object reset)
 {

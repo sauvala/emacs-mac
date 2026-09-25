@@ -117,7 +117,11 @@ means one is missing. This includes view event handlers:
 `mac_loop_send_event` takes access only for events whose hit test lands
 in the content view, but AppKit routes mouse-moved, drag and up events
 to the first responder or the view of the down event, so under a
-transparent titlebar they reach `EmacsMainView` without access. Callbacks that only sync AppKit window state to Lisp
+transparent titlebar they reach `EmacsMainView` without access.
+Deferred precise scroll events in the middle of a scroll or momentum
+phase merge with the previous deferred one (summed deltas, newest
+event) when window, view, modifiers and phases match; phase boundaries
+never merge (`mac_loop_defer_scroll_event`). Callbacks that only sync AppKit window state to Lisp
 use `MAC_LOOP_STATE_CALLBACK_NEEDS_LISP`, which replaces a pending deferred
 callback of the same kind. While Lisp is busy, a growing window shows the
 last Metal drawable anchored top-left over the frame background, which is

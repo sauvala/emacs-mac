@@ -147,6 +147,10 @@ static void mac_loop_end_lisp_access (int);
 static bool mac_loop_gui_has_lisp_access (void);
 static void mac_loop_with_lisp_access_or_defer (void (^) (void));
 static void mac_loop_send_event (NSEvent *);
+static bool mac_loop_scroll_mergeable_p (NSEvent *);
+static void mac_loop_scroll_callback (NSView *, NSEvent *);
+static void mac_loop_merged_scroll_deltas (NSEvent *, CGFloat *, CGFloat *,
+					   CGFloat *, CGFloat *, CGFloat *);
 static void mac_loop_queue_input_event (const struct input_event *);
 static void mac_loop_wake_lisp (void);
 /* Set while the root EmacsMenu is tracked under the persistent loop,
@@ -7146,6 +7150,14 @@ event_phase_to_symbol (NSEventPhase phase)
 
 - (void)scrollWheel:(NSEvent *)theEvent
 {
+  if (!mac_loop_gui_has_lisp_access ()
+      && mac_loop_scroll_mergeable_p (theEvent))
+    {
+      /* Like MAC_LOOP_CALLBACK_NEEDS_LISP, but a deferred event may
+	 merge with the next one.  */
+      mac_loop_scroll_callback (self, theEvent);
+      return;
+    }
   MAC_LOOP_CALLBACK_NEEDS_LISP ([self scrollWheel:theEvent]);
 
   struct frame *f = self.emacsFrame;
@@ -7213,6 +7225,11 @@ event_phase_to_symbol (NSEventPhase phase)
     default:
       emacs_abort ();
     }
+
+  /* A deferred scroll event may stand for several merged ones.  */
+  if (type == NSEventTypeScrollWheel)
+    mac_loop_merged_scroll_deltas (theEvent, &deltaX, &deltaY, &deltaZ,
+				   &scrollingDeltaX, &scrollingDeltaY);
 
   if (
 #if 0 /* We let the framework decide whether events to non-focus frame
@@ -17839,6 +17856,35 @@ mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 
 @end
 
+/* A deferred precise scroll event (mac_loop_defer_scroll_event),
+   standing for COUNT merged events of which EVENT is the newest.  The
+   deltas are their sums.  */
+
+@interface EmacsLoopScrollEvent : NSObject
+{
+@public
+  NSEvent *event;
+  /* The view whose -scrollWheel: deferred it, or nil if
+     mac_loop_send_event did and it goes through AppKit.  */
+  NSView *view;
+  CGFloat deltaX, deltaY, deltaZ, scrollingDeltaX, scrollingDeltaY;
+  int count;
+}
+@end
+
+@implementation EmacsLoopScrollEvent
+
+- (void)dealloc
+{
+  MRC_RELEASE (event);
+  MRC_RELEASE (view);
+#if !USE_ARC
+  [super dealloc];
+#endif
+}
+
+@end
+
 /* Guards the three queues below.  */
 static pthread_mutex_t mac_loop_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -17884,14 +17930,15 @@ static unsigned mac_loop_wait_generation; /* Counts Lisp's input waits.  */
 /* Counters for test/manual/mac-app-loop: Lisp access granted by
    try-lock, granted while a request parks Lisp, denied; deferred
    NSEvents and callbacks; queued GUI-to-Lisp items; deferred state
-   callbacks replaced by a later one.  */
-static unsigned long mac_loop_stats[8];
+   callbacks replaced by a later one; queries answered from a text
+   snapshot; deferred scroll events merged into the previous one.  */
+static unsigned long mac_loop_stats[9];
 enum
   {
     MAC_LOOP_STAT_LOCKED, MAC_LOOP_STAT_BORROWED, MAC_LOOP_STAT_DENIED,
     MAC_LOOP_STAT_DEFERRED_EVENTS, MAC_LOOP_STAT_DEFERRED_CALLBACKS,
     MAC_LOOP_STAT_LISP_ITEMS, MAC_LOOP_STAT_COALESCED_CALLBACKS,
-    MAC_LOOP_STAT_SNAPSHOT_ANSWERS
+    MAC_LOOP_STAT_SNAPSHOT_ANSWERS, MAC_LOOP_STAT_MERGED_SCROLLS
   };
 
 /* GUI thread: count a query answered from a text snapshot.  */
@@ -18421,6 +18468,124 @@ mac_loop_event_emacs_bound_p (NSEvent *event)
     }
 }
 
+/* Return true if EVENT is a precise (trackpad) scroll event in the
+   middle of a scroll or momentum phase.  */
+
+static bool
+mac_loop_scroll_mergeable_p (NSEvent *event)
+{
+  return (event.type == NSEventTypeScrollWheel
+	  && event.hasPreciseScrollingDeltas
+	  && ((event.phase == NSEventPhaseChanged
+	       && event.momentumPhase == NSEventPhaseNone)
+	      || (event.phase == NSEventPhaseNone
+		  && event.momentumPhase == NSEventPhaseChanged)));
+}
+
+/* GUI thread, without Lisp access: append the mergeable scroll EVENT
+   to the deferred FIFO, for VIEW's -scrollWheel:, or for dispatch
+   through AppKit if VIEW is nil.
+
+   A trackpad sends some 120 scroll events a second, and a busy Lisp
+   would otherwise work through all of them after the fingers left the
+   trackpad.  So if the last deferred item is a scroll event for the
+   same view and window, with the same modifier flags, phase and
+   momentum phase (both `changed'), EVENT takes its place and the
+   deltas are summed.  Events that begin or end a phase are never
+   merged, nor are events on either side of another deferred item, so
+   Lisp sees the structure of the gesture unchanged.  */
+
+static void
+mac_loop_defer_scroll_event (NSEvent *event, NSView *view)
+{
+  id last = mac_loop_deferred_events.lastObject;
+  EmacsLoopScrollEvent *scroll = nil;
+
+  if ([last isKindOfClass:EmacsLoopScrollEvent.class])
+    {
+      EmacsLoopScrollEvent *previous = last;
+      NSEvent *previousEvent = previous->event;
+
+      if (previous->view == view
+	  && previousEvent.window == event.window
+	  && previousEvent.modifierFlags == event.modifierFlags
+	  && previousEvent.phase == event.phase
+	  && previousEvent.momentumPhase == event.momentumPhase
+	  && (previousEvent.isDirectionInvertedFromDevice
+	      == event.isDirectionInvertedFromDevice))
+	scroll = previous;
+    }
+
+  if (scroll)
+    {
+      MRC_RELEASE (scroll->event);
+      scroll->event = MRC_RETAIN (event);
+      scroll->count++;
+      mac_loop_stats[MAC_LOOP_STAT_MERGED_SCROLLS]++;
+    }
+  else
+    {
+      scroll = [[EmacsLoopScrollEvent alloc] init];
+      scroll->event = MRC_RETAIN (event);
+      scroll->view = MRC_RETAIN (view);
+      scroll->count = 1;
+      [mac_loop_deferred_events addObject:scroll];
+      MRC_RELEASE (scroll);
+    }
+  scroll->deltaX += event.deltaX;
+  scroll->deltaY += event.deltaY;
+  scroll->deltaZ += event.deltaZ;
+  scroll->scrollingDeltaX += event.scrollingDeltaX;
+  scroll->scrollingDeltaY += event.scrollingDeltaY;
+  if (scroll->count > 1)
+    MAC_TRACE_LOOP ("merged %d scroll events\n", scroll->count);
+}
+
+/* The deferred scroll event being dispatched, while it stands for more
+   than one event.  */
+static EmacsLoopScrollEvent *mac_loop_merged_scroll;
+
+/* GUI thread, with Lisp access: dispatch the deferred SCROLL.  Return
+   the number of stored events.  */
+
+static int
+mac_loop_dispatch_scroll_event (EmacsLoopScrollEvent *scroll)
+{
+  EmacsLoopScrollEvent *saved = mac_loop_merged_scroll;
+  int count = 0;
+
+  mac_loop_merged_scroll = scroll->count > 1 ? scroll : nil;
+  if (scroll->view)
+    [scroll->view scrollWheel:scroll->event];
+  else
+    count = [emacsController handleNSEventWithHoldingQuitIn:NULL
+						      event:scroll->event];
+  mac_loop_merged_scroll = saved;
+
+  return count;
+}
+
+/* GUI thread, from -[EmacsMainView scrollWheel:] for EVENT: if EVENT
+   is being dispatched for several merged scroll events, store their
+   summed deltas in the arguments.  */
+
+static void
+mac_loop_merged_scroll_deltas (NSEvent *event, CGFloat *deltaX,
+			       CGFloat *deltaY, CGFloat *deltaZ,
+			       CGFloat *scrollingDeltaX,
+			       CGFloat *scrollingDeltaY)
+{
+  EmacsLoopScrollEvent *scroll = mac_loop_merged_scroll;
+
+  if (scroll == nil || scroll->event != event)
+    return;
+  *deltaX = scroll->deltaX;
+  *deltaY = scroll->deltaY;
+  *deltaZ = scroll->deltaZ;
+  *scrollingDeltaX = scroll->scrollingDeltaX;
+  *scrollingDeltaY = scroll->scrollingDeltaY;
+}
+
 /* GUI thread, with Lisp access: handle the deferred NSEvents and then
    EVENT (if non-nil).  Return the number of stored events.  */
 
@@ -18443,6 +18608,8 @@ mac_loop_handle_events_with_access (NSEvent *event)
       if ([deferred isKindOfClass:NSEvent.class])
 	count += [emacsController handleNSEventWithHoldingQuitIn:NULL
 							   event:deferred];
+      else if ([deferred isKindOfClass:EmacsLoopScrollEvent.class])
+	count += mac_loop_dispatch_scroll_event (deferred);
       else if ([deferred isKindOfClass:EmacsLoopStateCallback.class])
 	((EmacsLoopStateCallback *) deferred)->block ();
       else
@@ -18496,11 +18663,16 @@ mac_loop_send_event (NSEvent *event)
 
       id last = mac_loop_deferred_events.lastObject;
 
-      if ([last isKindOfClass:NSEvent.class]
-	  && ((NSEvent *) last).type == NSEventTypeMouseMoved
-	  && event.type == NSEventTypeMouseMoved)
-	[mac_loop_deferred_events removeLastObject];
-      [mac_loop_deferred_events addObject:event];
+      if (mac_loop_scroll_mergeable_p (event))
+	mac_loop_defer_scroll_event (event, nil);
+      else
+	{
+	  if ([last isKindOfClass:NSEvent.class]
+	      && ((NSEvent *) last).type == NSEventTypeMouseMoved
+	      && event.type == NSEventTypeMouseMoved)
+	    [mac_loop_deferred_events removeLastObject];
+	  [mac_loop_deferred_events addObject:event];
+	}
       mac_loop_stats[MAC_LOOP_STAT_DEFERRED_EVENTS]++;
       __atomic_store_n (&mac_loop_deferred_count,
 			mac_loop_deferred_events.count, __ATOMIC_RELEASE);
@@ -18593,6 +18765,38 @@ static void
 mac_loop_with_access_now_or_later (void (^block) (void))
 {
   mac_loop_with_access_now_or_later_coalesced (nil, NULL, block);
+}
+
+/* GUI thread: -[VIEW scrollWheel:] for a mergeable scroll EVENT
+   without Lisp access.  Like mac_loop_with_access_now_or_later, but a
+   deferred event goes through mac_loop_defer_scroll_event.  */
+
+static void
+mac_loop_scroll_callback (NSView *view, NSEvent *event)
+{
+  int token = mac_loop_begin_lisp_access ();
+
+  if (token == MAC_LOOP_NO_ACCESS)
+    {
+      mac_loop_defer_scroll_event (event, view);
+      mac_loop_stats[MAC_LOOP_STAT_DEFERRED_CALLBACKS]++;
+      __atomic_store_n (&mac_loop_deferred_count,
+			mac_loop_deferred_events.count, __ATOMIC_RELEASE);
+      MAC_TRACE_LOOP ("scroll callback deferred (%lu pending)\n",
+		      (unsigned long) mac_loop_deferred_events.count);
+      mac_loop_wake_lisp ();
+      if (__atomic_load_n (&mac_loop_lisp_waiting_p, __ATOMIC_ACQUIRE))
+	mac_loop_signal_source (mac_loop_retry_source);
+      return;
+    }
+
+  if (mac_loop_deferred_events.count)
+    mac_loop_handle_events_with_access (nil);
+  [view scrollWheel:event];
+  mac_loop_end_lisp_access (token);
+  mac_loop_forward_gui_hold_quit ();
+  if (token == MAC_LOOP_LOCKED_ACCESS)
+    mac_loop_wake_lisp ();
 }
 
 /* GUI thread: retry deferred events when Lisp reaches its input wait.  */
@@ -19336,6 +19540,55 @@ mac_loop_test_perform (struct mac_loop_test_action action,
 				  [item.title UTF8String],
 				  item.enabled ? "" : " (disabled)");
 	  }
+	return;
+      }
+    case MAC_LOOP_TEST_SCROLL:
+      {
+	/* NSEvent has no scroll event constructor.  Turn a mouse
+	   event, which carries the window and the location in it, into
+	   a continuous scroll event.  The point delta fields hold
+	   integers.  */
+	static const int64_t phases[] =
+	  {0, kCGScrollPhaseBegan, kCGScrollPhaseChanged, kCGScrollPhaseEnded};
+	static const int64_t momentumPhases[] =
+	  {kCGMomentumScrollPhaseNone, kCGMomentumScrollPhaseBegin,
+	   kCGMomentumScrollPhaseContinue, kCGMomentumScrollPhaseEnd};
+	NSEvent *mouse =
+	  [NSEvent mouseEventWithType:NSEventTypeMouseMoved location:location
+			modifierFlags:action.modifiers
+			    timestamp:[[NSProcessInfo processInfo] systemUptime]
+			 windowNumber:window.windowNumber context:nil
+			  eventNumber:0 clickCount:0 pressure:0];
+	CGEventRef cgEvent = CGEventCreateCopy (mouse.CGEvent);
+	double dx = action.scroll_dx, dy = action.scroll_dy;
+
+	CGEventSetType (cgEvent, kCGEventScrollWheel);
+	CGEventSetIntegerValueField (cgEvent, kCGScrollWheelEventIsContinuous,
+				     1);
+	CGEventSetIntegerValueField (cgEvent, kCGScrollWheelEventDeltaAxis1,
+				     (dy > 0) - (dy < 0));
+	CGEventSetIntegerValueField (cgEvent, kCGScrollWheelEventDeltaAxis2,
+				     (dx > 0) - (dx < 0));
+	CGEventSetIntegerValueField (cgEvent,
+				     kCGScrollWheelEventPointDeltaAxis1, dy);
+	CGEventSetIntegerValueField (cgEvent,
+				     kCGScrollWheelEventPointDeltaAxis2, dx);
+	CGEventSetDoubleValueField (cgEvent,
+				    kCGScrollWheelEventFixedPtDeltaAxis1,
+				    dy / 10);
+	CGEventSetDoubleValueField (cgEvent,
+				    kCGScrollWheelEventFixedPtDeltaAxis2,
+				    dx / 10);
+	CGEventSetIntegerValueField (cgEvent, kCGScrollWheelEventScrollPhase,
+				     phases[action.phase]);
+	CGEventSetIntegerValueField (cgEvent,
+				     kCGScrollWheelEventMomentumPhase,
+				     momentumPhases[action.momentum_phase]);
+	event = [NSEvent eventWithCGEvent:cgEvent];
+	CFRelease (cgEvent);
+	[NSApp postEvent:event atStart:NO];
+	mac_loop_test_record ("post scroll %.0f,%.0f phase %d/%d", dx, dy,
+			      action.phase, action.momentum_phase);
 	return;
       }
     case MAC_LOOP_TEST_SUBTITLE:

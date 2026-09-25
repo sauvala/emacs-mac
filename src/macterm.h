@@ -825,7 +825,19 @@ struct mac_loop_test_action
   unsigned short key_code;
   unsigned long modifiers;	/* NSEventModifierFlags */
   unsigned short character;
+  /* scroll: pixel deltas, and the scroll and momentum phases as
+     MAC_LOOP_TEST_PHASE_* values.  */
+  double scroll_dx, scroll_dy;
+  int phase, momentum_phase;
 };
+
+enum
+  {
+    MAC_LOOP_TEST_PHASE_NONE,
+    MAC_LOOP_TEST_PHASE_BEGAN,
+    MAC_LOOP_TEST_PHASE_CHANGED,
+    MAC_LOOP_TEST_PHASE_ENDED
+  };
 
 enum
   {
@@ -861,7 +873,9 @@ enum
        opens it (D3), and record its first items.  */
     MAC_LOOP_TEST_MENU_OPEN,
     /* X is the index of a top-level menu: send menuDidClose:.  */
-    MAC_LOOP_TEST_MENU_CLOSE
+    MAC_LOOP_TEST_MENU_CLOSE,
+    /* Post a precise (trackpad) scroll event at window point X,Y.  */
+    MAC_LOOP_TEST_SCROLL
   };
 
 extern void mac_loop_test_schedule (struct frame *,

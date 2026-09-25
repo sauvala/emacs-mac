@@ -10,7 +10,8 @@
       (dolist (k '(:access :error :busy :buffer :point :commands :before :after
                    :second-live :frames :ticks :thread-alive :during
                    :delete-frame-count :quit-count :subtitles
-                   :count :busy2 :messages))
+                   :count :busy2 :messages :pass :checks
+                   :phases :changed :momentum-changed :total))
         (when (plist-member r k)
           (princ (format " %s=%S" k (plist-get r k)))))
       (terpri))))
