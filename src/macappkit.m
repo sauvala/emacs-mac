@@ -11937,11 +11937,13 @@ mac_fill_menu_bar_submenu (unsigned long serial, widget_value *wv,
 	    result = MAC_MENU_OPEN_REFRESH_UNCHANGED;
 	  else
 	    {
-	      /* Emacs's items come first; keep the others after them.  */
-	      mac_menu_note_emacs_items (menu, fresh.itemArray);
+	      /* Emacs's items come first; keep the others after them.
+		 Noting the new items releases OURS if it is the old
+		 note, so remove the old items first.  */
 	      for (NSMenuItem *item in ours)
 		if (item.menu == menu)
 		  [menu removeItem:item];
+	      mac_menu_note_emacs_items (menu, fresh.itemArray);
 	      for (NSInteger i = 0; fresh.numberOfItems; i++)
 		{
 		  NSMenuItem *item = MRC_RETAIN ([fresh itemAtIndex:0]);

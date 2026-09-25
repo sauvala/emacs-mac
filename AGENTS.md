@@ -184,7 +184,9 @@ operations from GUI-thread timers (`mac-loop-test-schedule`), so they need no
 accessibility or screen-recording permission, but they are not interactive
 acceptance: the app may be unable to become active, and plain typing needs a
 key window, so scenarios use control-key commands. Scripted drags are slower
-than real trackpad drags; use 8 ms steps to expose races. Pass absolute
+than real trackpad drags; use 8 ms steps to expose races.  Run the
+scenarios with `MallocScribble=1` in the environment to turn
+manual-retain/release use-after-free bugs into reliable crashes. Pass absolute
 paths to `-l` when launching the bundle directly.
 
 ```bash
