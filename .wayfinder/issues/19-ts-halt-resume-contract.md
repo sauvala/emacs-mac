@@ -1,7 +1,7 @@
 ---
 id: ts-halt-resume-contract
 title: "Tree-sitter halt and resume contract"
-status: open
+status: closed
 labels: ["wayfinder:research"]
 parent: treesit-budgeted-parse
 assignee: null

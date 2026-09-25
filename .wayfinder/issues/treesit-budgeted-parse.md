@@ -48,6 +48,8 @@ Each stage has its tests, its live check and a go/no-go gate.
 
 ## Decisions so far
 
+- [Tree-sitter halt and resume contract](19-ts-halt-resume-contract.md): a halted parse resumes from any input with identical bytes (so another thread works), but every edit needs `ts_parser_reset`; the callback fires about every 15 us, so a 1-3 ms budget holds except for giant tokens and end-of-file balancing; the API exists from 0.25, with a fallback for older versions ([resolution](../comments/ts-halt-resume-contract/2026-09-25-resolution.md))
+
 ## Not yet specified
 
 - **Worker-thread stage.** Its details wait for the gate on the stage-two
@@ -56,7 +58,9 @@ Each stage has its tests, its live check and a go/no-go gate.
   - parser ownership handoff and how waiters join the worker;
   - how edits typed during a worker parse are queued and applied;
   - the completion wakeup through the persistent loop;
-  - interaction with GC and parser deletion.
+  - interaction with GC and parser deletion;
+  - replacing the `xmalloc` allocator passed to `ts_set_allocator`,
+    which is unsafe off the Lisp thread (halt/resume research).
 - **First parse on file open (17-44 ms).** Whether it is budgeted like a
   reparse. That means showing unfontified text briefly; the alternative
   is to keep it synchronous below some size. This probably depends on the
