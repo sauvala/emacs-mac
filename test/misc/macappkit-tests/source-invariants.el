@@ -34,15 +34,10 @@
       (should (string-match (regexp-quote next-marker) source start))
       (substring source start (match-beginning 0)))))
 
-(ert-deftest macappkit-select-records-latency-stats ()
-  "The AppKit select emulation should expose event-loop latency counters."
-  (let ((body (macappkit-tests--function-body
-               "mac_select"
-               "\n\f\n/***********************************************************************\n\t\t\t       Startup")))
-    (should (string-match-p "mac_select_latency_stats" body))
-    (should (string-match-p "mac_record_select_latency" body))
-    (should (string-match-p "gui_wait_seconds" body))
-    (should (string-match-p "run_loop_iterations" body)))
+(ert-deftest macappkit-select-latency-stats-api ()
+  "`mac-select-latency-stats' should stay available to benchmark tooling.
+It measured only the select emulation of the old event loop, so it now
+reports zeros (wayfinder S8)."
   (let ((mac-source (macappkit-tests--source "mac.c"))
         (header-source (macappkit-tests--source "macterm.h")))
     (should (string-match-p "mac-select-latency-stats" mac-source))

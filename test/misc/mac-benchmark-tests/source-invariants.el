@@ -57,19 +57,38 @@
     (should (string-match-p "emacs_metal_schedule_presentation"
                             implementation))))
 
+(defun mac-benchmark-tests--c-function-bounds (source name)
+  "Return (START . END) of the top-level C function NAME in SOURCE."
+  (let ((start (string-match (concat "^" (regexp-quote name) " (") source)))
+    (should start)
+    (cons start (string-match "^}$" source start))))
+
 (ert-deftest mac-benchmark-metal-presentation-uses-presenter-queue ()
-  "Metal presentation should not acquire drawables on the main queue."
-  (let ((implementation (mac-benchmark-tests--repo-source "src/macmetal.m")))
+  "Metal presentation should acquire drawables on the presenter queue.
+The only exception is the synchronous presentation of a live-resize
+step, which must present in the GUI thread's Core Animation
+transaction."
+  (let* ((implementation (mac-benchmark-tests--repo-source "src/macmetal.m"))
+         (task (mac-benchmark-tests--c-function-bounds
+                implementation "emacs_metal_dispatch_presentation_task"))
+         (sync (mac-benchmark-tests--c-function-bounds
+                implementation "emacs_metal_present_sync"))
+         (task-body (substring implementation (car task) (cdr task))))
     (dolist (pattern '("presenter_queue"
                        "emacs_metal_presenter_queue_label"
-                       "dispatch_queue_create"
-                       "dispatch_async[[:space:]\n]*(ctx->presenter_queue"
-                       "@autoreleasepool"))
+                       "dispatch_queue_create"))
       (should (string-match-p pattern implementation)))
-    (should-not
-     (string-match-p
-      "dispatch_async[[:space:]\n]*(dispatch_get_main_queue[[:space:]\n]*()[[:ascii:]]*nextDrawable"
-      implementation))))
+    (dolist (pattern '("dispatch_async[[:space:]\n]*(ctx->presenter_queue"
+                       "@autoreleasepool"
+                       "nextDrawable"))
+      (should (string-match-p pattern task-body)))
+    ;; No other code acquires a drawable.
+    (let ((pos 0))
+      (while (string-match "nextDrawable" implementation pos)
+        (let ((match (match-beginning 0)))
+          (should (or (< (car task) match (cdr task))
+                      (< (car sync) match (cdr sync))))
+          (setq pos (match-end 0)))))))
 
 (ert-deftest mac-benchmark-has-scheduled-startup-runner ()
   "The benchmark harness should support unattended GUI startup runs."
