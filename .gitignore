@@ -248,6 +248,7 @@ lib-src/seccomp-filter
 lib-src/test-distrib
 lib-src/update-game-score
 mac/Emacs.app/Contents/MacOS/Emacs
+mac/pgo/
 nextstep/Cocoa/Emacs.base/Contents/Info.plist
 nextstep/Cocoa/Emacs.base/Contents/Resources/English.lproj
 nextstep/Emacs.app/

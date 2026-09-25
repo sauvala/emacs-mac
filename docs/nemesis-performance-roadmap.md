@@ -50,7 +50,7 @@ this list) or `skip`.
 | 8 | Benchmark harness on `nemesis` and event-to-screen latency measurement | enabler | S-M | done |
 | 9 | Copy only changed regions when presenting | low (measured) | M | skip (0.7 ms GPU per present; needs undocumented drawable reuse) |
 | 10 | Cherry-pick the measured wins from `codex/responsive-coding-bb3c` | medium | M | done |
-| 11 | Profile-guided optimization (PGO) and ThinLTO build | 5-15% CPU | M | todo |
+| 11 | Profile-guided optimization (PGO) and ThinLTO build | 15-27% CPU (measured) | M | done (`mac/pgo-build.sh`; opt-in) |
 | 12 | Concurrent GC (GNU `feature/igc`, MPS) | high | XL | skip (upstream work; revisit when it merges) |
 | 13 | Take fontification off the redisplay path | high | L | todo (long term) |
 | 14 | Fix the macOS 27 hit test that sends every mouse and scroll event through AppKit | medium | S-M | done (awaiting the user's trackpad check) |
@@ -220,6 +220,33 @@ Use a two-stage build:
 
 Expected to help the bytecode interpreter, `display_line`, GC marking and
 regexp matching.  Measure with item 8.
+
+Result (2026-09-25): `mac/pgo-build.sh` does the four steps; its outputs go
+to `mac/pgo/` (ignored).  Training runs the GUI harness at 40 iterations,
+`perf.el` and batch fontification, and needs a GUI session.  Measured
+against a plain `-O2` build of the same commit and configuration
+(`--with-metal-rendering --enable-mac-app=yes --without-native-compilation`),
+three round-robin rounds, best of rounds:
+
+| Measurement | `-O2` | PGO + ThinLTO | Change |
+|---|---|---|---|
+| Fontify xdisp.c, batch | 3.96 s | 2.91 s | -26.6% |
+| `perf.el` typing, median | 2.92 ms | 2.34 ms | -19.8% |
+| `perf.el` page scroll, median | 1.50 ms | 1.20 ms | -20.3% |
+| `perf.el` redraw, median | 1.65 ms | 1.27 ms | -22.7% |
+| `perf.el` next-line, median | 0.56 ms | 0.51 ms | -8.3% |
+| Harness `c-typing` step p50 | 2.97 ms | 2.38 ms | -20.0% |
+| Harness `c-page-scroll` total | 0.89 s | 0.74 s | -16.8% |
+
+The training overlaps those workloads, so held-out ones were checked
+too: fontifying a 400 KB Python file (`test_typing.py`) 0.75 to 0.52 s (-31%), `sort-lines`
+on 200,000 lines 0.545 to 0.478 s (-12%); byte-compiling `org-agenda.el`
+and `json-parse-string` on 7.6 MB were unchanged.  The full test suite
+gives the same results on both builds (the failures are rust-analyzer,
+tramp and vc environment issues, and two source invariants that failed
+before this session).  The profile covers only C; native-compiled Lisp
+is unaffected, and a profile goes stale as the C sources change (clang
+ignores functions whose shape changed).  Not made the default build.
 
 ### 12. Concurrent GC (skipped)
 

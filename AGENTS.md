@@ -70,6 +70,11 @@ make -j$(sysctl -n hw.ncpu)
 lldb mac/Emacs.app  # start from src/ directory for .lldbinit
 ```
 
+For a profile-guided, ThinLTO build (about 20% less CPU in redisplay and
+fontification), run `CFLAGS="-O2 -mcpu=native" mac/pgo-build.sh
+CONFIGURE-ARGUMENTS...` instead of configure and make; it opens Emacs
+windows while training, so it needs a GUI session.
+
 Must use clang (macOS `gcc` is aliased to clang). Real GCC cannot build this — it lacks Blocks extension support.
 
 Do not add `-fobjc-arc` to global `CFLAGS`. With `--with-metal-rendering`,
