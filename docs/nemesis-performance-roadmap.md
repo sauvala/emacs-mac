@@ -243,8 +243,8 @@ too: fontifying a 400 KB Python file (`test_typing.py`) 0.75 to 0.52 s (-31%), `
 on 200,000 lines 0.545 to 0.478 s (-12%); byte-compiling `org-agenda.el`
 and `json-parse-string` on 7.6 MB were unchanged.  The full test suite
 gives the same results on both builds (the failures are rust-analyzer,
-tramp and vc environment issues, and two source invariants that failed
-before this session).  The profile covers only C; native-compiled Lisp
+tramp and vc environment issues, and two stale source invariants that
+failed before this session and have since been updated).  The profile covers only C; native-compiled Lisp
 is unaffected, and a profile goes stale as the C sources change (clang
 ignores functions whose shape changed).  Not made the default build.
 
@@ -322,6 +322,11 @@ NSEvents by `mac_loop_send_event` is gone.
 - The full scripted matrix passes, `busy-scroll` and `idle-scroll`
   included.  The `busy-native`/`stress-requests` (about 0.6 s) and
   close (about 0.1 s) GUI gaps are as before.
+- On the PGO build `busy-scroll` later failed `newest-timestamp`: its
+  calibration of the busy loop took about the 0.1 s before the gesture,
+  and the Lisp after it let `read_socket` take the first deferred
+  events, splitting the merge.  The scenario now calibrates before
+  posting the gesture and passes 5 of 5 runs.
 - Real trackpad scrolling, momentum included, still needs the user's
   check.
 

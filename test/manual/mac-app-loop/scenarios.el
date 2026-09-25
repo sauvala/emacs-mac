@@ -714,20 +714,28 @@ events of either phase, and :total sums the pixel deltas."
     (none began) (none changed) (none ended))
   "The gesture structure every scroll scenario must preserve.")
 
-(defun mac-loop-scenario--c-busy (seconds)
-  "Compute for about SECONDS in C code that never checks for quits.
-Unlike `mac-loop-scenario--busy', no `maybe_quit' lets `read_socket'
-take the deferred events in between, as in a long redisplay."
+(defun mac-loop-scenario--c-busy-length (seconds)
+  "Return the string length for which `mac-loop-scenario--c-busy' takes SECONDS.
+The calibration itself computes for about 0.1 s, and the Lisp around
+it lets `read_socket' take deferred events, so call this before
+posting the events a scenario expects to be deferred."
   (let* ((n 8000)
          (a (make-string n ?a)) (b (make-string n ?b))
          (start (float-time)))
     (string-distance a b t)
-    (let* ((unit (max 1e-4 (- (float-time) start)))
-           ;; The work grows with the square of the length.
-           (m (min 60000 (round (* n (sqrt (/ seconds unit)))))))
-      (setq a (make-string m ?a) b (make-string m ?b) start (float-time))
-      (string-distance a b t)
-      (- (float-time) start))))
+    (let ((unit (max 1e-4 (- (float-time) start))))
+      ;; The work grows with the square of the length.
+      (min 60000 (round (* n (sqrt (/ seconds unit))))))))
+
+(defun mac-loop-scenario--c-busy (length)
+  "Compute in C code that never checks for quits; return the seconds taken.
+LENGTH comes from `mac-loop-scenario--c-busy-length'.  Unlike
+`mac-loop-scenario--busy', no `maybe_quit' lets `read_socket' take the
+deferred events in between, as in a long redisplay."
+  (let ((a (make-string length ?a)) (b (make-string length ?b))
+        (start (float-time)))
+    (string-distance a b t)
+    (- (float-time) start)))
 
 (defun mac-loop-scenario-busy-scroll ()
   "A precise scroll gesture while Lisp computes in C.
@@ -737,8 +745,10 @@ and the began/ended events unmerged and in order.  The merged event
 carries the timestamp of the newest event it stands for, so it is at
 least 50 ms later than its phase's `began'."
   (mac-loop-scenario--wheel-setup)
-  (mac-loop-test-schedule (mac-loop-scenario--scroll-gesture 0.1 0.004))
-  (let ((busy (mac-loop-scenario--c-busy 0.8)))
+  (let ((length (mac-loop-scenario--c-busy-length 0.8))
+        busy)
+    (mac-loop-test-schedule (mac-loop-scenario--scroll-gesture 0.1 0.004))
+    (setq busy (mac-loop-scenario--c-busy length))
     (mac-loop-scenario--then 1.5
       (let* ((s (mac-loop-scenario--wheel-summary))
              (events (plist-get s :events))
