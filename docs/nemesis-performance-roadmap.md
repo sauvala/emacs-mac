@@ -49,7 +49,7 @@ this list) or `skip`.
 | 7 | Default `redisplay-skip-fontification-on-input` to t | medium | XS | done (`7d18d47b0fc`) |
 | 8 | Benchmark harness on `nemesis` and event-to-screen latency measurement | enabler | S-M | done |
 | 9 | Copy only changed regions when presenting | low (measured) | M | skip (0.7 ms GPU per present; needs undocumented drawable reuse) |
-| 10 | Cherry-pick the measured wins from `codex/responsive-coding-bb3c` | medium | M | todo |
+| 10 | Cherry-pick the measured wins from `codex/responsive-coding-bb3c` | medium | M | done |
 | 11 | Profile-guided optimization (PGO) and ThinLTO build | 5-15% CPU | M | todo |
 | 12 | Concurrent GC (GNU `feature/igc`, MPS) | high | XL | skip (upstream work; revisit when it merges) |
 | 13 | Take fontification off the redisplay path | high | L | todo (long term) |
@@ -192,6 +192,22 @@ measured wins:
 
 Cherry-pick these and measure again.  Leave the async font-lock worker-process
 machinery out unless it is re-justified.
+
+Result (2026-09-25): picked with `-x`, in order, the JSON-RPC chain
+(`3cf64efda33` through `e92f835442a`, 8 commits), the Eglot semantic-token
+chain (`11d1eedb27e`, `c961eb3d08a`, `89966f0a50a`) and the whole jit-lock
+chain (`bbe583ccc4f` through `55393d47590`, 10 commits; the later ones build
+on `bbe583ccc4f`'s `jit-lock-defer-on-input`, which complements item 7).  No
+async font-lock or tree-sitter commits.  The benchmark-harness and findings
+hunks of three commits were dropped in favor of the `nemesis` harness, which
+lacks their `coding-*`, `jsonrpc-*`, `eglot-*` and `treesit-*` scenarios.
+
+- jsonrpc 22/22, jit-lock 14/14, cc-mode and font-lock tests pass.  Eglot's
+  five rust-analyzer tests fail with and without the picks (environment).
+- These changes act under input pressure, which the `nemesis` harness does
+  not create; `c-typing`, `c-page-scroll` and key latency are unchanged.
+- They edit upstream Lisp files (`jsonrpc.el`, `eglot.el`, `jit-lock.el`),
+  so the weekly GNU sync may conflict there.
 
 ### 11. PGO and ThinLTO
 
