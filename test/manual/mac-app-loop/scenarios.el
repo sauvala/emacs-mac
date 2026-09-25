@@ -724,6 +724,77 @@ the previous one, and are then merged."
              (cons 'ordered (plist-get s :timestamps-ordered)))))
       (append (list :pass (not (rassq nil checks)) :checks checks) s))))
 
+;; Mouse events over the text area.
+
+(defvar mac-loop-scenario--help nil
+  "Help strings shown since the scenario started, most recent first.")
+
+(defun mac-loop-scenario--mouse-setup ()
+  "Insert text with a `help-echo' property; record the help shown.
+Return the positions (TARGET PLAIN) of the text with help and of
+plain text below it."
+  (setq mac-loop-scenario--help nil
+        show-help-function
+        (lambda (help) (push help mac-loop-scenario--help)))
+  ;; Timers run in whatever buffer was current.
+  (set-buffer (window-buffer))
+  (insert "\n" (propertize "HELPTARGET" 'help-echo "scenario-help")
+          "\n\nplain text here\n")
+  (goto-char (point-min))
+  (redisplay t)
+  (list (+ (point-min) 3) (+ (point-min) 17)))
+
+(defun mac-loop-scenario--window-point (pos)
+  "Return the window point (X Y), top-left origin, of the character at POS."
+  (let* ((outer (frame-edges nil 'outer-edges))
+         (native (frame-edges nil 'native-edges))
+         (inside (window-inside-pixel-edges))
+         (xy (posn-x-y (posn-at-point pos))))
+    (list (+ (- (nth 0 native) (nth 0 outer)) (nth 0 inside) (car xy)
+             (/ (frame-char-width) 2))
+          (+ (- (nth 1 native) (nth 1 outer)) (nth 1 inside) (cdr xy)
+             (/ (frame-char-height) 2)))))
+
+(defun mac-loop-scenario--mouse-actions (start target plain)
+  "Return actions from time START: move over TARGET, then PLAIN, then click.
+TARGET and PLAIN are buffer positions."
+  (let ((a (mac-loop-scenario--window-point target))
+        (b (mac-loop-scenario--window-point plain)))
+    `((,start move ,@a) (,(+ start 0.3) move ,@b)
+      (,(+ start 0.5) down ,@b) (,(+ start 0.55) up ,@b))))
+
+(defun mac-loop-scenario--mouse-checks (plain)
+  "Return the checks of a mouse scenario whose click was at PLAIN."
+  (list (cons 'help-shown
+              (and (member "scenario-help" mac-loop-scenario--help) t))
+        (cons 'clicked (= (window-point) plain))
+        (cons 'mouse-command
+              (and (memq 'mouse-set-point (mac-loop-scenario--commands)) t))))
+
+(defun mac-loop-scenario-idle-mouse ()
+  "Move over text with `help-echo' and click while Lisp waits for input.
+Expect the help to be shown and point to move to the click."
+  (pcase-let ((`(,target ,plain) (mac-loop-scenario--mouse-setup)))
+    (mac-loop-test-schedule
+     (mac-loop-scenario--mouse-actions 0.2 target plain))
+    (mac-loop-scenario--then 1.5
+      (let ((checks (mac-loop-scenario--mouse-checks plain)))
+        (list :pass (not (rassq nil checks)) :checks checks
+              :help mac-loop-scenario--help :point (window-point)
+              :commands (mac-loop-scenario--commands))))))
+
+(defun mac-loop-scenario-busy-mouse ()
+  "The moves and click of `idle-mouse' while Lisp computes."
+  (pcase-let ((`(,target ,plain) (mac-loop-scenario--mouse-setup)))
+    (mac-loop-test-schedule
+     (mac-loop-scenario--mouse-actions 0.2 target plain))
+    (let ((busy (mac-loop-scenario--busy 1.5)))
+      (mac-loop-scenario--then 1.5
+        (let ((checks (mac-loop-scenario--mouse-checks plain)))
+          (list :pass (not (rassq nil checks)) :checks checks :busy busy
+                :help mac-loop-scenario--help :point (window-point)
+                :commands (mac-loop-scenario--commands)))))))
+
 (defun mac-loop-scenario-fullscreen-busy ()
   "Enter and leave fullscreen while Lisp computes."
   (mac-loop-test-schedule '((0.5 fullscreen) (2.5 probe 1) (3.0 fullscreen)

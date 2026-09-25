@@ -17864,8 +17864,7 @@ mac_select (int nfds, fd_set *rfds, fd_set *wfds, fd_set *efds,
 {
 @public
   NSEvent *event;
-  /* The view whose -scrollWheel: deferred it, or nil if
-     mac_loop_send_event did and it goes through AppKit.  */
+  /* The view whose -scrollWheel: deferred it.  */
   NSView *view;
   CGFloat deltaX, deltaY, deltaZ, scrollingDeltaX, scrollingDeltaY;
   int count;
@@ -18449,14 +18448,20 @@ mac_loop_event_emacs_bound_p (NSEvent *event)
 
 	/* Hit-test from the frame view so that titlebar controls and
 	   resize edges over a full-size content view are recognized
-	   as window chrome.  */
+	   as window chrome.  -hitTest: takes a point in the
+	   superview's coordinates; the frame view has no superview
+	   on macOS 27, and window coordinates are then its own.  */
 	NSView *frameView = contentView.superview;
 	NSView *hitView;
 
 	if (frameView)
-	  hitView = [frameView hitTest:[frameView.superview
-					  convertPoint:event.locationInWindow
-					      fromView:nil]];
+	  {
+	    NSPoint point = event.locationInWindow;
+
+	    if (frameView.superview)
+	      point = [frameView.superview convertPoint:point fromView:nil];
+	    hitView = [frameView hitTest:point];
+	  }
 	else
 	  hitView = [contentView hitTest:event.locationInWindow];
 
@@ -18483,8 +18488,7 @@ mac_loop_scroll_mergeable_p (NSEvent *event)
 }
 
 /* GUI thread, without Lisp access: append the mergeable scroll EVENT
-   to the deferred FIFO, for VIEW's -scrollWheel:, or for dispatch
-   through AppKit if VIEW is nil.
+   to the deferred FIFO, for VIEW's -scrollWheel:.
 
    A trackpad sends some 120 scroll events a second, and a busy Lisp
    would otherwise work through all of them after the fingers left the
@@ -18545,24 +18549,16 @@ mac_loop_defer_scroll_event (NSEvent *event, NSView *view)
    than one event.  */
 static EmacsLoopScrollEvent *mac_loop_merged_scroll;
 
-/* GUI thread, with Lisp access: dispatch the deferred SCROLL.  Return
-   the number of stored events.  */
+/* GUI thread, with Lisp access: dispatch the deferred SCROLL.  */
 
-static int
+static void
 mac_loop_dispatch_scroll_event (EmacsLoopScrollEvent *scroll)
 {
   EmacsLoopScrollEvent *saved = mac_loop_merged_scroll;
-  int count = 0;
 
   mac_loop_merged_scroll = scroll->count > 1 ? scroll : nil;
-  if (scroll->view)
-    [scroll->view scrollWheel:scroll->event];
-  else
-    count = [emacsController handleNSEventWithHoldingQuitIn:NULL
-						      event:scroll->event];
+  [scroll->view scrollWheel:scroll->event];
   mac_loop_merged_scroll = saved;
-
-  return count;
 }
 
 /* GUI thread, from -[EmacsMainView scrollWheel:] for EVENT: if EVENT
@@ -18609,7 +18605,7 @@ mac_loop_handle_events_with_access (NSEvent *event)
 	count += [emacsController handleNSEventWithHoldingQuitIn:NULL
 							   event:deferred];
       else if ([deferred isKindOfClass:EmacsLoopScrollEvent.class])
-	count += mac_loop_dispatch_scroll_event (deferred);
+	mac_loop_dispatch_scroll_event (deferred);
       else if ([deferred isKindOfClass:EmacsLoopStateCallback.class])
 	((EmacsLoopStateCallback *) deferred)->block ();
       else
@@ -18661,18 +18657,24 @@ mac_loop_send_event (NSEvent *event)
 	  return;
 	}
 
+      if (event.type == NSEventTypeScrollWheel)
+	{
+	  /* AppKit drops momentum-phase scroll events that come
+	     through -[NSWindow sendEvent:] after the gesture, so
+	     dispatch now; -[EmacsMainView scrollWheel:] defers itself
+	     and merges (mac_loop_scroll_callback).  */
+	  [(EmacsApplication *) NSApp sendEventToAppKit:event];
+	  mac_loop_forward_gui_hold_quit ();
+	  return;
+	}
+
       id last = mac_loop_deferred_events.lastObject;
 
-      if (mac_loop_scroll_mergeable_p (event))
-	mac_loop_defer_scroll_event (event, nil);
-      else
-	{
-	  if ([last isKindOfClass:NSEvent.class]
-	      && ((NSEvent *) last).type == NSEventTypeMouseMoved
-	      && event.type == NSEventTypeMouseMoved)
-	    [mac_loop_deferred_events removeLastObject];
-	  [mac_loop_deferred_events addObject:event];
-	}
+      if ([last isKindOfClass:NSEvent.class]
+	  && ((NSEvent *) last).type == NSEventTypeMouseMoved
+	  && event.type == NSEventTypeMouseMoved)
+	[mac_loop_deferred_events removeLastObject];
+      [mac_loop_deferred_events addObject:event];
       mac_loop_stats[MAC_LOOP_STAT_DEFERRED_EVENTS]++;
       __atomic_store_n (&mac_loop_deferred_count,
 			mac_loop_deferred_events.count, __ATOMIC_RELEASE);
@@ -19383,6 +19385,10 @@ mac_loop_test_perform (struct mac_loop_test_action action,
       break;
     case MAC_LOOP_TEST_MOUSE_DOWN:
       name = "down";
+      break;
+    case MAC_LOOP_TEST_MOUSE_MOVE:
+      type = NSEventTypeMouseMoved;
+      name = "move";
       break;
 
     case MAC_LOOP_TEST_MINIATURIZE:

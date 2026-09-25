@@ -118,6 +118,10 @@ means one is missing. This includes view event handlers:
 in the content view, but AppKit routes mouse-moved, drag and up events
 to the first responder or the view of the down event, so under a
 transparent titlebar they reach `EmacsMainView` without access.
+Scroll-wheel events that find Lisp busy are always dispatched to
+AppKit at once, to be deferred by `-[EmacsMainView scrollWheel:]`:
+AppKit drops momentum events replayed later through
+`-[NSWindow sendEvent:]`.
 Deferred precise scroll events in the middle of a scroll or momentum
 phase merge with the previous deferred one (summed deltas, newest
 event) when window, view, modifiers and phases match; phase boundaries

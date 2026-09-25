@@ -53,7 +53,7 @@ this list) or `skip`.
 | 11 | Profile-guided optimization (PGO) and ThinLTO build | 5-15% CPU | M | todo |
 | 12 | Concurrent GC (GNU `feature/igc`, MPS) | high | XL | skip (upstream work; revisit when it merges) |
 | 13 | Take fontification off the redisplay path | high | L | todo (long term) |
-| 14 | Fix the macOS 27 hit test that sends every mouse and scroll event through AppKit | medium | S-M | todo |
+| 14 | Fix the macOS 27 hit test that sends every mouse and scroll event through AppKit | medium | S-M | done (awaiting the user's trackpad check) |
 
 ### 1. GC defaults and idle collection (skipped)
 
@@ -228,6 +228,23 @@ Fix direction: pass `event.locationInWindow` straight to `hitTest:` when
 there is no superview.  Caveat found with a trial fix: deferred momentum
 scroll events replayed through `-[NSWindow sendEvent:]` did not reach Lisp,
 with or without item 3's merging.  That has to be solved in the same change.
+
+Result (2026-09-25): the hit test now uses the window point when the frame
+view has no superview.  A scroll event that finds Lisp busy still goes to
+AppKit at once, and `-[EmacsMainView scrollWheel:]` defers and merges it,
+which is the path that already worked; the unused deferral of scroll
+NSEvents by `mac_loop_send_event` is gone.
+
+- The wrong hit test also broke `help-echo` from mouse movement, idle or
+  busy: a `HELP_EVENT` stored from a view callback only sets `do_help`,
+  which only `handleOneNSEvent` acts on.  The new `idle-mouse` and
+  `busy-mouse` scenarios (move over text with `help-echo`, then click;
+  new `move X Y` test action) failed `help-shown` before and pass after.
+- The full scripted matrix passes, `busy-scroll` and `idle-scroll`
+  included.  The `busy-native`/`stress-requests` (about 0.6 s) and
+  close (about 0.1 s) GUI gaps are as before.
+- Real trackpad scrolling, momentum included, still needs the user's
+  check.
 
 ## Not worth doing yet
 

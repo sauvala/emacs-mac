@@ -498,6 +498,7 @@ where DELAY is seconds from now and KIND is one of:
   down X Y, drag X Y, up X Y
                        post a left mouse event at window point X,Y
                        (top-left origin).
+  move X Y             post a mouse-moved event at window point X,Y.
   miniaturize, deminiaturize, zoom, fullscreen, close, activate,
   terminate            invoke the native window or application operation.
   set-size W H         set the window size natively.
@@ -542,6 +543,7 @@ The actions run on the GUI thread even while Lisp is busy.  */)
       struct { const char *name; int kind; } kinds[] =
 	{{"key", MAC_LOOP_TEST_KEY}, {"down", MAC_LOOP_TEST_MOUSE_DOWN},
 	 {"drag", MAC_LOOP_TEST_MOUSE_DRAG}, {"up", MAC_LOOP_TEST_MOUSE_UP},
+	 {"move", MAC_LOOP_TEST_MOUSE_MOVE},
 	 {"miniaturize", MAC_LOOP_TEST_MINIATURIZE},
 	 {"deminiaturize", MAC_LOOP_TEST_DEMINIATURIZE},
 	 {"zoom", MAC_LOOP_TEST_ZOOM}, {"fullscreen", MAC_LOOP_TEST_FULLSCREEN},
