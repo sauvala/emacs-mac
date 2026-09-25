@@ -113,7 +113,11 @@ or redisplay state only with Lisp access
 try-lock while Lisp waits for input). New AppKit callbacks that read or build
 Lisp state must start with `MAC_LOOP_CALLBACK_NEEDS_LISP` or
 `MAC_LOOP_QUERY_NEEDS_LISP`; a GUI-thread crash in GC or allocation usually
-means one is missing. Callbacks that only sync AppKit window state to Lisp
+means one is missing. This includes view event handlers:
+`mac_loop_send_event` takes access only for events whose hit test lands
+in the content view, but AppKit routes mouse-moved, drag and up events
+to the first responder or the view of the down event, so under a
+transparent titlebar they reach `EmacsMainView` without access. Callbacks that only sync AppKit window state to Lisp
 use `MAC_LOOP_STATE_CALLBACK_NEEDS_LISP`, which replaces a pending deferred
 callback of the same kind. While Lisp is busy, a growing window shows the
 last Metal drawable anchored top-left over the frame background, which is

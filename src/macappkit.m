@@ -7001,6 +7001,12 @@ static BOOL emacsViewUpdateLayerDisabled;
 
 - (void)mouseDown:(NSEvent *)theEvent
 {
+  /* AppKit sends the up events to the view that got the down event,
+     even over a transparent titlebar, where mac_loop_send_event's
+     hit test counts the event as window chrome and dispatches it
+     without Lisp access.  */
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self mouseDown:theEvent]);
+
   struct frame *f = [self emacsFrame];
   struct mac_display_info *dpyinfo = FRAME_DISPLAY_INFO (f);
   NSPoint point = [self convertPoint:[theEvent locationInWindow] fromView:nil];
@@ -7140,6 +7146,8 @@ event_phase_to_symbol (NSEventPhase phase)
 
 - (void)scrollWheel:(NSEvent *)theEvent
 {
+  MAC_LOOP_CALLBACK_NEEDS_LISP ([self scrollWheel:theEvent]);
+
   struct frame *f = self.emacsFrame;
   NSPoint point = [self convertPoint:[theEvent locationInWindow] fromView:nil];
   int modifiers = mac_event_to_emacs_modifiers (theEvent);
@@ -7313,6 +7321,16 @@ event_phase_to_symbol (NSEventPhase phase)
 
 - (void)mouseMoved:(NSEvent *)theEvent
 {
+  /* AppKit sends mouse-moved events to the first responder and drags
+     to the view that got the down event, whatever is under the
+     pointer.  Over a transparent titlebar (the tab bar, for instance)
+     mac_loop_send_event's hit test counts such an event as window
+     chrome and dispatches it without Lisp access; drawing the mouse
+     face then raced with Lisp and corrupted its specpdl.  Only the
+     latest pending movement matters.  */
+  MAC_LOOP_STATE_CALLBACK_NEEDS_LISP ("mouse-moved",
+				      [self mouseMoved:theEvent]);
+
   struct frame *f = [self emacsFrame];
   EmacsFrameController *frameController = FRAME_CONTROLLER (f);
   struct mac_display_info *dpyinfo = FRAME_DISPLAY_INFO (f);
