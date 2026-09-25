@@ -171,6 +171,65 @@ The wait lets the command loop execute queued input first."
         (list :busy busy :before before
               :after (mac-loop-scenario--frame-state))))))
 
+;; A fast vertical shrink, the drag in which the mode line vanished.
+
+(defun mac-loop-scenario--shrink-drag (start)
+  "Return actions dragging the bottom-right corner up from time START.
+Steps are 8 ms apart and 4 px each, as a fast trackpad drag."
+  (let* ((x (- (frame-outer-width) 3))
+         (y (- (frame-outer-height) 3))
+         (actions (list (list start 'down x y)))
+         (time start))
+    (dotimes (i 50)
+      (setq time (+ time 0.008))
+      (push (list time 'drag x (- y (* 4 (1+ i)))) actions))
+    (push (list (+ time 0.1) 'up x (- y 200)) actions)
+    (nreverse actions)))
+
+(defun mac-loop-scenario-shrink-jump ()
+  "Shrink the frame by a corner drag whose pointer jumps into the text area.
+On macOS 27 the window resizes while the drag events are dispatched.
+A fast shrink leaves the pointer over the text area, but the drag
+belongs to the window edge where the button went down, so Lisp must
+redraw every step: each applied step should also be presented."
+  (let* ((x (- (frame-outer-width) 3))
+         (y (- (frame-outer-height) 3))
+         (actions (list (list 0.3 'down x y)))
+         (time 0.3))
+    (dotimes (i 6)
+      (setq time (+ time 0.05))
+      ;; 120 px above the corner that the previous step left.
+      (push (list time 'drag x (- y (* 40 (1+ i)) 120)) actions))
+    (push (list (+ time 0.1) 'up x (- y 360)) actions)
+    (mac-loop-test-schedule (nreverse actions))
+    (mac-loop-scenario--then 2.0
+      (let ((applied 0) (presented 0))
+        (dolist (r (nth 2 (mac-loop-test-results)))
+          (cond ((string-match-p "\\`live resize step .* applied" (cdr r))
+                 (setq applied (1+ applied)))
+                ((string-prefix-p "live resize presented" (cdr r))
+                 (setq presented (1+ presented)))))
+        (list :pass (and (> applied 0) (= applied presented))
+              :applied applied :presented presented
+              :after (mac-loop-scenario--frame-state))))))
+
+(defun mac-loop-scenario-shrink-drag ()
+  "Shrink the frame vertically by a fast corner drag while Lisp is idle.
+Every live-resize step should present the frame Lisp drew at the new
+size (\"live resize presented\"); a missed step shows the previous,
+taller frame cut off at the bottom."
+  (let ((before (mac-loop-scenario--frame-state)))
+    (mac-loop-test-schedule (mac-loop-scenario--shrink-drag 0.3))
+    (mac-loop-scenario--then 2.0
+      (let ((presented 0) (missed 0))
+        (dolist (r (nth 2 (mac-loop-test-results)))
+          (cond ((string-prefix-p "live resize presented" (cdr r))
+                 (setq presented (1+ presented)))
+                ((string-prefix-p "live resize missed" (cdr r))
+                 (setq missed (1+ missed)))))
+        (list :presented presented :missed missed :before before
+              :after (mac-loop-scenario--frame-state))))))
+
 (defun mac-loop-scenario-resize-burst ()
   "Resize the window 20 times while Lisp computes.
 Expect a final outer size of 790x495.  The seventh :access count is

@@ -18405,8 +18405,15 @@ mac_loop_forward_gui_hold_quit (void)
     }
 }
 
+/* Mouse buttons (bit N for button number N) that went down over
+   window chrome, whose drags and release therefore belong to AppKit
+   too.  */
+static unsigned mac_loop_chrome_buttons;
+
 /* Return true if EVENT is handled by Emacs views rather than by
-   AppKit-owned window chrome.  */
+   AppKit-owned window chrome.  Called once for each event that
+   mac_loop_send_event receives, since it tracks where buttons went
+   down.  */
 
 static bool
 mac_loop_event_emacs_bound_p (NSEvent *event)
@@ -18442,11 +18449,44 @@ mac_loop_event_emacs_bound_p (NSEvent *event)
     case NSEventTypeTabletPoint:
     case NSEventTypeTabletProximity:
       {
+	NSEventType type = event.type;
+	bool down_p = (type == NSEventTypeLeftMouseDown
+		       || type == NSEventTypeRightMouseDown
+		       || type == NSEventTypeOtherMouseDown);
+	bool up_p = (type == NSEventTypeLeftMouseUp
+		     || type == NSEventTypeRightMouseUp
+		     || type == NSEventTypeOtherMouseUp);
+	unsigned button = 0;
+
+	if (down_p || up_p
+	    || type == NSEventTypeLeftMouseDragged
+	    || type == NSEventTypeRightMouseDragged
+	    || type == NSEventTypeOtherMouseDragged)
+	  button = 1u << MIN (event.buttonNumber, 31);
+
+	/* A drag that began on window chrome stays with AppKit when
+	   the pointer moves over the content view, as when a fast
+	   shrink leaves it behind the window edge.  On macOS 27 the
+	   window resizes while these events are dispatched; with Lisp
+	   access held then, the live-resize step could not redraw.  */
+	if (button && !down_p && (mac_loop_chrome_buttons & button))
+	  {
+	    if (up_p)
+	      mac_loop_chrome_buttons &= ~button;
+	    return false;
+	  }
+	if (type == NSEventTypePressure && mac_loop_chrome_buttons)
+	  return false;
+
 	NSWindow *window = event.window;
 	NSView *contentView = window.contentView;
 
 	if (![window isKindOfClass:EmacsWindow.class] || contentView == nil)
-	  return false;
+	  {
+	    if (down_p)
+	      mac_loop_chrome_buttons |= button;
+	    return false;
+	  }
 
 	/* Hit-test from the frame view so that titlebar controls and
 	   resize edges over a full-size content view are recognized
@@ -18467,7 +18507,16 @@ mac_loop_event_emacs_bound_p (NSEvent *event)
 	else
 	  hitView = [contentView hitTest:event.locationInWindow];
 
-	return hitView && [hitView isDescendantOf:contentView];
+	bool emacs_p = hitView && [hitView isDescendantOf:contentView];
+
+	if (down_p)
+	  {
+	    if (emacs_p)
+	      mac_loop_chrome_buttons &= ~button;
+	    else
+	      mac_loop_chrome_buttons |= button;
+	  }
+	return emacs_p;
       }
 
     default:
