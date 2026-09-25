@@ -40480,8 +40480,11 @@ was pending, but it can make scrolling smoother by avoiding
 unnecessary fontification.
 It is similar to `fast-but-imprecise-scrolling' with similar tradeoffs,
 but with the advantage that it should only affect the behavior when Emacs
-has trouble keeping up with the incoming input rate.  */);
-  redisplay_skip_fontification_on_input = false;
+has trouble keeping up with the incoming input rate.
+In this fork, the default is t (upstream defaults to nil).  */);
+  /* Fork-local: default to t for snappier held-key scrolling and fast
+     typing; upstream defaults this to false.  */
+  redisplay_skip_fontification_on_input = true;
 
   DEFVAR_BOOL ("redisplay-adhoc-scroll-in-resize-mini-windows",
                redisplay_adhoc_scroll_in_resize_mini_windows,

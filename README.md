@@ -196,6 +196,7 @@ The `nemesis` branch tracks GNU Emacs master and adds the following on top of th
 - **Rope data structure** (experimental, `--with-rope`): Alternative text storage backend using a B-tree sumtree rope with 128-byte leaf chunks. Provides O(log n) insert/delete/replace and O(log n) line counting via aggregated summaries at each tree node. Per-buffer opt-in via `(buffer-enable-rope)` or `(rope-enable-default)` for new buffers. Build with `./configure --with-rope` to enable. Unibyte buffers retain gap storage; multibyte ropes accept the full Emacs internal character encoding. Changing a rope buffer’s multibyte setting materializes gap storage and uses the normal Emacs conversion, preserving buffer metadata and allowing arbitrary binary data.
 - **Wrap position cache**: Per-window cache of visual line start positions for O(1) movement within long wrapped continuation lines, replacing the O(buffer_size) scan from logical line start.
 - **WrapMap module**: Centralized visual line estimation for long wrapped lines, consolidating duplicated formulas across the display engine. For rope buffers, uses O(log n) tree operations for precise estimation.
+- **Skip fontification on pending input**: `redisplay-skip-fontification-on-input` defaults to `t` (upstream: `nil`), so redisplay does not fontify while input is pending; held-key scrolling and fast typing keep up.
 
 ### Persistent AppKit event loop (macOS 27+)
 
