@@ -1,10 +1,10 @@
 ---
 id: pending-parse-display-policy
 title: "What redisplay shows while a parse is pending"
-status: open
+status: closed
 labels: ["wayfinder:grilling"]
 parent: treesit-budgeted-parse
-assignee: claude
+assignee: null
 ---
 
 ## Question

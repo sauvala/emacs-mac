@@ -51,6 +51,7 @@ Each stage has its tests, its live check and a go/no-go gate.
 - [Tree-sitter halt and resume contract](19-ts-halt-resume-contract.md): a halted parse resumes from any input with identical bytes (so another thread works), but every edit needs `ts_parser_reset`; the callback fires about every 15 us, so a 1-3 ms budget holds except for giant tokens and end-of-file balancing; the API exists from 0.25, with a fallback for older versions ([resolution](../comments/ts-halt-resume-contract/2026-09-25-resolution.md))
 - [Inventory every reader of a parser tree](20-treesit-tree-access-inventory.md): only `treesit--pre-redisplay` and jit-lock fontification can skip waiting; deferral must cover the whole jit-lock chunk (indent-bars and `syntax-propertize` read the tree inside it); `syntax-ppss` after an edit forces the parse; install finished trees only at a safe point ([resolution](../comments/treesit-tree-access-inventory/2026-09-25-resolution.md))
 - [Tree-sitter latency scenarios for the benchmark harness](21-ts-latency-scenarios.md): `ts-perf.el` added; typing `"` at a line start reparses in 4-5 ms at 50-100 KB, 9 ms at 240 KB and 63 ms in an 800 KB docstring-heavy Python file, while keystrokes and scrolls stay 1-3 ms ([resolution](../comments/ts-latency-scenarios/2026-09-25-resolution.md))
+- [What redisplay shows while a parse is pending](22-pending-parse-display-policy.md): stale faces stay; jit-lock defers the whole chunk while the primary parser has a pending parse; only `treesit--pre-redisplay` and idle slices make budgeted attempts, every other reader finishes the parse; completion runs the existing notifiers and re-arms deferred chunks; stage 2 covers buffers with only a primary parser without included ranges, and the first parse stays synchronous ([decision](../comments/pending-parse-display-policy/2026-09-26-decision.md))
 
 ## Not yet specified
 
@@ -66,7 +67,7 @@ Each stage has its tests, its live check and a go/no-go gate.
 - **First parse on file open (17-44 ms).** Whether it is budgeted like a
   reparse. That means showing unfontified text briefly; the alternative
   is to keep it synchronous below some size. The display-policy decision
-  (ticket 22, awaiting confirmation) recommends keeping it synchronous in
+  (ticket 22) recommends keeping it synchronous in
   stage 2 and revisiting with the stage-2 numbers.
 - **User-facing knobs.** Names, defaults and whether they are
   `defcustom`s (budget, slice size), once stage two has numbers.
