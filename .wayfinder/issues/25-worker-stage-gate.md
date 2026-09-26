@@ -4,7 +4,7 @@ title: "Gate for building the worker-thread stage"
 status: open
 labels: ["wayfinder:grilling"]
 parent: treesit-budgeted-parse
-assignee: null
+assignee: claude
 ---
 
 ## Question

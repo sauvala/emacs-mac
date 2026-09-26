@@ -58,3 +58,7 @@ budgeted attempt starts again from the edited tree.
 **Staleness deadline**:
 How long a buffer may keep an unfinished parse, counting across restarts,
 before its next attempt runs without a budget.
+
+**Overrun**:
+A slice that runs past its budget because the parser did not check the
+clock in time, such as inside one very long token.
