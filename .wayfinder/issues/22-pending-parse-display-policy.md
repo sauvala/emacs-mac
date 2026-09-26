@@ -4,7 +4,7 @@ title: "What redisplay shows while a parse is pending"
 status: open
 labels: ["wayfinder:grilling"]
 parent: treesit-budgeted-parse
-assignee: null
+assignee: claude
 ---
 
 ## Question

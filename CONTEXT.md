@@ -27,3 +27,22 @@ _Avoid_: Hack-free port
 An existing accommodation for OS behavior retained until a replacement passes
 the agreed interactive checks. Its presence during migration does not change
 the documented-integration destination.
+
+# Budgeted tree-sitter parsing
+
+Vocabulary for the `treesit-budgeted-parse` wayfinder map.
+
+## Language
+
+**Budgeted attempt**:
+A reparse that may halt when its time budget runs out. Only
+`treesit--pre-redisplay` and idle slices make one.
+
+**Pending parse**:
+A parser whose budgeted attempt halted before it finished. An edit that has
+not been parsed yet is not a pending parse.
+_Avoid_: Stale tree
+
+**Waiter**:
+Any other caller that needs the tree. A waiter finishes the parse without a
+budget.

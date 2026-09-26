@@ -65,8 +65,9 @@ Each stage has its tests, its live check and a go/no-go gate.
     which is unsafe off the Lisp thread (halt/resume research).
 - **First parse on file open (17-44 ms).** Whether it is budgeted like a
   reparse. That means showing unfontified text briefly; the alternative
-  is to keep it synchronous below some size. This probably depends on the
-  display-policy decision and on how fast idle slices finish.
+  is to keep it synchronous below some size. The display-policy decision
+  (ticket 22, awaiting confirmation) recommends keeping it synchronous in
+  stage 2 and revisiting with the stage-2 numbers.
 - **User-facing knobs.** Names, defaults and whether they are
   `defcustom`s (budget, slice size), once stage two has numbers.
 
