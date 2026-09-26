@@ -52,7 +52,7 @@ this list) or `skip`.
 | 10 | Cherry-pick the measured wins from `codex/responsive-coding-bb3c` | medium | M | done |
 | 11 | Profile-guided optimization (PGO) and ThinLTO build | 15-27% CPU (measured) | M | done (`mac/pgo-build.sh`; opt-in) |
 | 12 | Concurrent GC (GNU `feature/igc`, MPS) | high | XL | skip (upstream work; revisit when it merges) |
-| 13 | Take fontification off the redisplay path | low (measured) | L | designed, deferred (2-7 ms, only on large-file edits; see section) |
+| 13 | Take fontification off the redisplay path | low (measured) | L | planned in stages: all design decisions made 2026-09-26, stage 1 next (see section) |
 | 14 | Fix the macOS 27 hit test that sends every mouse and scroll event through AppKit | medium | S-M | done, accepted |
 | 15 | Cheaper menu-bar fills: skip `substitute-command-keys` for plain help strings | low-medium | XS | done |
 
@@ -360,6 +360,14 @@ docstring-heavy Python file.  See
 
 The user later asked for this to be split into stages; the plan is the
 wayfinder map `.wayfinder/issues/treesit-budgeted-parse.md` (2026-09-25).
+
+All of the map's design decisions were made on 2026-09-26, so the deferral
+no longer holds:
+- stage 1 times every parse without changing behaviour;
+- stage 2 budgets reparses and continues them in idle slices on the Lisp
+  thread;
+- a worker thread is built only if stage 2's stats pass the gate recorded
+  on the map.
 
 ### Results so far (2026-09-25)
 
