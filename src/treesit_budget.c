@@ -31,12 +31,16 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <time.h>
 
-/* Parse statistics since the last reset.  OVER[I] counts the parses
-   that took longer than OVER_LIMITS[I] seconds.  */
+/* Parse statistics since the last reset.  A first parse has no
+   previous tree; the other fields cover only reparses.  OVER[I] counts
+   the reparses that took longer than OVER_LIMITS[I] seconds.  */
 static const double over_limits[] = { 0.001, 0.003, 0.008 };
 static struct
 {
   uintmax_t parses;
+  uintmax_t first_parses;
+  double first_seconds;
+  double first_max_seconds;
   double seconds;
   double max_seconds;
   uintmax_t progress_calls;
@@ -80,6 +84,14 @@ treesit_budget_parse (TSParser *parser, const TSTree *old_tree,
   double seconds = monotonic_seconds () - start;
 
   stats.parses++;
+  if (!old_tree)
+    {
+      stats.first_parses++;
+      stats.first_seconds += seconds;
+      if (stats.first_max_seconds < seconds)
+	stats.first_max_seconds = seconds;
+      return tree;
+    }
   stats.seconds += seconds;
   if (stats.max_seconds < seconds)
     stats.max_seconds = seconds;
@@ -95,9 +107,12 @@ DEFUN ("treesit-budget-stats", Ftreesit_budget_stats,
        doc: /* Return tree-sitter parse statistics as a plist.
 If optional RESET is non-nil, reset the statistics after reading them.
 
-:parses is the number of parses since the last reset, :seconds their
-total time and :max-seconds the longest.  :over-1ms, :over-3ms and
-:over-8ms count the parses that took longer than 1, 3 and 8 ms.
+:parses is the number of parses since the last reset.  :first-parses
+counts those that had no previous tree, such as the parse when a file
+is visited; :first-seconds is their total time and :first-max-seconds
+the longest.  The other entries cover only reparses: :seconds is their
+total time, :max-seconds the longest, and :over-1ms, :over-3ms and
+:over-8ms count the reparses that took longer than 1, 3 and 8 ms.
 :progress-calls counts the calls of the progress callback, which
 tree-sitter makes about every 100 parse operations from ABI 15 on.  All
 are zero where parses are not timed (MS-Windows).  */)
@@ -106,6 +121,9 @@ are zero where parses are not timed (MS-Windows).  */)
 #if HAVE_TREE_SITTER && !defined WINDOWSNT
   Lisp_Object result
     = list (QCparses, make_uint (stats.parses),
+	    QCfirst_parses, make_uint (stats.first_parses),
+	    QCfirst_seconds, make_float (stats.first_seconds),
+	    QCfirst_max_seconds, make_float (stats.first_max_seconds),
 	    QCseconds, make_float (stats.seconds),
 	    QCmax_seconds, make_float (stats.max_seconds),
 	    QCprogress_calls, make_uint (stats.progress_calls),
@@ -117,6 +135,9 @@ are zero where parses are not timed (MS-Windows).  */)
   return result;
 #else
   return list (QCparses, make_fixnum (0),
+	       QCfirst_parses, make_fixnum (0),
+	       QCfirst_seconds, make_float (0),
+	       QCfirst_max_seconds, make_float (0),
 	       QCseconds, make_float (0),
 	       QCmax_seconds, make_float (0),
 	       QCprogress_calls, make_fixnum (0),
@@ -130,6 +151,9 @@ void
 syms_of_treesit_budget (void)
 {
   DEFSYM (QCparses, ":parses");
+  DEFSYM (QCfirst_parses, ":first-parses");
+  DEFSYM (QCfirst_seconds, ":first-seconds");
+  DEFSYM (QCfirst_max_seconds, ":first-max-seconds");
   DEFSYM (QCseconds, ":seconds");
   DEFSYM (QCmax_seconds, ":max-seconds");
   DEFSYM (QCprogress_calls, ":progress-calls");

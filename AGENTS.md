@@ -296,6 +296,21 @@ When merging GNU master into mac port branches:
 - The mac port `slurp_image` has a different signature (`f, img, filename, &size, type`) vs upstream (`filename, &size, type`)
 - Watch for mac-specific additions in `#if defined` chains (e.g., image transform support lists)
 
+### Budgeted tree-sitter parsing
+
+Fork-local, planned in `.wayfinder/issues/treesit-budgeted-parse.md`. The
+logic lives in `src/treesit_budget.c`; upstream files carry only hooks:
+
+- `src/treesit.c`: `treesit_ensure_parsed` calls `treesit_budget_parse`
+  instead of `ts_parser_parse`, and `syms_of_treesit` ends with
+  `syms_of_treesit_budget ()`.
+- `src/treesit.h`: the declarations of both, after `treesit_node_eq`.
+- `src/Makefile.in`: `treesit_budget.o` after `treesit.o`.
+
+When a GNU sync conflicts in these places, take upstream's version,
+re-apply the hook lines and build. `treesit-budget-stats` reports parse
+counts and times.
+
 ## CI/CD
 
 `.github/workflows/sync-gnu-master-to-nemesis.yml` — weekly sync of GNU master into `nemesis` branch. On conflict, creates a draft PR and uses Claude Code action (Opus) to auto-resolve, then merges.

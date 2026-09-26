@@ -51,7 +51,7 @@
           "]"))
 
 (ert-deftest treesit-budget-stats-times-parses ()
-  "Parse time is summed, its maximum kept, and long parses are counted."
+  "Reparse time is summed, its maximum kept, and long reparses are counted."
   (skip-unless (treesit-language-available-p 'json))
   (with-temp-buffer
     (insert "[1]")
@@ -60,7 +60,7 @@
       (treesit-parser-root-node parser)
       (let ((stats (treesit-budget-stats)))
         (should (equal (plist-get stats :over-1ms) 0))
-        (should (< 0 (plist-get stats :seconds) 0.001)))
+        (should (< 0 (plist-get stats :first-seconds) 0.001)))
       (erase-buffer)
       (insert (treesit-budget-tests--big-json))
       (treesit-parser-root-node parser)
@@ -69,10 +69,34 @@
         (should (equal (plist-get stats :over-1ms) 1))
         (should (equal (plist-get stats :over-3ms) 1))
         (should (equal (plist-get stats :over-8ms) 1))
-        (should (< 0.008 (plist-get stats :max-seconds)
-                   (plist-get stats :seconds))))
+        (should (< 0.008 (plist-get stats :max-seconds)))
+        (should (<= (plist-get stats :max-seconds)
+                    (plist-get stats :seconds))))
       (treesit-budget-stats t)
       (should (equal (plist-get (treesit-budget-stats) :over-1ms) 0)))))
+
+(ert-deftest treesit-budget-stats-separates-first-parses ()
+  "A parse without a previous tree is a first parse, counted apart.
+Only reparses count toward the long-parse counts, since stage 2 keeps
+first parses synchronous."
+  (skip-unless (treesit-language-available-p 'json))
+  (with-temp-buffer
+    (insert (treesit-budget-tests--big-json))
+    (let ((parser (treesit-parser-create 'json)))
+      (treesit-budget-stats t)
+      (treesit-parser-root-node parser)
+      (let ((stats (treesit-budget-stats)))
+        (should (equal (plist-get stats :parses) 1))
+        (should (equal (plist-get stats :first-parses) 1))
+        (should (< 0.008 (plist-get stats :first-max-seconds)))
+        (should (equal (plist-get stats :over-1ms) 0))
+        (should (equal (plist-get stats :max-seconds) 0.0)))
+      (goto-char (point-max))
+      (insert " ")
+      (treesit-parser-root-node parser)
+      (let ((stats (treesit-budget-stats)))
+        (should (equal (plist-get stats :parses) 2))
+        (should (equal (plist-get stats :first-parses) 1))))))
 
 (ert-deftest treesit-budget-parse-reports-progress ()
   "Parses go through the progress callback that budgeting will use.
