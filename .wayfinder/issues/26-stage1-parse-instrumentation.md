@@ -1,10 +1,10 @@
 ---
 id: stage1-parse-instrumentation
 title: "Stage 1: time every tree-sitter parse"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: treesit-budgeted-parse
-assignee: claude
+assignee: null
 ---
 
 ## Scope
