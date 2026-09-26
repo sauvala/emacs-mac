@@ -1974,7 +1974,8 @@ treesit_ensure_parsed (Lisp_Object parser)
   TSTree *tree = XTS_PARSER (parser)->tree;
   TSInput input = XTS_PARSER (parser)->input;
 
-  TSTree *new_tree = treesit_budget_parse (treesit_parser, tree, input);
+  TSTree *new_tree = treesit_budget_parse (XTS_PARSER (parser),
+					   treesit_parser, tree, input);
   /* This should be very rare (impossible, really): it only happens
      when 1) language is not set (impossible in Emacs because the user
      has to supply a language to create a parser), 2) parse canceled
@@ -1986,6 +1987,7 @@ treesit_ensure_parsed (Lisp_Object parser)
     {
       Lisp_Object buf;
       XSETBUFFER (buf, buffer);
+      XTS_PARSER (parser)->within_reparse = false;
       xsignal1 (Qtreesit_parse_error, buf);
     }
 
@@ -2117,6 +2119,7 @@ make_treesit_parser (Lisp_Object buffer, TSParser *parser,
   lisp_parser->deleted = false;
   lisp_parser->need_to_gc_buffer = false;
   lisp_parser->within_reparse = false;
+  lisp_parser->budget_gave_up = false;
   eassert (lisp_parser->visible_beg <= lisp_parser->visible_end);
 
   if (tracks_linecol)

@@ -302,14 +302,23 @@ Fork-local, planned in `.wayfinder/issues/treesit-budgeted-parse.md`. The
 logic lives in `src/treesit_budget.c`; upstream files carry only hooks:
 
 - `src/treesit.c`: `treesit_ensure_parsed` calls `treesit_budget_parse`
-  instead of `ts_parser_parse`, and `syms_of_treesit` ends with
+  (with the Lisp parser as an extra first argument) instead of
+  `ts_parser_parse`, and clears `within_reparse` before signalling
+  `treesit-parse-error`; `make_treesit_parser` initializes
+  `budget_gave_up`; `syms_of_treesit` ends with
   `syms_of_treesit_budget ()`.
-- `src/treesit.h`: the declarations of both, after `treesit_node_eq`.
+- `src/treesit.h`: the `budget_gave_up` field at the end of
+  `struct Lisp_TS_Parser`, and the declarations of both functions after
+  `treesit_node_eq`.
 - `src/Makefile.in`: `treesit_budget.o` after `treesit.o`.
 
 When a GNU sync conflicts in these places, take upstream's version,
 re-apply the hook lines and build. `treesit-budget-stats` reports parse
-counts and times.
+counts and times. A parse that runs past `treesit-budget-parse-limit`
+(2 s) is halted, and its parser then parses an empty input until
+`treesit-budget-retry`, so that a faulty grammar cannot freeze Emacs;
+`test/manual/redisplay-bench/ts-grammar-hang.ts` reproduces such a
+grammar hang.
 
 ## CI/CD
 

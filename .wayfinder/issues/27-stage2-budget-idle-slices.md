@@ -18,13 +18,11 @@ its own trigger ([split decision](../comments/treesit-budgeted-parse/2026-09-26-
 - The progress callback in `src/treesit_budget.c` halts the parse once it
   has run past `treesit-budget-parse-limit` seconds (default 2.0; nil
   disables). The worst legitimate parse measured in stage 1 is 48 ms.
-- A halted parse leaves the old tree in place and resets the TS parser.
-  The parser is then marked as given up: later parses of it signal
-  `treesit-parse-error` at once, without parsing, until the user retries
-  (a command) or the parser is recreated. One message names the buffer
-  and the limit.
-- The give-up must not make redisplay loop on errors: fontification
-  from a given-up parser stops quietly.
+- After a halt the parser gives up: until the user retries (a command)
+  or the parser is recreated, it parses an empty input instead of the
+  buffer. One message names the buffer and the limit.
+- The give-up must not raise errors in redisplay, jit-lock,
+  `syntax-ppss` or mode setup: readers find an empty tree.
 - Fix the `treesit-parse-error` path in `treesit_ensure_parsed`, which
   returns without clearing `within_reparse` and would leave the parser
   silently stale.
@@ -33,12 +31,13 @@ its own trigger ([split decision](../comments/treesit-budgeted-parse/2026-09-26-
 ## Acceptance gate
 
 - The tree-sitter ERT suite passes.
-- A batch test with a tiny limit shows the halt: the error is signalled,
-  the old tree stays usable, and a retry after raising the limit gives
+- A batch test with a tiny limit shows the halt: the parser gives up
+  and yields an empty tree, and a retry after raising the limit gives
   the same tree as a synchronous parse.
 - The hang input `test/manual/redisplay-bench/ts-grammar-hang.ts` with
   the old grammar (`~/.emacs.d/tree-sitter/old-2023/`) stops within the
   limit in a GUI session, with the message, and Emacs stays usable.
+  The user opens it live and confirms.
 - The latency scenarios show no regression.
 - Hooks stay within [Keep the change small in upstream files](24-sync-surface-containment.md).
 

@@ -122,6 +122,9 @@ struct Lisp_TS_Parser
      prevent infinite recursion due to calling after change
      functions.  */
   bool within_reparse;
+  /* Fork-local: true once a parse ran past treesit-budget-parse-limit;
+     see treesit_budget.c.  */
+  bool budget_gave_up;
 };
 
 /* A wrapper around a tree-sitter node.  */
@@ -252,9 +255,11 @@ extern bool treesit_node_eq (Lisp_Object, Lisp_Object);
 
 /* Fork-local budgeted parsing, in treesit_budget.c.  */
 #ifdef WINDOWSNT
-# define treesit_budget_parse ts_parser_parse
+# define treesit_budget_parse(lisp_parser, parser, tree, input) \
+  ts_parser_parse (parser, tree, input)
 #else
-extern TSTree *treesit_budget_parse (TSParser *, const TSTree *, TSInput);
+extern TSTree *treesit_budget_parse (struct Lisp_TS_Parser *, TSParser *,
+				     const TSTree *, TSInput);
 #endif
 
 #endif	/* HAVE_TREE_SITTER */
