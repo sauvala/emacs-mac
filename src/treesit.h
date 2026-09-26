@@ -250,8 +250,16 @@ extern void treesit_delete_query (struct Lisp_TS_Query *);
 extern bool treesit_named_node_p (TSNode);
 extern bool treesit_node_eq (Lisp_Object, Lisp_Object);
 
+/* Fork-local budgeted parsing, in treesit_budget.c.  */
+#ifdef WINDOWSNT
+# define treesit_budget_parse ts_parser_parse
+#else
+extern TSTree *treesit_budget_parse (TSParser *, const TSTree *, TSInput);
+#endif
+
 #endif	/* HAVE_TREE_SITTER */
 
 extern void syms_of_treesit (void);
+extern void syms_of_treesit_budget (void);
 
 #endif /* EMACS_TREESIT_H */

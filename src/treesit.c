@@ -1974,7 +1974,7 @@ treesit_ensure_parsed (Lisp_Object parser)
   TSTree *tree = XTS_PARSER (parser)->tree;
   TSInput input = XTS_PARSER (parser)->input;
 
-  TSTree *new_tree = ts_parser_parse (treesit_parser, tree, input);
+  TSTree *new_tree = treesit_budget_parse (treesit_parser, tree, input);
   /* This should be very rare (impossible, really): it only happens
      when 1) language is not set (impossible in Emacs because the user
      has to supply a language to create a parser), 2) parse canceled
@@ -5662,4 +5662,5 @@ depending on customization of `treesit-enabled-modes'.  */);
 	);
 #endif
 
+  syms_of_treesit_budget ();
 }

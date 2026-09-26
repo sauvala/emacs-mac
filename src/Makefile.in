@@ -480,7 +480,7 @@ base_obj = dispnew.o frame.o scroll.o xdisp.o menu.o $(XMENU_OBJ) window.o     \
 	doprnt.o intervals.o textprop.o composite.o xml.o lcms.o $(NOTIFY_OBJ) \
 	$(XWIDGETS_OBJ) 						       \
 	profiler.o decompress.o 					       \
-	thread.o systhread.o sqlite.o  treesit.o			       \
+	thread.o systhread.o sqlite.o  treesit.o treesit_budget.o	       \
 	itree.o json.o 							       \
 	rope.o rope_node.o rope_node_edit.o rope_chunk.o rope_summary.o rope_utf8.o \
 	rope_cursor.o ropebuf.o wrapmap.o				       \
