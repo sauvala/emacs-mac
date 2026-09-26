@@ -52,6 +52,7 @@ Each stage has its tests, its live check and a go/no-go gate.
 - [Inventory every reader of a parser tree](20-treesit-tree-access-inventory.md): only `treesit--pre-redisplay` and jit-lock fontification can skip waiting; deferral must cover the whole jit-lock chunk (indent-bars and `syntax-propertize` read the tree inside it); `syntax-ppss` after an edit forces the parse; install finished trees only at a safe point ([resolution](../comments/treesit-tree-access-inventory/2026-09-25-resolution.md))
 - [Tree-sitter latency scenarios for the benchmark harness](21-ts-latency-scenarios.md): `ts-perf.el` added; typing `"` at a line start reparses in 4-5 ms at 50-100 KB, 9 ms at 240 KB and 63 ms in an 800 KB docstring-heavy Python file, while keystrokes and scrolls stay 1-3 ms ([resolution](../comments/ts-latency-scenarios/2026-09-25-resolution.md))
 - [What redisplay shows while a parse is pending](22-pending-parse-display-policy.md): stale faces stay; jit-lock defers the whole chunk while the primary parser has a pending parse; only `treesit--pre-redisplay` and idle slices make budgeted attempts, every other reader finishes the parse; completion runs the existing notifiers and re-arms deferred chunks; stage 2 covers buffers with only a primary parser without included ranges, and the first parse stays synchronous ([decision](../comments/pending-parse-display-policy/2026-09-26-decision.md))
+- [How a halted parse continues on the Lisp thread](23-idle-slice-continuation.md): a re-arming Lisp idle timer runs 2 ms slices back to back until input arrives; an edit resets and restarts the parse; redisplay starts parses but never continues one; a 0.5 s staleness deadline, counted across restarts, makes the next attempt unbudgeted; completion reuses the notifiers and the post-timer redisplay ([decision](../comments/idle-slice-continuation/2026-09-26-decision.md))
 
 ## Not yet specified
 
@@ -71,8 +72,7 @@ Each stage has its tests, its live check and a go/no-go gate.
   stage 2 and revisiting with the stage-2 numbers.
 - **User-facing knobs.** Names, defaults and whether they are
   `defcustom`s, once stage two has numbers. Ticket 23 proposes a budget
-  and slice of 2 ms and a staleness deadline of 0.5 s as starting values
-  (awaiting confirmation).
+  and slice of 2 ms and a staleness deadline of 0.5 s as starting values.
 
 ## Out of scope
 

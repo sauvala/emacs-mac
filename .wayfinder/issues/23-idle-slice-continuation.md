@@ -1,10 +1,10 @@
 ---
 id: idle-slice-continuation
 title: "How a halted parse continues on the Lisp thread"
-status: open
+status: closed
 labels: ["wayfinder:grilling"]
 parent: treesit-budgeted-parse
-assignee: claude
+assignee: null
 ---
 
 ## Question
