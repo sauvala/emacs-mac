@@ -1,10 +1,10 @@
 ---
 id: stage2-budget-idle-slices
 title: "Stage 2: cap runaway parses"
-status: open
+status: closed
 labels: ["wayfinder:task"]
 parent: treesit-budgeted-parse
-assignee: claude
+assignee: null
 ---
 
 ## Scope
