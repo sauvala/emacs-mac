@@ -46,3 +46,15 @@ _Avoid_: Stale tree
 **Waiter**:
 Any other caller that needs the tree. A waiter finishes the parse without a
 budget.
+
+**Idle slice**:
+One budget's worth of work on a pending parse, done while Emacs waits for
+input.
+
+**Restart**:
+Discarding a pending parse's work because the buffer changed, so the next
+budgeted attempt starts again from the edited tree.
+
+**Staleness deadline**:
+How long a buffer may keep an unfinished parse, counting across restarts,
+before its next attempt runs without a budget.

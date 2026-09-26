@@ -4,7 +4,7 @@ title: "How a halted parse continues on the Lisp thread"
 status: open
 labels: ["wayfinder:grilling"]
 parent: treesit-budgeted-parse
-assignee: null
+assignee: claude
 ---
 
 ## Question

@@ -70,7 +70,9 @@ Each stage has its tests, its live check and a go/no-go gate.
   (ticket 22) recommends keeping it synchronous in
   stage 2 and revisiting with the stage-2 numbers.
 - **User-facing knobs.** Names, defaults and whether they are
-  `defcustom`s (budget, slice size), once stage two has numbers.
+  `defcustom`s, once stage two has numbers. Ticket 23 proposes a budget
+  and slice of 2 ms and a staleness deadline of 0.5 s as starting values
+  (awaiting confirmation).
 
 ## Out of scope
 
