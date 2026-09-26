@@ -4,7 +4,7 @@ title: "Keep the change small in upstream files"
 status: open
 labels: ["wayfinder:grilling"]
 parent: treesit-budgeted-parse
-assignee: null
+assignee: claude
 ---
 
 ## Question

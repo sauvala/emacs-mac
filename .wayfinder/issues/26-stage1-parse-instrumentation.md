@@ -16,6 +16,7 @@ Switch `treesit_ensure_parsed` to `ts_parser_parse_with_options` (optional load,
 - The tree-sitter ERT suite passes.
 - The latency scenarios show no regression.
 - Stats from a day of the user's normal editing show how often parses exceed 1, 3 and 8 ms.
+- The code follows the file layout and hooks decided in [Keep the change small in upstream files](24-sync-surface-containment.md), and AGENTS.md lists those hooks.
 
 ## Blocked by
 
