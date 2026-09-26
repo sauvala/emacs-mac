@@ -14,8 +14,10 @@ An implementation-ready, staged plan for roadmap item 13
 from blocking a keystroke or a redisplay. The stages are:
 
 1. Instrument and time parses, with no behaviour change.
-2. Budget the parse, and continue a halted parse in idle slices on the
-   Lisp thread.
+2. Cap runaway parses: halt a parse past a hard limit and give up on
+   that parser until the user retries.
+2b. Only if stats or the user call for it, budget the parse and continue
+   a halted parse in idle slices on the Lisp thread.
 3. Only if a measured gate says so, resume a halted parse on a worker
    thread.
 
@@ -56,10 +58,11 @@ Each stage has its tests, its live check and a go/no-go gate.
 - [Keep the change small in upstream files](24-sync-surface-containment.md): logic lives in `src/treesit_budget.c` and `lisp/treesit-budget.el`; upstream files get one call in `treesit_ensure_parsed`, a small halted-return block, one line each in parser deletion, `syms_of_treesit`, the parser struct and `Makefile.in`, and about three lines in `treesit--pre-redisplay`; edits are detected at resume by comparing `CHARS_MODIFF`, narrowing and ranges; no configure option; generic defer hooks in fork-owned `jit-lock.el` ([decision](../comments/sync-surface-containment/2026-09-26-decision.md))
 - [Gate for building the worker-thread stage](25-worker-stage-gate.md): build it only if a day of stage-2 stats shows more than 10 overruns above 8 ms, or a p95 pending age above 250 ms for parses that were not restarted, or the user notices either; restarts and waiters do not count because a worker cannot fix them; otherwise stage 2 is the end state ([decision](../comments/worker-stage-gate/2026-09-26-decision.md))
 - [Stage 1: time every tree-sitter parse](26-stage1-parse-instrumentation.md): `treesit-budget-stats` times every parse with no measurable cost; a typing replay stood in for the editing day: the user's files reparse past 3 ms in 0.05% of edits, large repositories past 8 ms in 0.65% (max 48 ms); a 600 s hang came from an old TypeScript grammar, now replaced, and its reduced input is kept for stage 2's halt test ([resolution](../comments/stage1-parse-instrumentation/2026-09-26-resolution.md))
+- [Split stage 2](27-stage2-budget-idle-slices.md): stage 2 is now only a hard cap on parse time (a freeze guard; every other editor bounds parses, upstream Emacs does not); budgeting and idle slices become [stage 2b](28-stage2b-idle-slices.md), started only if a day of stats shows more than 10 reparses above 8 ms or the user notices hitches ([decision](../comments/treesit-budgeted-parse/2026-09-26-stage2-split.md))
 
 ## Not yet specified
 
-- **Worker-thread stage.** Its details wait for the gate on the stage-two
+- **Worker-thread stage.** Its details wait for the gate on the stage-2b
   results:
   - the text snapshot format;
   - parser ownership handoff and how waiters join the worker;
@@ -74,7 +77,7 @@ Each stage has its tests, its live check and a go/no-go gate.
   (ticket 22) recommends keeping it synchronous in
   stage 2 and revisiting with the stage-2 numbers.
 - **User-facing knobs.** Names, defaults and whether they are
-  `defcustom`s, once stage two has numbers. Ticket 23 proposes a budget
+  `defcustom`s, once stage 2b has numbers. Ticket 23 proposes a budget
   and slice of 2 ms and a staleness deadline of 0.5 s as starting values.
 
 ## Out of scope
