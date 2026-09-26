@@ -1,10 +1,10 @@
 ---
 id: worker-stage-gate
 title: "Gate for building the worker-thread stage"
-status: open
+status: closed
 labels: ["wayfinder:grilling"]
 parent: treesit-budgeted-parse
-assignee: claude
+assignee: null
 ---
 
 ## Question
