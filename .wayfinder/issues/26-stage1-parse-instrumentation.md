@@ -4,7 +4,7 @@ title: "Stage 1: time every tree-sitter parse"
 status: open
 labels: ["wayfinder:task"]
 parent: treesit-budgeted-parse
-assignee: null
+assignee: claude
 ---
 
 ## Scope
