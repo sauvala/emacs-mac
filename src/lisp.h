@@ -286,8 +286,9 @@ DEFINE_GDB_SYMBOL_END (VALMASK)
    If a struct is always GC-aligned (either by the GC, or via
    allocation in a containing union that has GCALIGNED_UNION_MEMBER)
    and does not contain a GC-aligned struct or union, putting
-   GCALIGNED_STRUCT after its closing '}' can help the compiler
-   generate better code.  Also, such structs should be added to the
+   GCALIGNED_STRUCT after its closing '}', though not required for correctness,
+   can help the compiler generate better code on some platforms.
+   Also, as these structs might be GC allocated, they should be added to the
    emacs_align_type union in alloc.c.
 
    Although these macros are reasonably portable, they are not
@@ -2405,7 +2406,7 @@ struct Lisp_Obarray
 
   unsigned size_bits;  /* log2(size of buckets vector) */
   unsigned count;      /* number of symbols in obarray */
-};
+} GCALIGNED_STRUCT;
 
 INLINE bool
 OBARRAYP (Lisp_Object a)
@@ -4669,7 +4670,7 @@ void *hash_table_alloc_bytes (ptrdiff_t nbytes) ATTRIBUTE_MALLOC_SIZE ((1));
 void hash_table_free_bytes (void *p, ptrdiff_t nbytes);
 
 /* Defined in gmalloc.c.  */
-#if !defined DOUG_LEA_MALLOC && !defined SYSTEM_MALLOC
+#ifndef SYSTEM_MALLOC
 extern size_t __malloc_extra_blocks;
 #endif
 #if !HAVE_DECL_ALIGNED_ALLOC
