@@ -122,10 +122,14 @@ struct Lisp_TS_Parser
      prevent infinite recursion due to calling after change
      functions.  */
   bool within_reparse;
+<<<<<<< HEAD
   /* Fork-local: true once a parse ran past treesit-budget-parse-limit;
      see treesit_budget.c.  */
   bool budget_gave_up;
 };
+=======
+} GCALIGNED_STRUCT;
+>>>>>>> gnu/master
 
 /* A wrapper around a tree-sitter node.  */
 struct Lisp_TS_Node
@@ -142,7 +146,7 @@ struct Lisp_TS_Node
      can make sure the node is not outdated when we access its
      information.  */
   ptrdiff_t timestamp;
-};
+} GCALIGNED_STRUCT;
 
 /* A compiled tree-sitter query.
 
@@ -172,7 +176,7 @@ struct Lisp_TS_Query
      to be NULL-able because it makes dumping and loading queries
      easy.  */
   TSQueryCursor *cursor;
-};
+} GCALIGNED_STRUCT;
 
 INLINE bool
 TS_PARSERP (Lisp_Object x)
