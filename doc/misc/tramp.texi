@@ -1028,6 +1028,21 @@ If the @command{podman} program isn't found in your @env{PATH}
 environment variable, you can tell @value{tramp} its absolute path via
 the user option @code{tramp-podman-program}.
 
+@cindex method @option{wslc}
+@cindex @option{wslc} method
+@item @option{wslc}
+
+@c Command "wslc" exists since WSL 2.9.3.
+WSL container is the implementation on MS Windows.  @value{tramp} uses
+the method @option{wslc}.
+
+@vindex tramp-wslc-program
+If the @command{wslc} program isn't found in your @env{PATH}
+environment variable, you can tell @value{tramp} its absolute path via
+the user option @code{tramp-wslc-program}.
+
+This is an optional method, @pxref{Optional methods}.
+
 @cindex method @option{kubernetes}
 @cindex @option{kubernetes} method
 @item @option{kubernetes}
