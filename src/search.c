@@ -107,6 +107,42 @@ static unsigned char *linearize_cache_buf = NULL;
 static ptrdiff_t linearize_cache_size = 0;
 static struct buffer *linearize_cache_owner = NULL;
 static ptrdiff_t linearize_cache_modiff = 0;
+/* Byte range of the owner's text that the cache holds.  */
+static ptrdiff_t linearize_cache_beg_byte = 0;
+static ptrdiff_t linearize_cache_end_byte = 0;
+
+/* Return a contiguous copy of the current buffer's rope text from
+   BEGV_BYTE to ZV_BYTE, reusing the cache when it holds that range.
+   Narrowing does not change MODIFF, so the range must be checked.  */
+static unsigned char *
+rope_linearize_cached (void)
+{
+  ptrdiff_t visible_bytes = ZV_BYTE - BEGV_BYTE;
+
+  if (linearize_cache_owner == current_buffer
+      && linearize_cache_modiff == MODIFF
+      && linearize_cache_beg_byte <= BEGV_BYTE
+      && ZV_BYTE <= linearize_cache_end_byte)
+    return linearize_cache_buf + (BEGV_BYTE - linearize_cache_beg_byte);
+
+  if (linearize_cache_buf && visible_bytes > linearize_cache_size)
+    {
+      xfree (linearize_cache_buf);
+      linearize_cache_buf = NULL;
+    }
+  if (!linearize_cache_buf)
+    {
+      linearize_cache_buf = xmalloc (visible_bytes + 1);
+      linearize_cache_size = visible_bytes;
+    }
+  rope_get_text_emacs (BEGV_BYTE, visible_bytes, (char *) linearize_cache_buf);
+  linearize_cache_buf[visible_bytes] = 0;
+  linearize_cache_owner = current_buffer;
+  linearize_cache_modiff = MODIFF;
+  linearize_cache_beg_byte = BEGV_BYTE;
+  linearize_cache_end_byte = ZV_BYTE;
+  return linearize_cache_buf;
+}
 
 static void
 rope_linearize_cleanup (void *arg)
@@ -130,7 +166,6 @@ static void
 rope_linearize_begin (struct rope_linearize_context *ctx)
 {
   struct buffer *buf = current_buffer;
-  ptrdiff_t visible_bytes = ZV_BYTE - BEGV_BYTE;
 
   ctx->buf = buf;
   ctx->saved_beg = buf->text->beg;
@@ -138,32 +173,7 @@ rope_linearize_begin (struct rope_linearize_context *ctx)
   ctx->saved_gpt_byte = buf->text->gpt_byte;
   ctx->saved_gap_size = buf->text->gap_size;
   ctx->free_linearized = false;
-
-  /* Reuse cache if valid.  */
-  if (buf == linearize_cache_owner
-      && MODIFF == linearize_cache_modiff
-      && visible_bytes <= linearize_cache_size)
-    {
-      ctx->linearized = linearize_cache_buf;
-    }
-  else
-    {
-      /* Allocate new buffer (or resize cache).  */
-      if (linearize_cache_buf && visible_bytes > linearize_cache_size)
-        {
-          xfree (linearize_cache_buf);
-          linearize_cache_buf = NULL;
-        }
-      if (!linearize_cache_buf)
-        {
-          linearize_cache_buf = xmalloc (visible_bytes + 1);
-          linearize_cache_size = visible_bytes;
-        }
-      ctx->linearized = linearize_cache_buf;
-      rope_get_text_emacs (BEGV_BYTE, visible_bytes, (char *) ctx->linearized);
-      linearize_cache_owner = buf;
-      linearize_cache_modiff = MODIFF;
-    }
+  ctx->linearized = rope_linearize_cached ();
 
   /* Temporarily switch to gap-buffer mode.  */
   buf->text->beg = ctx->linearized - (BEGV_BYTE - BEG_BYTE);
@@ -724,37 +734,7 @@ fast_looking_at (Lisp_Object regexp, ptrdiff_t pos, ptrdiff_t pos_byte,
 	     bidi_find_paragraph_start calls us in a tight loop.  */
 	  ptrdiff_t visible_bytes = ZV_BYTE - BEGV_BYTE;
 	  if (visible_bytes > 0)
-	    {
-	      if (linearize_cache_owner == current_buffer
-		  && linearize_cache_modiff == MODIFF
-		  && visible_bytes <= linearize_cache_size
-		  && linearize_cache_buf)
-		{
-		  /* Cache hit — reuse linearized data.  */
-		  p1 = linearize_cache_buf;
-		}
-	      else
-		{
-		  /* Cache miss — linearize and cache.  */
-		  if (linearize_cache_buf
-		      && visible_bytes > linearize_cache_size)
-		    {
-		      xfree (linearize_cache_buf);
-		      linearize_cache_buf = NULL;
-		    }
-		  if (!linearize_cache_buf)
-		    {
-		      linearize_cache_buf = xmalloc (visible_bytes + 1);
-		      linearize_cache_size = visible_bytes;
-		    }
-		  rope_get_text_emacs (BEGV_BYTE, visible_bytes,
-				      (char *) linearize_cache_buf);
-		  linearize_cache_buf[visible_bytes] = 0;
-		  linearize_cache_owner = current_buffer;
-		  linearize_cache_modiff = MODIFF;
-		  p1 = linearize_cache_buf;
-		}
-	    }
+	    p1 = rope_linearize_cached ();
 	  else
 	    p1 = NULL;
 	  s1 = visible_bytes;

@@ -509,3 +509,36 @@ SOURCE argument to pass."
             (push (treesit-node-string root) trees)))))
     (should (equal (car trees) (cadr trees)))
     (should-not (string-match-p "ERROR\\|MISSING" (car trees)))))
+
+(ert-deftest rope-test-regexp-search-after-narrowing ()
+  "Regexp searches must read the current narrowing, not a stale copy."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (with-temp-buffer
+    (buffer-enable-rope)
+    (insert "aaaa bbbb äöäö")
+    (save-restriction
+      (narrow-to-region 1 5)
+      (goto-char (point-min))
+      (should (looking-at "[a]")))
+    ;; Same size, other region: the regexp path must not reuse "aaaa".
+    (save-restriction
+      (narrow-to-region 6 10)
+      (goto-char (point-min))
+      (should (looking-at "[b]"))
+      (should (= (re-search-forward "[b]+" nil t) 10))
+      (goto-char (point-min))
+      (should-not (re-search-forward "[a]" nil t)))
+    ;; Wider region that fits in the earlier allocation.
+    (save-restriction
+      (narrow-to-region 1 3)
+      (goto-char (point-min))
+      (should (re-search-forward "[a]" nil t)))
+    (save-restriction
+      (narrow-to-region 1 10)
+      (goto-char (point-min))
+      (should (= (re-search-forward "[b]+" nil t) 10)))
+    ;; Multibyte text after an ASCII region of the same byte size.
+    (save-restriction
+      (narrow-to-region 11 13)
+      (goto-char (point-min))
+      (should (= (re-search-forward "^[äö]+" nil t) 13)))))
