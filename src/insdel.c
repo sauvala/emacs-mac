@@ -1650,6 +1650,172 @@ adjust_after_insert (ptrdiff_t from, ptrdiff_t from_byte,
   adjust_after_replace (from, from_byte, Qnil, newlen, len_byte);
 }
 
+#ifdef USE_ROPE
+/* Return the replacement text NEW of replace_range as a string, if the
+   gap-buffer code there cannot handle it.  That code copies the text
+   straight out of the source buffer's memory into the current buffer's
+   gap, which is wrong when either buffer stores its text in a rope.
+   Otherwise return NEW unchanged.  */
+
+static Lisp_Object
+rope_replace_source_string (Lisp_Object new)
+{
+  struct buffer *buf;
+  ptrdiff_t beg, end;
+
+  if (STRINGP (new))
+    return new;
+  if (BUFFERP (new))
+    {
+      buf = XBUFFER (new);
+      beg = BUF_BEGV (buf);
+      end = BUF_ZV (buf);
+    }
+  else
+    {
+      CHECK_VECTOR (new);
+      /* Let `Faref' signal an error if it's too small.  */
+      Lisp_Object insend = Faref (new, make_fixnum (2));
+      CHECK_BUFFER (AREF (new, 0));
+      CHECK_FIXNUM (AREF (new, 1));
+      CHECK_FIXNUM (insend);
+      buf = XBUFFER (AREF (new, 0));
+      beg = XFIXNUM (AREF (new, 1));
+      end = XFIXNUM (insend);
+    }
+  if (!current_buffer->text->using_rope && !buf->text->using_rope)
+    return new;
+
+  specpdl_ref count = SPECPDL_INDEX ();
+  record_unwind_current_buffer ();
+  set_buffer_internal (buf);
+  Lisp_Object string = make_buffer_string (beg, end, true);
+  return unbind_to (count, string);
+}
+
+/* replace_range for a current buffer that stores its text in a rope.
+   NEW is a string.  Do the same bookkeeping as the gap-buffer code in
+   replace_range, but edit the rope instead of the gap.  */
+
+static void
+rope_replace_range (ptrdiff_t from, ptrdiff_t to, Lisp_Object new,
+		    bool run_mod_hooks, bool inherit,
+		    bool adjust_match_data)
+{
+  /* Rope buffers are always multibyte.  */
+  if (!STRING_MULTIBYTE (new))
+    new = string_to_multibyte (new);
+
+  ptrdiff_t inschars = SCHARS (new);
+  ptrdiff_t insbytes = SBYTES (new);
+  ptrdiff_t from_byte, to_byte, nchars_del, nbytes_del;
+  Lisp_Object deletion = Qnil;
+
+  check_markers ();
+
+  if (run_mod_hooks)
+    {
+      ptrdiff_t range_length = to - from;
+      prepare_to_modify_buffer (from, to, &from);
+      to = from + range_length;
+    }
+
+  if (from < BEGV)
+    from = BEGV;
+  if (to > ZV)
+    to = ZV;
+
+  from_byte = CHAR_TO_BYTE (from);
+  to_byte = CHAR_TO_BYTE (to);
+  nchars_del = to - from;
+  nbytes_del = to_byte - from_byte;
+
+  if (nbytes_del <= 0 && inschars == 0)
+    return;
+
+#ifdef HAVE_TREE_SITTER
+  struct ts_linecol start_linecol
+    = treesit_linecol_maybe (from, from_byte,
+			     BUF_TS_LINECOL_POINT (current_buffer));
+  struct ts_linecol old_end_linecol
+    = treesit_linecol_maybe (to, to_byte,
+			     BUF_TS_LINECOL_POINT (current_buffer));
+#endif
+
+  /* Tell display engine what changed (normally done by gap movement).  */
+  BUF_COMPUTE_UNCHANGED (current_buffer, from, to);
+
+  if (! EQ (BVAR (current_buffer, undo_list), Qt))
+    deletion = make_buffer_string_both (from, from_byte, to, to_byte, 1);
+
+  if (nbytes_del > 0)
+    {
+      if (rope_delete_emacs (from_byte, nbytes_del) != 0)
+	error ("Rope deletion failed");
+      ZV -= nchars_del;
+      Z -= nchars_del;
+      ZV_BYTE -= nbytes_del;
+      Z_BYTE -= nbytes_del;
+    }
+
+  if (inschars > 0)
+    {
+      if (rope_insert_emacs (from_byte, (const char *) SDATA (new),
+			     insbytes, inschars) != 0)
+	error ("Rope insertion failed");
+      ZV += inschars;
+      Z += inschars;
+      ZV_BYTE += insbytes;
+      Z_BYTE += insbytes;
+    }
+
+  /* Keep GPT at Z (no gap in rope mode).  */
+  GPT = Z;
+  GPT_BYTE = Z_BYTE;
+
+  /* Record the insertion first, so that undo deletes before it
+     inserts; see replace_range.  */
+  if (!NILP (deletion))
+    {
+      record_insert (from + SCHARS (deletion), inschars);
+      record_delete (from, deletion, false);
+    }
+
+  adjust_markers_for_replace (from, from_byte, nchars_del, nbytes_del,
+			      inschars, insbytes);
+
+  offset_intervals (current_buffer, from, inschars - nchars_del);
+  graft_intervals_into_buffer (string_intervals (new), from, inschars,
+			       current_buffer, inherit);
+
+#ifdef HAVE_TREE_SITTER
+  treesit_record_change (from_byte, to_byte, from_byte + insbytes,
+			 start_linecol, old_end_linecol, from + inschars);
+#endif
+
+  /* Relocate point as if it were a marker.  */
+  if (from < PT
+      /* Mimic 'insert' when FROM==TO==PT).  */
+      || PT == to)
+    adjust_point ((from + inschars - min (PT, to)),
+		  (from_byte + insbytes - min (PT_BYTE, to_byte)));
+
+  check_markers ();
+
+  modiff_incr (&MODIFF, nchars_del + inschars);
+  CHARS_MODIFF = MODIFF;
+
+  if (adjust_match_data)
+    update_search_regs (from, to, from + inschars);
+
+  if (run_mod_hooks)
+    {
+      signal_after_change (from, nchars_del, inschars);
+      update_compositions (from, from + inschars, CHECK_BORDER);
+    }
+}
+#endif
+
 /* Replace the text from character positions FROM to TO with the
    replacement text NEW.  NEW could either be a string, a buffer, or
    a vector [BUFFER BEG END], where BUFFER is the buffer with the replacement
@@ -1674,103 +1840,20 @@ replace_range (ptrdiff_t from, ptrdiff_t to, Lisp_Object new,
   ptrdiff_t inschars;
   ptrdiff_t insbeg;
   struct buffer *insbuf;
+#ifdef USE_ROPE
+  new = rope_replace_source_string (new);
+  if (current_buffer->text->using_rope)
+    {
+      rope_replace_range (from, to, new, run_mod_hooks, inherit,
+			  adjust_match_data);
+      return;
+    }
+#endif
   if (STRINGP (new))
     {
       insbuf = NULL;
       insbeg = 0;
       inschars = SCHARS (new);
-#ifdef USE_ROPE
-      /* For rope buffers, implement replace as atomic delete + insert.  */
-      if (current_buffer->text->using_rope)
-	{
-	  ptrdiff_t nchars_del = to - from;
-	  ptrdiff_t nbytes_del, from_byte, to_byte;
-	  ptrdiff_t insbytes = SBYTES (new);
-	  Lisp_Object deletion = Qnil;
-
-	  check_markers ();
-
-	  if (run_mod_hooks)
-	    {
-	      prepare_to_modify_buffer (from, to, &from);
-	      to = from + nchars_del;
-	    }
-
-	  /* Tell display engine what changed.  */
-	  BUF_COMPUTE_UNCHANGED (current_buffer, from, to);
-
-	  if (from < BEGV)
-	    from = BEGV;
-	  if (to > ZV)
-	    to = ZV;
-
-	  from_byte = CHAR_TO_BYTE (from);
-	  to_byte = CHAR_TO_BYTE (to);
-	  nchars_del = to - from;
-	  nbytes_del = to_byte - from_byte;
-
-	  if (nbytes_del <= 0 && inschars == 0)
-	    return;
-
-	  /* Save text for undo before deleting.  */
-	  if (! EQ (BVAR (current_buffer, undo_list), Qt))
-	    deletion = make_buffer_string_both (from, from_byte,
-					to, to_byte, 1);
-
-	  /* Delete the old text.  */
-	  if (nbytes_del > 0)
-	    {
-	      if (rope_delete_emacs (from_byte, nbytes_del) != 0)
-		error ("Rope deletion failed");
-	      ZV -= nchars_del;
-	      Z -= nchars_del;
-	      ZV_BYTE -= nbytes_del;
-	      Z_BYTE -= nbytes_del;
-	      GPT = Z;
-	      GPT_BYTE = Z_BYTE;
-	    }
-
-	  /* Insert the new text.  */
-	  if (inschars > 0)
-	    {
-	      if (rope_insert_emacs (from_byte,
-				     (const char *) SDATA (new),
-				     insbytes, inschars) != 0)
-		error ("Rope insertion failed");
-	      ZV += inschars;
-	      Z += inschars;
-	      ZV_BYTE += insbytes;
-	      Z_BYTE += insbytes;
-	      GPT = Z;
-	      GPT_BYTE = Z_BYTE;
-	    }
-
-	  /* Record for undo.  */
-	  if (!NILP (deletion))
-	    {
-	      record_insert (from + SCHARS (deletion), inschars);
-	      record_delete (from, deletion, false);
-	    }
-
-	  /* Adjust markers.  */
-	  adjust_markers_for_replace (from, from_byte, nchars_del,
-				      nbytes_del, inschars, insbytes);
-
-	  offset_intervals (current_buffer, from, inschars - nchars_del);
-	  INTERVAL intervals = string_intervals (new);
-	  graft_intervals_into_buffer (intervals, from, inschars,
-				       current_buffer, inherit);
-
-	  if (adjust_match_data)
-	    update_search_regs (from, to, from + inschars);
-
-	  signal_after_change (from, nchars_del, inschars);
-	  update_compositions (from, from + inschars, CHECK_BORDER);
-
-	  check_markers ();
-	  return;
-	}
-#endif
     }
   else if (BUFFERP (new))
     {

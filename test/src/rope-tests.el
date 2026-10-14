@@ -389,3 +389,123 @@
     (insert (unibyte-string #x80 #xff #xc3 #xa9))
     (should (= (buffer-size) 4))
     (should (= (char-after 4) #xa9))))
+
+(defun rope-tests--gap-vs-rope (init fn)
+  "Run FN in a gap buffer and in a rope buffer, both holding INIT.
+Assert that both end in the same observable state."
+  (let (states)
+    (dolist (rope '(nil t))
+      (with-temp-buffer
+        (when rope (should (buffer-enable-rope)))
+        (insert init)
+        (set-buffer-modified-p nil)
+        (funcall fn)
+        (should (eq (buffer-using-rope-p) rope))
+        (push (list (buffer-string) (buffer-size)
+                    (position-bytes (point-max)) (point)
+                    (buffer-modified-p))
+              states)))
+    (should (equal (car states) (cadr states)))))
+
+(defconst rope-tests--table "aaa\n| a × b | c |\n|---|---|\n| −1 | Δ |\nzzz\n"
+  "Multibyte pipe table between two plain lines.")
+
+(defconst rope-tests--table-aligned "aaa\n|a×b|c|\n|---|---|\n|−1|Δ|\nzzz\n"
+  "`rope-tests--table' with the cell padding removed.")
+
+(defun rope-tests--replace-table (source-fn)
+  "Replace the table in the current buffer via `replace-region-contents'.
+SOURCE-FN receives a buffer holding the new table text and returns the
+SOURCE argument to pass."
+  (let ((beg 5) (end (- (point-max) 4))
+        (src (generate-new-buffer "rope-tests-src")))
+    (unwind-protect
+        (progn
+          (with-current-buffer src
+            (insert (substring rope-tests--table-aligned 4 -4)))
+          (goto-char end)
+          (replace-region-contents beg end (funcall source-fn src))
+          (should (equal (buffer-string) rope-tests--table-aligned)))
+      (kill-buffer src))))
+
+(ert-deftest rope-test-replace-region-contents-buffer-source ()
+  "`replace-region-contents' with a buffer source must edit the rope."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (rope-tests--gap-vs-rope
+   rope-tests--table
+   (lambda () (rope-tests--replace-table #'identity))))
+
+(ert-deftest rope-test-replace-region-contents-vector-source ()
+  "`replace-region-contents' with a [BUFFER BEG END] source."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (rope-tests--gap-vs-rope
+   rope-tests--table
+   (lambda ()
+     (rope-tests--replace-table
+      (lambda (src)
+        (with-current-buffer src
+          (goto-char (point-min))
+          (insert "xx")
+          (goto-char (point-max))
+          (insert "yy")
+          (vector src 3 (- (point-max) 2))))))))
+
+(ert-deftest rope-test-replace-region-contents-string-source ()
+  "`replace-region-contents' with a string source."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (rope-tests--gap-vs-rope
+   rope-tests--table
+   (lambda ()
+     (rope-tests--replace-table
+      (lambda (src) (with-current-buffer src (buffer-string)))))))
+
+(ert-deftest rope-test-replace-region-contents-rope-source ()
+  "A gap buffer must be able to take its replacement from a rope buffer."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (rope-tests--gap-vs-rope
+   rope-tests--table
+   (lambda ()
+     (let ((src (generate-new-buffer "rope-tests-src")))
+       (unwind-protect
+           (progn
+             (with-current-buffer src
+               (should (buffer-enable-rope))
+               (insert (substring rope-tests--table-aligned 4 -4)))
+             (replace-region-contents 5 (- (point-max) 4) src)
+             (should (equal (buffer-string) rope-tests--table-aligned)))
+         (kill-buffer src))))))
+
+(ert-deftest rope-test-replace-match-unibyte-string ()
+  "Replacing with a unibyte string must store raw bytes as characters."
+  (skip-unless (fboundp 'buffer-enable-rope))
+  (rope-tests--gap-vs-rope
+   "a b é c"
+   (lambda ()
+     (goto-char (point-min))
+     (re-search-forward "b")
+     (replace-match (unibyte-string #x80 #xff) t t)
+     (should (= (char-before) #x3fffff)))))
+
+(ert-deftest rope-test-replace-region-contents-tree-sitter ()
+  "Tree-sitter must see edits made by `replace-region-contents'."
+  (skip-unless (and (fboundp 'buffer-enable-rope)
+                    (treesit-available-p)
+                    (treesit-language-available-p 'json)))
+  (let (trees)
+    (dolist (rope '(nil t))
+      (with-temp-buffer
+        (when rope (should (buffer-enable-rope)))
+        (insert "[1, 2, {\"a\": 3}]")
+        (let ((parser (treesit-parser-create 'json)))
+          (treesit-parser-root-node parser)
+          (let ((src (generate-new-buffer "rope-tests-src")))
+            (unwind-protect
+                (progn
+                  (with-current-buffer src (insert "[1,2,{\"a\":3},4]"))
+                  (replace-region-contents (point-min) (point-max) src))
+              (kill-buffer src)))
+          (let ((root (treesit-parser-root-node parser)))
+            (should (= (treesit-node-end root) (point-max)))
+            (push (treesit-node-string root) trees)))))
+    (should (equal (car trees) (cadr trees)))
+    (should-not (string-match-p "ERROR\\|MISSING" (car trees)))))
