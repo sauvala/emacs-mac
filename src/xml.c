@@ -206,6 +206,7 @@ parse_region (Lisp_Object start, Lisp_Object end, Lisp_Object base_url,
       burl = SSDATA (base_url);
     }
 
+<<<<<<< HEAD
 #ifdef USE_ROPE
   char *rope_buf = NULL;
   if (current_buffer->text->using_rope)
@@ -223,6 +224,10 @@ parse_region (Lisp_Object start, Lisp_Object end, Lisp_Object base_url,
       buftext = BYTE_POS_ADDR (istart_byte);
     }
 #ifdef REL_ALLOC
+=======
+  buftext = BYTE_POS_ADDR (istart_byte);
+#ifdef GMALLOC_REL_ALLOC
+>>>>>>> gnu/master
   /* Prevent ralloc.c from relocating the current buffer while libxml2
      functions below read its text.  */
   r_alloc_inhibit_buffer_relocation (1);
@@ -239,7 +244,7 @@ parse_region (Lisp_Object start, Lisp_Object end, Lisp_Object base_url,
 			 XML_PARSE_NONET|XML_PARSE_NOWARNING|
 			 XML_PARSE_NOBLANKS |XML_PARSE_NOERROR);
 
-#ifdef REL_ALLOC
+#ifdef GMALLOC_REL_ALLOC
   r_alloc_inhibit_buffer_relocation (0);
 #endif
 #ifdef USE_ROPE

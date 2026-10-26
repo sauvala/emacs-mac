@@ -1112,8 +1112,23 @@ frame_parm_handler ns_frame_parm_handlers[] =
   ns_set_appearance,
   ns_set_transparent_titlebar,
 #endif
+<<<<<<< HEAD
   gui_set_minibuffer_position,
   gui_set_mode_line_position,
+=======
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+  NULL,
+>>>>>>> gnu/master
 };
 
 
