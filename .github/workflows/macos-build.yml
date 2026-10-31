@@ -6,9 +6,9 @@ name: macOS build
 # these files, so a merge that changes a shared signature breaks them
 # only at compile time.
 #
-# Pull requests opened or pushed by the sync workflow with GITHUB_TOKEN
-# do not trigger this workflow (GitHub suppresses such events); run it
-# on their branch with workflow_dispatch instead.
+# Branches pushed by the sync workflow with GITHUB_TOKEN do not trigger
+# pull_request or push runs (GitHub suppresses such events), so the sync
+# workflow calls this one directly (workflow_call) with the merged ref.
 
 on:
   pull_request:
@@ -16,21 +16,30 @@ on:
   push:
     branches: [nemesis]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Branch, tag or commit to build.
+        type: string
+        required: true
 
 permissions:
   contents: read
-
-concurrency:
-  group: macos-build-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: macos-latest
     timeout-minutes: 90
+    # Job-level, keyed on the built ref: when this workflow is called,
+    # github.ref is the caller's, which other builds may share.
+    concurrency:
+      group: macos-build-${{ inputs.ref || github.ref }}
+      cancel-in-progress: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Install dependencies
         run: |

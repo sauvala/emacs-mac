@@ -1,5 +1,12 @@
 name: Sync GNU Emacs master
 
+# Merge GNU Emacs master into nemesis once a week.  The merge is pushed to
+# a sync/nemesis-DATE branch first and built on macOS (macos-build.yml);
+# nemesis is updated only when that build passes.  A clean merge then
+# fast-forwards nemesis; a conflicted one is resolved by Claude Code in a
+# pull request, which is merged after the build.  A failed build leaves a
+# draft pull request open for a human.
+
 on:
   schedule:
     # Run weekly on Mondays at 06:00 UTC
@@ -18,7 +25,8 @@ jobs:
     outputs:
       status: ${{ steps.merge.outputs.status }}
       conflicts: ${{ steps.merge.outputs.conflicts }}
-      branch: ${{ steps.create-pr.outputs.branch }}
+      branch: ${{ steps.branch.outputs.branch }}
+      sha: ${{ steps.push-merged.outputs.sha }}
       pr_number: ${{ steps.create-pr.outputs.pr_number }}
     steps:
       - name: Checkout
@@ -33,13 +41,21 @@ jobs:
           git remote add gnu https://git.savannah.gnu.org/git/emacs.git
           git fetch gnu master
 
+      - name: Name the sync branch
+        id: branch
+        run: echo "branch=sync/nemesis-$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
       - name: Attempt merge
         id: merge
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if git merge gnu/master --no-edit -m "Merge GNU Emacs master"; then
-            echo "status=success" >> "$GITHUB_OUTPUT"
+            if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/nemesis)" ]; then
+              echo "status=up-to-date" >> "$GITHUB_OUTPUT"
+            else
+              echo "status=success" >> "$GITHUB_OUTPUT"
+            fi
           else
             # Capture conflicting files before aborting
             CONFLICTS=$(git diff --name-only --diff-filter=U | head -50)
@@ -50,23 +66,22 @@ jobs:
             echo "status=conflict" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Push if merged
+      - name: Push clean merge for the macOS build
+        id: push-merged
         if: steps.merge.outputs.status == 'success'
+        env:
+          BRANCH: ${{ steps.branch.outputs.branch }}
         run: |
-          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/nemesis)" ]; then
-            git push origin nemesis
-          else
-            echo "Already up to date, nothing to push."
-          fi
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Create PR for conflicts
         id: create-pr
         if: steps.merge.outputs.status == 'conflict'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
         run: |
-          BRANCH="sync/nemesis-$(date +%Y%m%d)"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           git checkout -b "$BRANCH"
 
           # Redo the merge, leaving conflict markers in the files
@@ -107,6 +122,7 @@ jobs:
           \`\`\`
 
           Claude Code will attempt to resolve these conflicts automatically.
+          The PR is merged only if the macOS build passes afterwards.
           EOF
           )")
             PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
@@ -117,6 +133,8 @@ jobs:
     needs: sync
     if: needs.sync.outputs.status == 'conflict'
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.push.outputs.sha }}
     steps:
       - name: Checkout conflict branch
         uses: actions/checkout@v4
@@ -144,6 +162,9 @@ jobs:
             - For mac-port specific code (inside #ifdef MAC_OS, HAVE_MACGUI, etc.),
               preserve the mac-port version while integrating any upstream structural changes
             - For files that are purely upstream (no mac-port changes), take the upstream version
+            - Read AGENTS.md, especially "Merge Conflict Resolution" and the
+              "Known conflict" notes: mac-only files and tables can need
+              changes even where git reports no conflict.
             - After resolving, stage and commit the changes
 
             After resolving all conflicts, run: git add -A && git commit -m "Resolve merge conflicts from GNU master sync"
@@ -152,10 +173,83 @@ jobs:
             --max-turns 30
             --allowedTools Bash,Read,Edit,Write,Grep,Glob
 
-      - name: Mark PR ready and merge
+      - name: Check and push the resolution
+        id: push
+        env:
+          BRANCH: ${{ needs.sync.outputs.branch }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            git add -u
+            git commit --no-verify -m "Resolve merge conflicts from GNU master sync"
+          fi
+          git fetch origin nemesis
+          # Conflict markers that the merge added and nothing removed.
+          if git diff origin/nemesis HEAD | grep -nE '^\+(<<<<<<<|>>>>>>>)( |$)'; then
+            echo "::error::Conflict markers remain after resolution."
+            exit 1
+          fi
+          git push origin "HEAD:$BRANCH"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  macos-build:
+    needs: [sync, resolve-conflicts]
+    # Run after a clean merge, or after a resolution that was pushed.
+    if: >-
+      always() &&
+      (needs.sync.outputs.status == 'success' ||
+       (needs.sync.outputs.status == 'conflict' &&
+        needs.resolve-conflicts.result == 'success'))
+    uses: ./.github/workflows/macos-build.yml
+    with:
+      ref: ${{ needs.sync.outputs.status == 'success' && needs.sync.outputs.sha || needs.resolve-conflicts.outputs.sha }}
+
+  finish:
+    needs: [sync, resolve-conflicts, macos-build]
+    if: always() && needs.macos-build.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: nemesis
+          fetch-depth: 0
+
+      - name: Update nemesis after a clean merge
+        if: needs.sync.outputs.status == 'success' && needs.macos-build.result == 'success'
+        env:
+          BRANCH: ${{ needs.sync.outputs.branch }}
+          SHA: ${{ needs.sync.outputs.sha }}
+        run: |
+          # A plain push: it fails rather than overwrite nemesis if
+          # nemesis moved while the build ran.
+          git push origin "$SHA:refs/heads/nemesis"
+          git push origin --delete "$BRANCH"
+
+      - name: Merge the conflict PR
+        if: needs.sync.outputs.status == 'conflict' && needs.macos-build.result == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.sync.outputs.pr_number }}
         run: |
-          PR_NUMBER="${{ needs.sync.outputs.pr_number }}"
-          gh pr ready "$PR_NUMBER" --repo sauvala/emacs-mac
-          gh pr merge "$PR_NUMBER" --repo sauvala/emacs-mac --merge --delete-branch
+          gh pr ready "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --merge --delete-branch
+
+      - name: Report a failed build
+        if: needs.macos-build.result != 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ needs.sync.outputs.branch }}
+          PR_NUMBER: ${{ needs.sync.outputs.pr_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          MSG="The macOS build of this sync did not pass, so nemesis was not updated: $RUN_URL"
+          if [ -n "$PR_NUMBER" ]; then
+            gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "$MSG"
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" \
+              --base nemesis --head "$BRANCH" --draft \
+              --title "Sync GNU Emacs master (macOS build failed)" \
+              --body "$MSG"
+          fi
