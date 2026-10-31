@@ -459,13 +459,6 @@ ALL_CXX_CFLAGS = $(EMACS_CFLAGS) \
 .cc.o:
 	$(AM_V_CXX)$(CXX) -c $(CPPFLAGS) $(ALL_CXX_CFLAGS) $(PROFILING_CFLAGS) $<
 
-## The Metal renderer uses ARC-only bridging casts and relies on ARC for
-## the lifetime of the Objective-C objects it stores in malloc'ed structs,
-## so it needs $(METAL_OBJC_CFLAGS) on top of the usual Objective-C flags.
-macmetal.o: macmetal.m
-	$(AM_V_CC)$(CC) -c $(CPPFLAGS) $(ALL_OBJC_CFLAGS) $(METAL_OBJC_CFLAGS) \
-	  $(PROFILING_CFLAGS) $<
-
 base_obj = dispnew.o frame.o scroll.o xdisp.o menu.o $(XMENU_OBJ) window.o     \
 	charset.o coding.o category.o ccl.o character.o chartab.o bidi.o       \
 	$(CM_OBJ) term.o terminal.o xfaces.o $(XOBJ) $(GTK_OBJ) $(DBUS_OBJ)    \
@@ -523,6 +516,14 @@ ifeq ($(HAVE_NATIVE_COMP):$(NATIVE_DISABLED),yes:)
 all: ../native-lisp
 endif
 .PHONY: all
+
+## The Metal renderer uses ARC-only bridging casts and relies on ARC for
+## the lifetime of the Objective-C objects it stores in malloc'ed structs,
+## so it needs $(METAL_OBJC_CFLAGS) on top of the usual Objective-C flags.
+## This rule must come after 'all', which has to be the default goal.
+macmetal.o: macmetal.m
+	$(AM_V_CC)$(CC) -c $(CPPFLAGS) $(ALL_OBJC_CFLAGS) $(METAL_OBJC_CFLAGS) \
+	  $(PROFILING_CFLAGS) $<
 
 dmpstruct_headers=$(srcdir)/lisp.h $(srcdir)/buffer.h $(srcdir)/itree.h \
 	$(srcdir)/intervals.h $(srcdir)/charset.h $(srcdir)/bignum.h
