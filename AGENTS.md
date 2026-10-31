@@ -333,3 +333,17 @@ mismatch surfaces only as a compile error afterwards.  After every sync, build
 before assuming the merge is done.  Example: upstream `2a5169156b3` dropped the
 `autoload` argument from `access_keymap`, breaking eight mac-port call sites
 that the merge left untouched.
+
+The same holds for tables that must match upstream's: when `frame_parms` in
+`src/frame.c` gains entries, `mac_frame_parm_handlers` in `src/macfns.c`
+needs as many (NULL for read-only parameters), or setting such a parameter
+reads past its end.  Fork parameters go before upstream's read-only
+entries, in the table, `enum x_frame_parameter` and every `*fns.c` handler
+table alike.
+
+### Makefile default goal
+
+`all` must stay the first explicit rule in `src/Makefile.in`.  The top-level
+`src-depending-on-lisp` step runs make in `src` without a target, so an
+object rule placed above `all` (as `macmetal.o` once was) silently becomes
+the default goal, and Emacs and its dump are not refreshed.
