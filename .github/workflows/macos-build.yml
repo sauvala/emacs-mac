@@ -1,0 +1,89 @@
+name: macOS build
+
+# Build the mac port on a GitHub macOS runner, so that changes to the
+# mac-only sources (macterm.c, macfns.c, macappkit.m, macfont.m, ...)
+# are compiled before they reach nemesis.  GNU master merges never flag
+# these files, so a merge that changes a shared signature breaks them
+# only at compile time.
+#
+# Pull requests opened or pushed by the sync workflow with GITHUB_TOKEN
+# do not trigger this workflow (GitHub suppresses such events); run it
+# on their branch with workflow_dispatch instead.
+
+on:
+  pull_request:
+    branches: [nemesis]
+  push:
+    branches: [nemesis]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install autoconf pkgconf texinfo tree-sitter
+          # Homebrew's texinfo is keg-only; configure needs its makeinfo.
+          echo "$(brew --prefix texinfo)/bin" >> "$GITHUB_PATH"
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcrun --show-sdk-version
+          clang --version
+
+      - name: Configure
+        # Enable the experimental fork features too, so that their code
+        # is compiled: rope text storage and Metal rendering.
+        run: |
+          ./autogen.sh
+          CC=clang CFLAGS="-O1 -g" ./configure \
+            --with-tree-sitter --with-rope --with-metal-rendering \
+            --enable-mac-app=yes
+
+      - name: Build
+        run: make -j"$(sysctl -n hw.ncpu)"
+
+      - name: Smoke test
+        run: |
+          src/emacs -Q --batch --eval '
+            (progn
+              (princ (format "%s\n" (emacs-version)))
+              (unless (featurep (quote mac))
+                (kill-emacs 1))
+              ;; Exercise a code path that reads buffer text directly.
+              (when (and (fboundp (quote libxml-available-p))
+                         (libxml-available-p))
+                (with-temp-buffer
+                  (insert "<a><b>x</b></a>")
+                  (unless (equal (libxml-parse-xml-region
+                                  (point-min) (point-max))
+                                 (quote (a nil (b nil "x"))))
+                    (kill-emacs 2)))))'
+
+      - name: Standalone checks
+        run: |
+          sh test/manual/rope/check.sh
+          python3 test/manual/wrap-cache/check.py
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build-logs
+          path: |
+            config.log
+            src/config.h
+          if-no-files-found: ignore
