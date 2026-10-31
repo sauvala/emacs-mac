@@ -1015,6 +1015,19 @@ frame_parm_handler pgtk_frame_parm_handlers[] =
     NULL,
     gui_set_minibuffer_position,
     gui_set_mode_line_position,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
   };
 
 

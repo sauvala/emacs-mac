@@ -511,7 +511,7 @@ struct dump_context
   Lisp_Object old_post_gc_hook;
   Lisp_Object old_process_environment;
 
-#ifdef REL_ALLOC
+#ifdef GMALLOC_REL_ALLOC
   bool blocked_ralloc;
 #endif
 
@@ -2592,13 +2592,14 @@ dump_vectorlike_generic (struct dump_context *ctx,
 }
 
 /* Return a vector of KEY, VALUE pairs in the given hash table H.
-   No room for growth is included.  */
+   Do not leave room for growth.
+   If there are no pairs, return a null pointer.  */
 static Lisp_Object *
 hash_table_contents (struct Lisp_Hash_Table *h)
 {
   ptrdiff_t size = h->count;
-  Lisp_Object *key_and_value = hash_table_alloc_bytes (2 * size
-						       * sizeof *key_and_value);
+  Lisp_Object *key_and_value
+    = size ? hash_table_alloc_bytes (2 * size * sizeof *key_and_value) : NULL;
   ptrdiff_t n = 0;
 
   DOHASH (h, k, v)
@@ -3705,7 +3706,7 @@ dump_unwind_cleanup (void *data)
   struct dump_context *ctx = data;
   if (ctx->fd >= 0)
     emacs_close (ctx->fd);
-#ifdef REL_ALLOC
+#ifdef GMALLOC_REL_ALLOC
   if (ctx->blocked_ralloc)
     r_alloc_inhibit_buffer_relocation (0);
 #endif
@@ -4188,7 +4189,7 @@ types.  */)
   record_unwind_protect_ptr (dump_unwind_cleanup, ctx);
   block_input ();
 
-#ifdef REL_ALLOC
+#ifdef GMALLOC_REL_ALLOC
   r_alloc_inhibit_buffer_relocation (1);
   ctx->blocked_ralloc = true;
 #endif
