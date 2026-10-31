@@ -324,6 +324,12 @@ grammar hang.
 
 `.github/workflows/sync-gnu-master-to-nemesis.yml` — weekly sync of GNU master into `nemesis` branch. On conflict, creates a draft PR and uses Claude Code action (Opus) to auto-resolve, then merges.
 
+`.github/workflows/macos-build.yml` — builds the mac port (with rope,
+Metal rendering and tree-sitter) on a GitHub macOS runner for pull
+requests into and pushes to `nemesis`, then runs a batch smoke test and
+the rope and wrap-cache checks.  Branches pushed with `GITHUB_TOKEN`,
+such as the sync workflow's, do not trigger it; use `workflow_dispatch`.
+
 ### Known conflict: upstream removals of function arguments
 
 Mac-only files (`src/macterm.c`, `src/macappkit.m`, `src/macselect.c`,
