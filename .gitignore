@@ -181,8 +181,11 @@ src/gl-stamp
 *.core
 *.elc
 *.eln
+*.i
 *.o
 *.res
+*.s
+!/exec/*.s
 *.so
 *.dylib
 core
@@ -331,6 +334,7 @@ gnustmp*
 *.diff
 *.orig
 *.patch
+*.rej
 *.swp
 *~
 \#*\#

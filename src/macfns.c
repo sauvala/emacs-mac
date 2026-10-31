@@ -5280,6 +5280,18 @@ frame_parm_handler mac_frame_parm_handlers[] =
   mac_set_transparent_titlebar,
   gui_set_minibuffer_position,
   gui_set_mode_line_position,
+  NULL,	/* display */
+  NULL,	/* left */
+  NULL,	/* top */
+  NULL,	/* width */
+  NULL,	/* height */
+  NULL,	/* parent-id */
+  NULL,	/* window-id */
+  NULL,	/* outer-window-id */
+  NULL,	/* explicit-name */
+  NULL,	/* modeline */
+  NULL,	/* buffer-list */
+  NULL,	/* buried-buffer-list */
 };
 
 void

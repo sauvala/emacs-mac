@@ -80,8 +80,10 @@ handles the corresponding kind of display.")
     "fullscreen" "fullscreen-restore" "height" "horizontal-scroll-bars"
     "icon-left" "icon-name" "icon-top" "icon-type"
     "inhibit-double-buffering" "internal-border-width" "keep-ratio"
-    "left" "left-fringe" "line-spacing" "menu-bar-lines" "min-height"
-    "min-width" "minibuffer" "minibuffer-exit" "mouse-color"
+    "left" "left-fringe" "line-spacing" "mac-transparent-titlebar"
+    "menu-bar-lines" "min-height" "min-width" "minibuffer"
+    "minibuffer-exit" "minibuffer-position" "mode-line-position"
+    "mouse-color"
     "mouse-wheel-frame" "name" "no-accept-focus" "no-focus-on-map"
     "no-other-frame" "no-special-glyphs" "ns-appearance"
     "ns-transparent-titlebar" "outer-window-id" "override-redirect"
@@ -89,7 +91,7 @@ handles the corresponding kind of display.")
     "scroll-bar-background" "scroll-bar-foreground" "scroll-bar-height"
     "scroll-bar-width" "shaded" "skip-taskbar" "snap-width" "sticky"
     "tab-bar-lines" "title" "tool-bar-lines" "tool-bar-position" "top"
-    "top-visible" "tty-color-mode" "undecorated" "unspittable"
+    "top-visible" "tty-color-mode" "undecorated" "unsplittable"
     "use-frame-synchronization" "user-position" "user-size"
     "vertical-scroll-bars" "visibility" "wait-for-wm" "width" "z-group")
   "List of special frame parameters that makes sense to customize.")
@@ -114,6 +116,9 @@ handles the corresponding kind of display.")
                        '("nil" "left" "right"))
                       ((eq parameter 'tool-bar-position)
                        '("top" "bottom" "left" "right"))
+                      ((memq parameter '(minibuffer-position
+                                         mode-line-position))
+                       '("top" "bottom"))
                       ((eq parameter 'minibuffer)
                        '("t" "nil" "only"))
                       ((eq parameter 'minibuffer-exit)

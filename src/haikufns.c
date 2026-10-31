@@ -3201,6 +3201,19 @@ frame_parm_handler haiku_frame_parm_handlers[] =
     haiku_set_use_frame_synchronization,
     gui_set_minibuffer_position,
     gui_set_mode_line_position,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
   };
 
 void
