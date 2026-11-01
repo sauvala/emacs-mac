@@ -322,13 +322,19 @@ grammar hang.
 
 ## CI/CD
 
-`.github/workflows/sync-gnu-master-to-nemesis.yml` — weekly sync of GNU master into `nemesis` branch. On conflict, creates a draft PR and uses Claude Code action (Opus) to auto-resolve, then merges.
+`.github/workflows/sync-gnu-master-to-nemesis.yml` — weekly sync of GNU
+master into `nemesis`.  The merge goes to a `sync/nemesis-DATE` branch and
+must pass the macOS build before `nemesis` changes: a clean merge then
+fast-forwards `nemesis`; on conflict, Claude Code (Opus) resolves them in a
+draft PR, which is merged after the build.  A failed build leaves a draft PR
+(or a comment on the conflict PR) for a human.
 
 `.github/workflows/macos-build.yml` — builds the mac port (with rope,
-Metal rendering and tree-sitter) on a GitHub macOS runner for pull
-requests into and pushes to `nemesis`, then runs a batch smoke test and
-the rope and wrap-cache checks.  Branches pushed with `GITHUB_TOKEN`,
-such as the sync workflow's, do not trigger it; use `workflow_dispatch`.
+Metal rendering and tree-sitter) on a GitHub macOS runner, then runs a
+batch smoke test and the rope and wrap-cache checks.  It runs for pull
+requests into and pushes to `nemesis`, and the sync workflow calls it
+(`workflow_call` with a `ref`), because branches pushed with
+`GITHUB_TOKEN` trigger no workflows.
 
 ### Known conflict: upstream removals of function arguments
 
