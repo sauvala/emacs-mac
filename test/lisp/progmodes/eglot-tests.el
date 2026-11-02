@@ -657,7 +657,7 @@ directory hierarchy."
         (eglot--find-file-noselect "rename-project/main.c")
       (eglot--tests-connect)
       (goto-char (point-min)) (search-forward "foo")
-      (eglot-rename "bar")
+      (refactor-rename "bar" 'eglot)
       (should (equal (buffer-string)
                      "int bar() {return 42;} int main() {return bar();}")))))
 

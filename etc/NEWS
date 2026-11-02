@@ -24,6 +24,11 @@ applies, and please also update docstrings as needed.
 
 * Installation Changes in Emacs 32.1
 
+** Changed startup options for 'emacsclient' in "emacsclient.desktop".
+The '--display=$DISPLAY' command-line option is replaced with
+'--reuse-frame' in the 'emacsclient' command-line options, to make
+it compatible with both X11 and Wayland.
+
 
 * Startup Changes in Emacs 32.1
 
@@ -1304,6 +1309,19 @@ behavior.
 If this variable is nil, 'tty-cursor-movement-use-TAB-BS' has no effect,
 and Emacs will never use TABs for any cursor-movement sequences.
 
++++
+** New support for the Kitty Keyboard Protocol.
+If your terminal emulator supports the Kitty Keyboard Protocol,
+text-mode frames now make use of it for keyboard input.
+This means that key chords which previously worked only in graphical
+frames now also work in text-mode frames.  For example, the Kitty
+Keyboard Protocol makes it possible for Emacs to distinguish typing
+"RET" and "C-RET", so now it is possible to bind different commands to
+"RET" and "C-RET" in text-mode frames and have both work.
+If your terminal emulator's support for the Kitty Keyboard Protocol is
+buggy, you can customize 'tty-use-kitty-kbd-proto' to nil to disable
+this feature.
+
 ---
 ** File- and directory-local variables respect user option setters.
 Values of variables that are user options mentioned in file-local
@@ -1753,6 +1771,13 @@ This avoids losing the buffer history for each frame, and in particular,
 'M-n' and 'M-p' at the 'C-x b' prompt will now suggest recent buffers of
 the frame after restoring a session.
 
+** Calc
+
+---
+*** New mass unit 'stone'.
+Stone, which is equivalent to 14 lb or 6.35 kg, is used to measure body
+weight in the United Kingdom and Ireland.
+
 
 * New Modes and Packages in Emacs 32.1
 
@@ -1781,6 +1806,16 @@ This library provides useful code for handling Universally Unique
 Identifiers (UUIDs).  It provides methods for generating UUIDs, parsing
 them, and outputting them as a string, a unibyte binary string, or as a
 number.
+
++++
+** New library 'refactor'.
+This library provides a language-agnostic interface for performing
+refactoring actions such as renaming identifiers, extracting and
+inlining functions, and fixing diagnostics.  Its commands include
+'M-x refactor' and 'M-x refactor-rename'.  The actual actions are
+supplied by Refactor backends defined by major modes and packages.
+Refactor was extracted from Eglot, which is its main user and backend.
+The library is also available as a GNU ELPA package.
 
 
 * Incompatible Lisp Changes in Emacs 32.1
