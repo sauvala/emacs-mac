@@ -2087,7 +2087,7 @@ a buffer or a string.  But this is deprecated.  */)
   if (!b)
     {
       Lisp_Object workbuf
-	= code_conversion_save (true, STRING_MULTIBYTE (source));
+	= code_conversion_save (STRING_MULTIBYTE (source));
       b = XBUFFER (workbuf);
       set_buffer_internal (b);
       CALLN (Finsert, source);

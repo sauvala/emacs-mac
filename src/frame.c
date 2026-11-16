@@ -3647,23 +3647,24 @@ for how to proceed.  */)
   return Qnil;
 }
 
-DEFUN ("frame-visible-p", Fframe_visible_p, Sframe_visible_p,
-       1, 1, 0,
+/* Return t if frame F is "visible", 'icon' if F is iconified, nil
+   otherwise.  */
+static Lisp_Object
+frame_visible_p (struct frame *f)
+{
+  return FRAME_VISIBLE_P (f) ? Qt : FRAME_ICONIFIED_P (f) ? Qicon : Qnil;
+}
+
+DEFUN ("frame-visible-p", Fframe_visible_p, Sframe_visible_p, 0, 1, 0,
        doc: /* Return t if FRAME is \"visible\" (actually in use for display).
+FRAME must specify a live frame and defaults to the selected one.
 Return the symbol `icon' if FRAME is iconified or \"minimized\".
 Return nil if FRAME was made invisible, via `make-frame-invisible'.
 On graphical displays, invisible frames are not updated and are
 usually not displayed at all, even in a window system's \"taskbar\".  */)
   (Lisp_Object frame)
 {
-  CHECK_LIVE_FRAME (frame);
-  struct frame *f = XFRAME (frame);
-
-  if (FRAME_VISIBLE_P (f))
-    return Qt;
-  if (FRAME_ICONIFIED_P (f))
-    return Qicon;
-  return Qnil;
+  return frame_visible_p (decode_live_frame (frame));
 }
 
 DEFUN ("visible-frame-list", Fvisible_frame_list, Svisible_frame_list,
@@ -4085,7 +4086,7 @@ store_frame_param (struct frame *f, Lisp_Object prop, Lisp_Object val)
     }
 }
 
-/* Return color matches UNSPEC on frame F or nil if UNSPEC
+/* Return color matching UNSPEC on frame F or UNSPEC if UNSPEC
    is not an unspecified foreground or background color.  */
 
 static Lisp_Object
@@ -4094,7 +4095,7 @@ frame_unspecified_color (struct frame *f, Lisp_Object unspec)
   return (!strncmp (SSDATA (unspec), unspecified_bg, SBYTES (unspec))
 	  ? tty_color_name (f, FRAME_BACKGROUND_PIXEL (f))
 	  : (!strncmp (SSDATA (unspec), unspecified_fg, SBYTES (unspec))
-	     ? tty_color_name (f, FRAME_FOREGROUND_PIXEL (f)) : Qnil));
+	     ? tty_color_name (f, FRAME_FOREGROUND_PIXEL (f)) : unspec));
 }
 
 /* Connect the frame-parameter names for frames to the ways of passing
@@ -4296,26 +4297,11 @@ frame_get_param_value (struct frame *f, Lisp_Object parameter)
 	case NAME:
 	  return f->name;
 	case WIDTH:
-	  /* It's questionable whether here we should report the value
-	     of f->new_width (and f->new_height below) but we've done
-	     that in the past, so let's keep it.  Note that a value of
-	     -1 for either of these means that no new size was
-	     requested.  But check f->new_size before to make sure that
-	     f->new_width and f->new_height are not ones requested by
-	     adjust_frame_size.  */
-	  {
-	    int width = ((f->new_size_p && f->new_width >= 0)
-			 ? f->new_width / FRAME_COLUMN_WIDTH (f)
-			 : FRAME_COLS(f));
-	    return make_fixnum (width);
-	  }
+	  /* Same code as Fframe_text_cols.  */
+	  return make_fixnum (FRAME_COLS (f));
 	case HEIGHT:
-	  {
-	    int height = ((f->new_size_p && f->new_height >= 0)
-			  ? f->new_height / FRAME_LINE_HEIGHT (f)
-			  : FRAME_LINES (f));
-	    return make_fixnum (height);
-	  }
+	  /* Same code as Fframe_text_lines.  */
+	  return make_fixnum (FRAME_LINES (f));
 	case MODELINE:
 	  return (FRAME_WANTS_MODELINE_P (f) ? Qt : Qnil);
 	case UNSPLITTABLE:
@@ -4325,12 +4311,7 @@ frame_get_param_value (struct frame *f, Lisp_Object parameter)
 	case BURIED_BUFFER_LIST:
 	  return f->buried_buffer_list;
 	case VISIBILITY:
-	  if (FRAME_WINDOW_P (f))
-	    return (FRAME_VISIBLE_P (f)
-		    ? Qt
-		    : (FRAME_ICONIFIED_P (f) ? Qicon : Qnil));
-	  else
-	    return (FRAME_VISIBLE_P (f) ? Qt : Qnil);
+	  return frame_visible_p (f);
 
 	  /* Convert graphic frame parameters.  */
 #ifdef HAVE_WINDOW_SYSTEM
@@ -4342,7 +4323,7 @@ frame_get_param_value (struct frame *f, Lisp_Object parameter)
 	    return make_fixnum (0);
 	  break;
 
-	  /* From the prior gui_report_frame_params  */
+	  /* From the prior gui_report_frame_params.  */
 	  /* I think this should be done with a hook.  */
 	case LEFT:
 	  if (FRAME_WINDOW_P (f))
@@ -4420,7 +4401,7 @@ frame_get_param_value (struct frame *f, Lisp_Object parameter)
 	  if (FRAME_WINDOW_P (f))
 	    {
 #ifdef USE_X_TOOLKIT
-	     /* Tooltip frame may not have this widget.  */
+	     /* Tooltip frames may not have this widget.  */
 	     if (FRAME_X_OUTPUT (f)->widget)
 #endif /* USE_X_TOOLKIT */
 	     return make_formatted_string
@@ -4452,6 +4433,7 @@ frame_get_param_value (struct frame *f, Lisp_Object parameter)
 	  if (FRAME_WINDOW_P (f))
 	    return FRAME_TOOL_BAR_POSITION (f);
 	  break;
+<<<<<<< HEAD
 	case MINIBUFFER_POSITION:
 	  if (FRAME_WINDOW_P (f))
 	    return FRAME_MINIBUFFER_POSITION (f);
@@ -4461,6 +4443,9 @@ frame_get_param_value (struct frame *f, Lisp_Object parameter)
 	    return FRAME_MODE_LINE_POSITION (f);
 	  break;
 	  /* End from the prior gui_report_frame_params  */
+=======
+	  /* End of the prior gui_report_frame_params.  */
+>>>>>>> gnu/master
 #endif /* HAVE_WINDOW_SYSTEM */
 
 	  /* Convert non-graphic frame parameters.  */
