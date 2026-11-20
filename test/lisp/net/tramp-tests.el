@@ -82,7 +82,6 @@
 (declare-function tramp-method-out-of-band-p "tramp-sh")
 (declare-function tramp-smb-get-localname "tramp-smb")
 (defvar ange-ftp-make-backup-files)
-(defvar auto-revert-notify-watch-descriptor)
 (defvar auto-revert-remote-files)
 (defvar auto-revert-use-notify)
 (defvar comp-warn-primitives)
@@ -2746,13 +2745,9 @@ This checks also `file-name-as-directory', `file-name-directory',
 	  (delete-file tmp-name 'trash)
 	  (should-not (file-exists-p tmp-name))
 	  (should
-	   (or (file-exists-p
-		(expand-file-name
-		 (file-name-nondirectory tmp-name) trash-directory))
-	       ;; Gdrive.
-	       (file-symlink-p
-		(expand-file-name
-		 (file-name-nondirectory tmp-name) trash-directory))))
+	   (file-exists-p
+	    (expand-file-name
+	     (file-name-nondirectory tmp-name) trash-directory)))
 	  (delete-directory trash-directory 'recursive)
 	  (should-not (file-exists-p trash-directory))))
 
@@ -3403,15 +3398,16 @@ This tests also `file-directory-p' and `file-accessible-directory-p'."
     (let* ((tmp-name1 (tramp--test-make-temp-name nil quoted))
 	   (tmp-name2 (expand-file-name "foo" tmp-name1)))
       ;; Deleting a non-existing file should not fail.
-      (delete-file tmp-name1)
-      (delete-file tmp-name1 'trash)
+      (unless (tramp--test-ange-ftp-p)
+	(delete-file tmp-name1)
+	(delete-file tmp-name1 'trash))
       ;; Deleting a non-existing directory should fail.
       (should-error
        (delete-directory tmp-name1)
-       :type 'file-missing)
+       :type (if (tramp--test-ange-ftp-p) 'error 'file-missing))
       (should-error
        (delete-directory tmp-name1 nil 'trash)
-       :type 'file-missing)
+       :type (if (tramp--test-ange-ftp-p) 'error 'file-missing))
       ;; Delete empty directory.
       (make-directory tmp-name1)
       (should (file-directory-p tmp-name1))
@@ -3436,7 +3432,7 @@ This tests also `file-directory-p' and `file-accessible-directory-p'."
       ;; `system-move-file-to-trash' is defined (on MS Windows and
       ;; macOS), for encrypted remote directories and for ange-ftp.
       (when (and (not (fboundp 'system-move-file-to-trash))
-		 (not (tramp--test-crypt-p)) (not (tramp--test-ftp-p)))
+		 (not (tramp--test-crypt-p)) (not (tramp--test-ange-ftp-p)))
 	(let ((trash-directory (tramp--test-make-temp-name 'local quoted))
 	      (delete-by-moving-to-trash t))
 	  (make-directory trash-directory)
@@ -3993,9 +3989,10 @@ This tests also `access-file', `file-readable-p',
 	    (write-region "foo" nil tmp-name1)
 	    ;; `access-file' returns nil in case of success.
 	    (should-not (access-file tmp-name1 "error"))
-	    ;; `access-file' could use a timeout.  tramp-rpc.el
+	    ;; `access-file' could use a timeout.  ange-ftp.el doesn't
+	    ;; know `remote-file-name-access-timeout'.  tramp-rpc.el
 	    ;; doesn't use `file-exists-p' in its implementation.
-	    (unless (tramp--test-rpc-p)
+	    (unless (or (tramp--test-ange-ftp-p) (tramp--test-rpc-p))
 	      (let ((remote-file-name-access-timeout 1)
 		    comp-warn-primitives)
 		(cl-letf (((symbol-function #'file-exists-p)
@@ -6098,7 +6095,8 @@ If UNSTABLE is non-nil, the test is tagged as `:unstable'."
 					"Cannot find path"))
 				 (buffer-string)))
 		      (when-let* ((p (or (get-buffer-process stderr)
-					 auto-revert-notify-watch-descriptor))
+					 (bound-and-true-p
+					  auto-revert-notify-watch-descriptor)))
 				  ((processp p)))
 			(while (accept-process-output p 0 nil t)))))
 		  (delete-process proc)
@@ -7397,22 +7395,24 @@ Check also tilde and environment variable expansion."
 	(tramp-cleanup-connection tramp-test-vec 'keep-debug 'keep-password))
 
       ;; Check connection-local `make-backup-files'.
-      (let ((clpa connection-local-profile-alist)
-	    (clca connection-local-criteria-alist))
-	(connection-local-set-profile-variables
-	 'no-remote-backup-files '((make-backup-files . nil)))
-	(connection-local-set-profiles
-	 `(:application tramp
-	   :protocol ,(file-remote-p default-directory 'method)
-	   :user ,(file-remote-p default-directory 'user)
-	   :machine ,(file-remote-p default-directory 'host))
-	 'no-remote-backup-files)
+      ;; Ange-FTP doesn't care.
+      (unless (tramp--test-ange-ftp-p)
+	(let ((clpa connection-local-profile-alist)
+	      (clca connection-local-criteria-alist))
+	  (connection-local-set-profile-variables
+	   'no-remote-backup-files '((make-backup-files . nil)))
+	  (connection-local-set-profiles
+	   `(:application tramp
+	     :protocol ,(file-remote-p default-directory 'method)
+	     :user ,(file-remote-p default-directory 'user)
+	     :machine ,(file-remote-p default-directory 'host))
+	   'no-remote-backup-files)
 
-	(should-not (find-backup-file-name tmp-name1))
+	  (should-not (find-backup-file-name tmp-name1))
 
-	(custom-set-variables
-	 `(connection-local-profile-alist ',clpa now)
-	 `(connection-local-criteria-alist ',clca now))))))
+	  (custom-set-variables
+	   `(connection-local-profile-alist ',clpa now)
+	   `(connection-local-criteria-alist ',clca now)))))))
 
 (ert-deftest tramp-test39-make-lock-file-name ()
   "Check `make-lock-file-name', `lock-file', `unlock-file' and `file-locked-p'."
@@ -7749,11 +7749,6 @@ This does not support globbing characters in file names (yet)."
   "Check, whether an FUSE file system isused."
   (or (tramp--test-rclone-p) (tramp--test-sshfs-p)))
 
-(defun tramp--test-gdrive-p ()
-  "Check, whether the gdrive method is used."
-  (string-equal
-   "gdrive" (file-remote-p ert-remote-temporary-file-directory 'method)))
-
 (defun tramp--test-gvfs-p (&optional method)
   "Check, whether the remote host runs a GVFS based method.
 This requires restrictions of file name syntax.
@@ -7880,8 +7875,7 @@ Additionally, ls does not support \"--dired\"."
 (defun tramp--test-share-p ()
   "Check, whether the method needs a share."
   (and (tramp--test-gvfs-p)
-       (string-match-p
-	(rx bol (| "afp" (: "dav" (? "s")) "smb") eol)
+       (string-match-p (rx bol (| (: "dav" (? "s")) "smb") eol)
 	(file-remote-p ert-remote-temporary-file-directory 'method))))
 
 (defun tramp--test-sshfs-p ()
@@ -8252,7 +8246,6 @@ This requires restrictions of file name syntax."
   (skip-unless (not (tramp--test-scp-p)))
   (skip-unless (not (tramp--test-windows-nt-and-out-of-band-p)))
   (skip-unless (not (tramp--test-ksh-p)))
-  (skip-unless (not (tramp--test-gdrive-p)))
   (skip-unless (not (tramp--test-crypt-p)))
   (skip-unless (not (tramp--test-rclone-p)))
   ;; We do not run on macOS due to encoding problems.  See Bug#36940.
@@ -9386,22 +9379,18 @@ process sentinels.  They shall not disturb each other."
   "Check that Tramp and its subpackages unload completely.
 Since it unloads Tramp, it shall be the last test to run."
   :tags '(:expensive-test)
-  ;; We have autoloaded objects from tramp.el and tramp-archive.el.
-  ;; In order to remove them, we first need to load both packages.
+  ;; We have autoloaded objects from tramp.el.  In order to remove
+  ;; them, we first need to load it.
   (require 'tramp)
-  (require 'tramp-archive)
   (should (featurep 'tramp))
-  (should (featurep 'tramp-archive))
-  ;; This unloads also tramp-archive.el and tramp-theme.el if needed.
+  ;; This unloads also tramp-rpc.el tramp-theme.el if needed.
   (unload-feature 'tramp 'force)
 
   ;; No Tramp feature must be left except the test packages.
   (should-not (featurep 'tramp))
-  (should-not (featurep 'tramp-archive))
+  (should-not (featurep 'tramp-rpc))
   (should-not (featurep 'tramp-theme))
-  (should-not
-   (all-completions
-    "tramp" (delq 'tramp-tests (delq 'tramp-archive-tests features))))
+  (should-not (all-completions "tramp" (delq 'tramp-tests features)))
 
   ;; `file-name-handler-alist' must be clean.
   (should-not (all-completions "tramp" (mapcar #'cdr file-name-handler-alist)))
@@ -9457,9 +9446,7 @@ Since it unloads Tramp, it shall be the last test to run."
 
   ;; Reload.
   (require 'tramp)
-  (require 'tramp-archive)
   (should (featurep 'tramp))
-  (should (featurep 'tramp-archive))
 
   ;; Disabled further tests.
   (setq tramp--test-enabled-checked '(t)))

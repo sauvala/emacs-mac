@@ -212,9 +212,11 @@ of master file."
                       (let ((syntax (save-match-data (syntax-ppss))))
                         (or
                          ;; This is for AUCTeX `LaTeX-mode':
-                         (nth 3 syntax)
+                         (and (derived-mode-p 'LaTeX-mode)
+                              (nth 3 syntax))
                          ;; This is for built-in `latex-mode':
-                         (nth 4 syntax))))))
+                         (and (derived-mode-p 'latex-mode)
+                              (nth 4 syntax)))))))
 
     (catch 'exit
       (setq file-found (reftex-locate-file file "tex" master-dir))
@@ -476,7 +478,12 @@ place!"
                     (save-match-data (funcall level-exp))
                   level-exp))
          (star (= ?* (char-after (match-end 3))))
-         (unnumbered (or star (< level 0)))
+         (unnumbered (or star
+                         (< level 0)
+                         ;; Cater for "addpart" from KOMA-Script which
+                         ;; has a 0 level in `reftex-section-levels' but
+                         ;; never produces a number:
+                         (equal macro "addpart")))
          (level (abs level))
          (section-number (reftex-section-number level unnumbered))
          (text1 (save-match-data
