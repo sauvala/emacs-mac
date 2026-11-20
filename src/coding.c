@@ -8210,7 +8210,7 @@ decode_coding_object (struct coding_system *coding,
     {
       coding->dst_multibyte
 	= !NILP (BVAR (XBUFFER (dst_object), enable_multibyte_characters));
-      coding->dst_object = code_conversion_save (1, coding->dst_multibyte);
+      coding->dst_object = code_conversion_save (coding->dst_multibyte);
       coding->dst_pos = BEG;
       coding->dst_pos_byte = BEG_BYTE;
       rope_decode_redirect = true;

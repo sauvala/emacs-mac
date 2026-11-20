@@ -3453,7 +3453,7 @@ dump_cold_buffer (struct dump_context *ctx, Lisp_Object data)
       linear[text_bytes] = 0;
       dump_remember_fixup_ptr_raw
 	(ctx,
-	 buffer_offset + dump_offsetof (struct buffer, own_text.beg),
+	 buffer_offset, offsetof (struct buffer, own_text.beg),
 	 ctx->offset);
       dump_write (ctx, linear, ptrdiff_t_to_dump_off (nbytes));
       xfree (linear);
